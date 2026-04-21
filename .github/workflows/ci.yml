@@ -2,9 +2,8 @@ name: CI
 
 on:
   push:
-    branches: [main]
-  pull_request:
-    branches: [main]
+    branches: ["**"]  # any branch
+  pull_request:       # any PR target
   workflow_dispatch: {}
 
 jobs:
