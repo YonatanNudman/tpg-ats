@@ -9,7 +9,7 @@ Interim applicant tracking system for The Pipeline Group, built as a Google Apps
 | Frontend | HTML + Alpine.js + Bootstrap 5 + Chart.js + SortableJS (single-page, inline-edit UX) |
 | Backend | Google Apps Script (V8 runtime), bundled from TypeScript with esbuild |
 | Data | Google Sheets (8 tabs: candidates, jobs, history, stages, sources, regions, recruiters, refuse_reasons) |
-| Tests | Jest + ts-jest (117 unit tests — pure business logic, mocked `ISheetDB`) |
+| Tests | Jest + ts-jest (117 unit tests — pure business logic, mocked `ISheetDB`); Playwright cloud QA (36 click-through checks, see `qa/QA-REPORT.md`) |
 | Deploy | Clasp (`clasp push` + `clasp deploy`) |
 | Concurrency | `LockService.getScriptLock()` wraps all writes; 15s client-side sync poll via `getSyncFingerprint` |
 
@@ -47,6 +47,14 @@ npm install
 
 # Run unit tests (117 tests)
 npm test
+
+# Run the cloud QA suite — spins up a local express harness with an
+# in-memory ISheetDB, runs the same Helpers/Analytics code the GAS deploy
+# uses, drives Chromium through 36 click-through checks, writes
+# qa/QA-REPORT.md + qa/screenshots/. Requires a one-time:
+#   npx playwright install chromium
+npm run qa:server &      # serves the app on http://localhost:4567
+npm run qa               # runs the Playwright check suite
 
 # Build bundle (TS → dist/Code.js + copies frontend/ + appsscript.json)
 node build.js
