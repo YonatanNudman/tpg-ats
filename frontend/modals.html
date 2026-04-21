@@ -256,7 +256,7 @@ document.addEventListener('alpine:init', function () {
           });
           this.$store.app.toastSuccess('Candidate added.');
           this.$store.app.closeModal();
-          var root = document.querySelector('#app').__x.$data;
+          var root = Alpine.$data(document.querySelector('#app'));
           if (root) await root.reloadAll();
         } catch (e) {
           this.$store.app.toastError('Could not add: ' + e.message);
@@ -322,7 +322,7 @@ document.addEventListener('alpine:init', function () {
             this.$store.app.toastSuccess('Job created.');
           }
           this.$store.app.closeModal();
-          var root = document.querySelector('#app').__x.$data;
+          var root = Alpine.$data(document.querySelector('#app'));
           if (root) {
             root.jobs = await gasCall('getJobOpenings');
             await root.loadCandidates();

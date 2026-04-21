@@ -556,20 +556,9 @@ document.addEventListener('alpine:init', function () {
       editMotion: 'Inbound', editKanban: 'Normal', editPostHire: '', editNotes: '',
 
       init: function () {
-        var c = this.$store.app.peek.candidate;
-        if (!c) return;
-        this.editStageId    = c.stage_id;
-        this.editRecruiterId = c.recruiter_id == null ? '' : String(c.recruiter_id);
-        this.editSourceId   = c.source_id == null ? '' : String(c.source_id);
-        this.editRegionId   = c.region_id == null ? '' : String(c.region_id);
-        this.editMotion     = c.motion || 'Inbound';
-        this.editKanban     = c.kanban_state || 'Normal';
-        this.editPostHire   = c.post_hire_status || '';
-        this.editNotes      = c.notes || '';
-
-        // Re-init when candidate changes (e.g. after stage save)
         var self = this;
-        this.$watch('$store.app.peek.candidate', function (c) {
+
+        function syncFromCandidate(c) {
           if (!c) return;
           self.editStageId    = c.stage_id;
           self.editRecruiterId = c.recruiter_id == null ? '' : String(c.recruiter_id);
@@ -579,7 +568,18 @@ document.addEventListener('alpine:init', function () {
           self.editKanban     = c.kanban_state || 'Normal';
           self.editPostHire   = c.post_hire_status || '';
           self.editNotes      = c.notes || '';
-        });
+        }
+
+        // Always set up the watcher first — when openPeek() is in flight,
+        // peek.candidate is null at mount time, so a guarded init that bailed
+        // here used to skip setting up the watch entirely. Result: editStageId
+        // stayed at 0, the <select x-model="editStageId"> rendered "Applied"
+        // (the first option), and Advance/Save persisted the wrong stage.
+        this.$watch('$store.app.peek.candidate', syncFromCandidate);
+
+        // Cover the case where candidate is already loaded by mount (e.g. open
+        // a second candidate while peek is still mounted from the first one).
+        syncFromCandidate(this.$store.app.peek.candidate);
       },
 
       peekName: function () {
@@ -596,7 +596,7 @@ document.addEventListener('alpine:init', function () {
           this.$store.app.peek.candidate = r.candidate;
           this.$store.app.peek.history = r.history;
           // Also update the main list
-          var root = document.querySelector('#app').__x.$data;
+          var root = Alpine.$data(document.querySelector('#app'));
           if (root && root.refreshCandidate) await root.refreshCandidate(id);
           this.$store.app.toastSuccess('Stage updated.');
         } catch (e) {
@@ -622,7 +622,7 @@ document.addEventListener('alpine:init', function () {
           await gasCall('updateCandidate', id, updates);
           var r = await gasCall('getCandidateDetail', id);
           this.$store.app.peek.candidate = r.candidate;
-          var root = document.querySelector('#app').__x.$data;
+          var root = Alpine.$data(document.querySelector('#app'));
           if (root && root.refreshCandidate) await root.refreshCandidate(id);
           this.$store.app.toastSuccess('Saved.');
         } catch (e) {
@@ -650,7 +650,7 @@ document.addEventListener('alpine:init', function () {
         if (isNaN(rid)) { self.$store.app.toastError('Invalid reason ID.'); return; }
         gasCall('rejectCandidate', self.$store.app.peek.candidateId, rid).then(function () {
           self.$store.app.toastSuccess('Candidate rejected.');
-          var root = document.querySelector('#app').__x.$data;
+          var root = Alpine.$data(document.querySelector('#app'));
           if (root) root.reloadAll();
           self.$store.app.closePeek();
         }).catch(function (e) { self.$store.app.toastError('Reject failed: ' + e.message); });
@@ -662,7 +662,7 @@ document.addEventListener('alpine:init', function () {
         try {
           await gasCall('deleteCandidate', id);
           this.$store.app.toastSuccess('Candidate deleted.');
-          var root = document.querySelector('#app').__x.$data;
+          var root = Alpine.$data(document.querySelector('#app'));
           if (root) root.reloadAll();
           this.$store.app.closePeek();
         } catch (e) {
@@ -744,7 +744,7 @@ document.addEventListener('alpine:init', function () {
           };
           this.reload(kind);
           // Notify main app to refresh
-          var root = document.querySelector('#app').__x.$data;
+          var root = Alpine.$data(document.querySelector('#app'));
           if (root) {
             root.settings = self.$store.app.settings;
             root.loadCandidates();
