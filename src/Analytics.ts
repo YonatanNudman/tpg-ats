@@ -54,17 +54,22 @@ export function computeKpis(
   stages: StageRow[],
   filters: DashboardFilters
 ): KpiData {
-  const filtered = filterCandidates(candidates, filters);
+  // Apply all non-status filters (job/source/motion/region/recruiter + date range)
+  // so status-specific KPIs (hires, active, SLA) each compute from their own subset.
+  // See bug: previously `filtered` baked in the status filter, making
+  // "Hires This Period" always 0 when the topbar was set to Active (the default).
+  const filtersNoStatus: DashboardFilters = { ...filters, status: null };
+  const inScope = filterCandidates(candidates, filtersNoStatus);
   const today = new Date();
 
-  const activeCandidates = filtered.filter(c => c.status === "Active").length;
-  const openPositions = jobs.filter(j => j.status === "Open").length;
-  const hiresThisPeriod = filtered.filter(c => c.status === "Hired").length;
+  const activeCandidates  = inScope.filter(c => c.status === "Active").length;
+  const hiresThisPeriod   = inScope.filter(c => c.status === "Hired").length;
+  const openPositions     = jobs.filter(j => j.status === "Open").length;
 
   // SLA breaches: active candidates past their stage's target_hours
   const stageMap = new Map(stages.map(s => [s.id, s]));
   let slaBreaches = 0;
-  for (const c of filtered) {
+  for (const c of inScope) {
     if (c.status !== "Active") continue;
     const stage = stageMap.get(c.stage_id);
     if (!stage?.target_hours) continue;
@@ -75,8 +80,8 @@ export function computeKpis(
     if (hoursInStage > stage.target_hours) slaBreaches++;
   }
 
-  // Avg days to hire for hires in period
-  const hires = filtered.filter(c => c.status === "Hired" && c.date_applied && c.date_last_stage_update);
+  // Avg days to hire — only meaningful across hires in the period
+  const hires = inScope.filter(c => c.status === "Hired" && c.date_applied && c.date_last_stage_update);
   const avgDaysToHire = hires.length > 0
     ? hires.reduce((sum, c) => {
         const days = (new Date(c.date_last_stage_update).getTime() - new Date(c.date_applied).getTime()) / 86_400_000;
@@ -84,14 +89,16 @@ export function computeKpis(
       }, 0) / hires.length
     : 0;
 
-  // Offer acceptance rate: hires / (hires + rejected from offer stage)
+  // Offer acceptance rate: hires / (hires + rejected from offer stage).
+  // Also ignores the status filter — otherwise it's divide-by-zero when
+  // the user filters to only Active candidates.
   const offerStage = stages.find(s => s.is_offer);
   let offerAcceptanceRate = 0;
   if (offerStage) {
-    const offersExtended = filtered.filter(c =>
-      c.status === "Hired" || (c.status === "Rejected")
+    const offersExtended = inScope.filter(c =>
+      c.status === "Hired" || c.status === "Rejected"
     ).length;
-    const accepted = filtered.filter(c => c.status === "Hired").length;
+    const accepted = inScope.filter(c => c.status === "Hired").length;
     offerAcceptanceRate = offersExtended > 0 ? (accepted / offersExtended) * 100 : 0;
   }
 

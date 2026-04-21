@@ -602,7 +602,14 @@ html, body {
   box-shadow: var(--shadow-lg);
   display: flex; gap: 10px; align-items: flex-start;
   pointer-events: all;
-  animation: slideInRight 0.25s ease;
+  /* Explicit final state + `forwards` so the toast is visible immediately
+   * and E2E tests' toBeVisible() don't consider it off-screen mid-animation.
+   * Without this, slideInRight's 0% keyframe (translateX 100%) keeps the
+   * toast off-screen until the 0.25s animation completes and the browser
+   * falls back to the element's inherent styles. */
+  transform: translateX(0);
+  opacity: 1;
+  animation: slideInRight 0.25s ease forwards;
 }
 .toast.toast-success { border-left-color: var(--success); }
 .toast.toast-error   { border-left-color: var(--danger); }
