@@ -1,8 +1,7 @@
 <!-- ============================================================
-     Modals — teleported to body for clean z-index
+     Modals — uses own x-data scope; position:fixed handles z-index
      ============================================================ -->
 
-<template x-teleport="body">
   <div x-data x-cloak>
 
     <!-- ── Add Candidate ─────────────────────────────────── -->
@@ -98,8 +97,10 @@
 
           <div class="modal-footer">
             <button class="btn btn-outline-secondary" @click="$store.app.closeModal()">Cancel</button>
-            <button class="btn btn-primary" :disabled="submitting" @click="submit()"
-              x-text="submitting ? 'Adding…' : 'Add Candidate'"></button>
+            <button class="btn btn-primary" :disabled="submitting" @click="submit()">
+              <span x-show="!submitting">Add Candidate</span>
+              <span x-show="submitting">Adding…</span>
+            </button>
           </div>
         </div>
       </div>
@@ -194,15 +195,16 @@
 
           <div class="modal-footer">
             <button class="btn btn-outline-secondary" @click="$store.app.closeModal()">Cancel</button>
-            <button class="btn btn-primary" :disabled="submitting" @click="submit()"
-              x-text="submitting ? 'Saving…' : ($store.app.modal.type === 'editJob' ? 'Save Changes' : 'Add Job')"></button>
+            <button class="btn btn-primary" :disabled="submitting" @click="submit()">
+              <span x-show="!submitting" x-text="$store.app.modal.type === 'editJob' ? 'Save Changes' : 'Add Job'"></span>
+              <span x-show="submitting">Saving…</span>
+            </button>
           </div>
         </div>
       </div>
     </template>
 
   </div>
-</template>
 
 <script>
 document.addEventListener('alpine:init', function () {
@@ -256,7 +258,7 @@ document.addEventListener('alpine:init', function () {
           });
           this.$store.app.toastSuccess('Candidate added.');
           this.$store.app.closeModal();
-          var root = document.querySelector('#app').__x.$data;
+          var root = Alpine.$data(document.querySelector('#app'));
           if (root) await root.reloadAll();
         } catch (e) {
           this.$store.app.toastError('Could not add: ' + e.message);
@@ -322,7 +324,7 @@ document.addEventListener('alpine:init', function () {
             this.$store.app.toastSuccess('Job created.');
           }
           this.$store.app.closeModal();
-          var root = document.querySelector('#app').__x.$data;
+          var root = Alpine.$data(document.querySelector('#app'));
           if (root) {
             root.jobs = await gasCall('getJobOpenings');
             await root.loadCandidates();

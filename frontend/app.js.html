@@ -556,30 +556,29 @@ document.addEventListener('alpine:init', function () {
       editMotion: 'Inbound', editKanban: 'Normal', editPostHire: '', editNotes: '',
 
       init: function () {
-        var c = this.$store.app.peek.candidate;
-        if (!c) return;
-        this.editStageId    = c.stage_id;
-        this.editRecruiterId = c.recruiter_id == null ? '' : String(c.recruiter_id);
-        this.editSourceId   = c.source_id == null ? '' : String(c.source_id);
-        this.editRegionId   = c.region_id == null ? '' : String(c.region_id);
-        this.editMotion     = c.motion || 'Inbound';
-        this.editKanban     = c.kanban_state || 'Normal';
-        this.editPostHire   = c.post_hire_status || '';
-        this.editNotes      = c.notes || '';
-
-        // Re-init when candidate changes (e.g. after stage save)
         var self = this;
-        this.$watch('$store.app.peek.candidate', function (c) {
+        // Populate form state from a candidate object (used both for initial sync
+        // and for re-sync when the store's candidate changes after a server refresh).
+        function syncFromCandidate(c) {
           if (!c) return;
-          self.editStageId    = c.stage_id;
+          // Alpine's x-model on <select> compares string DOM values to the bound
+          // JS state — String() coercion ensures the currently-selected option
+          // visually reflects the candidate's real value.
+          self.editStageId     = String(c.stage_id);
           self.editRecruiterId = c.recruiter_id == null ? '' : String(c.recruiter_id);
-          self.editSourceId   = c.source_id == null ? '' : String(c.source_id);
-          self.editRegionId   = c.region_id == null ? '' : String(c.region_id);
-          self.editMotion     = c.motion || 'Inbound';
-          self.editKanban     = c.kanban_state || 'Normal';
-          self.editPostHire   = c.post_hire_status || '';
-          self.editNotes      = c.notes || '';
-        });
+          self.editSourceId    = c.source_id == null ? '' : String(c.source_id);
+          self.editRegionId    = c.region_id == null ? '' : String(c.region_id);
+          self.editMotion      = c.motion || 'Inbound';
+          self.editKanban      = c.kanban_state || 'Normal';
+          self.editPostHire    = c.post_hire_status || '';
+          self.editNotes       = c.notes || '';
+        }
+
+        // ALWAYS register the watch (don't early-return) — if candidate is null
+        // at mount time (race with `openPeek` → async `getCandidateDetail`), we
+        // still need the watch to fire when the candidate eventually loads.
+        syncFromCandidate(this.$store.app.peek.candidate);
+        this.$watch('$store.app.peek.candidate', syncFromCandidate);
       },
 
       peekName: function () {
@@ -596,7 +595,7 @@ document.addEventListener('alpine:init', function () {
           this.$store.app.peek.candidate = r.candidate;
           this.$store.app.peek.history = r.history;
           // Also update the main list
-          var root = document.querySelector('#app').__x.$data;
+          var root = Alpine.$data(document.querySelector('#app'));
           if (root && root.refreshCandidate) await root.refreshCandidate(id);
           this.$store.app.toastSuccess('Stage updated.');
         } catch (e) {
@@ -608,9 +607,10 @@ document.addEventListener('alpine:init', function () {
         var stages = this.$store.app.settings.stages
           .filter(function (s) { return s.is_enabled && !s.is_rejected; })
           .sort(function (a, b) { return a.sequence - b.sequence; });
-        var idx = stages.findIndex(function (s) { return s.id === parseInt(this.editStageId, 10); }.bind(this));
-        if (idx < stages.length - 1) {
-          this.editStageId = stages[idx + 1].id;
+        var currentId = parseInt(this.editStageId, 10);
+        var idx = stages.findIndex(function (s) { return s.id === currentId; });
+        if (idx >= 0 && idx < stages.length - 1) {
+          this.editStageId = String(stages[idx + 1].id);
           await this.saveStage();
         }
       },
@@ -622,7 +622,7 @@ document.addEventListener('alpine:init', function () {
           await gasCall('updateCandidate', id, updates);
           var r = await gasCall('getCandidateDetail', id);
           this.$store.app.peek.candidate = r.candidate;
-          var root = document.querySelector('#app').__x.$data;
+          var root = Alpine.$data(document.querySelector('#app'));
           if (root && root.refreshCandidate) await root.refreshCandidate(id);
           this.$store.app.toastSuccess('Saved.');
         } catch (e) {
@@ -650,7 +650,7 @@ document.addEventListener('alpine:init', function () {
         if (isNaN(rid)) { self.$store.app.toastError('Invalid reason ID.'); return; }
         gasCall('rejectCandidate', self.$store.app.peek.candidateId, rid).then(function () {
           self.$store.app.toastSuccess('Candidate rejected.');
-          var root = document.querySelector('#app').__x.$data;
+          var root = Alpine.$data(document.querySelector('#app'));
           if (root) root.reloadAll();
           self.$store.app.closePeek();
         }).catch(function (e) { self.$store.app.toastError('Reject failed: ' + e.message); });
@@ -662,7 +662,7 @@ document.addEventListener('alpine:init', function () {
         try {
           await gasCall('deleteCandidate', id);
           this.$store.app.toastSuccess('Candidate deleted.');
-          var root = document.querySelector('#app').__x.$data;
+          var root = Alpine.$data(document.querySelector('#app'));
           if (root) root.reloadAll();
           this.$store.app.closePeek();
         } catch (e) {
@@ -744,7 +744,7 @@ document.addEventListener('alpine:init', function () {
           };
           this.reload(kind);
           // Notify main app to refresh
-          var root = document.querySelector('#app').__x.$data;
+          var root = Alpine.$data(document.querySelector('#app'));
           if (root) {
             root.settings = self.$store.app.settings;
             root.loadCandidates();

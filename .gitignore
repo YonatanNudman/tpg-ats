@@ -18,3 +18,8 @@ Thumbs.db
 # Jest cache
 .jest-cache/
 coverage/
+
+# Playwright artifacts (generated per-run, don't commit)
+/test-results/
+/playwright-report/
+/playwright/.cache/

@@ -6,13 +6,21 @@
     "test": "jest",
     "test:watch": "jest --watch",
     "test:coverage": "jest --coverage",
-    "build": "clasp push",
-    "deploy": "clasp deploy"
+    "build": "node build.js",
+    "deploy": "npm run build && clasp push --force && clasp deploy --deploymentId ${DEPLOYMENT_ID}",
+    "serve": "node scripts/serve-mock.js",
+    "e2e": "playwright test --project=chromium",
+    "e2e:ui": "playwright test --ui",
+    "e2e:debug": "playwright test --debug"
   },
   "devDependencies": {
+    "@playwright/test": "^1.55.1",
+    "@types/express": "^5.0.4",
     "@types/google-apps-script": "^1.0.100",
     "@types/jest": "^29.5.12",
+    "cors": "^2.8.5",
     "esbuild": "^0.28.0",
+    "express": "^5.1.0",
     "jest": "^29.7.0",
     "ts-jest": "^29.1.4",
     "ts-node": "^10.9.2",

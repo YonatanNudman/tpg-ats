@@ -593,7 +593,11 @@ html, body {
   box-shadow: var(--shadow-lg);
   display: flex; gap: 10px; align-items: flex-start;
   pointer-events: all;
-  animation: slideInRight 0.25s ease;
+  /* Explicit final state + forwards so the toast is immediately visible
+     and Playwright's toBeVisible() doesn't consider it off-screen mid-animation */
+  transform: translateX(0);
+  opacity: 1;
+  animation: slideInRight 0.25s ease forwards;
 }
 .toast.toast-success { border-left-color: var(--success); }
 .toast.toast-error   { border-left-color: var(--danger); }
