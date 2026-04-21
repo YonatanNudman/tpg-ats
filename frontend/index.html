@@ -16,9 +16,17 @@
 
 <body>
 
-<!-- Alpine.js 3 -->
+<!--
+  Alpine.js 3 — pinned to 3.14.9 (NOT 3.13.5).
+
+  3.13.5 has a bug where <template x-teleport="body"> directives at body
+  root are silently skipped during initial walk (Alpine GH discussion #4461).
+  We rely on three body-root teleports (modals, peek panel, settings panel),
+  so we MUST be on >= 3.14.7 for them to render at all. Without this pin
+  every modal flow (Add Job, Add Candidate, Edit Job, peek, settings) is dead.
+-->
 <script defer
-  src="https://cdn.jsdelivr.net/npm/alpinejs@3.13.5/dist/cdn.min.js"></script>
+  src="https://cdn.jsdelivr.net/npm/alpinejs@3.14.9/dist/cdn.min.js"></script>
 
 <!--
    =============================================================
@@ -575,7 +583,14 @@
     </div>
 
   </main>
-</div>
+
+<!--
+  Modal / Peek / Settings teleport templates MUST live inside the #app
+  x-data root so Alpine's initial walk reaches them. Body-level templates
+  outside any x-data scope are silently skipped by Alpine 3.x's walker
+  (it only enters live-DOM elements that match its root selectors), which
+  meant every modal flow was dead before this move.
+-->
 
 <!-- ── Modals (Add Candidate / Add Job / Edit Job) ─────── -->
 <?!= include('modals') ?>
@@ -901,6 +916,8 @@
     </template>
   </div>
 </template>
+
+</div><!-- /#app -->
 
 <!-- ── Toast container ───────────────────────────────────── -->
 <div class="toast-container" x-data>
