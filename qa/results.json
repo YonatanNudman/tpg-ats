@@ -1,0 +1,226 @@
+{
+  "passed": 36,
+  "failed": 0,
+  "total": 36,
+  "checks": [
+    {
+      "name": "Initial load shows topbar with brand and user",
+      "passed": true,
+      "details": "brand=\"TPG Recruiting ATS\" user=\"qa-user@tpg.local\"",
+      "screenshot": "01-initial-load-shows-topbar-with-brand-and-user.png"
+    },
+    {
+      "name": "Initial KPI strip renders all four cards",
+      "passed": true,
+      "details": "4 cards visible",
+      "screenshot": "02-initial-kpi-strip-renders-all-four-cards.png"
+    },
+    {
+      "name": "Empty state: no candidates yet",
+      "passed": true,
+      "details": "No candidates match your filters.",
+      "screenshot": "03-empty-state-no-candidates-yet.png"
+    },
+    {
+      "name": "Sync indicator shows Live status",
+      "passed": true,
+      "details": "indicator: \"Live\"",
+      "screenshot": "04-sync-indicator-shows-live-status.png"
+    },
+    {
+      "name": "Job appears in Jobs section after creation",
+      "passed": true,
+      "details": "jobs: Sales Development Rep",
+      "screenshot": "05-job-appears-in-jobs-section-after-creation.png"
+    },
+    {
+      "name": "Two jobs visible after second add",
+      "passed": true,
+      "details": "2 job cards",
+      "screenshot": "06-two-jobs-visible-after-second-add.png"
+    },
+    {
+      "name": "Inline recruiter assignment persists after refresh",
+      "passed": true,
+      "details": "recruiter=\"Alex Recruiter\"",
+      "screenshot": "07-inline-recruiter-assignment-persists-after-refresh.png"
+    },
+    {
+      "name": "Inline job status change to On Hold persists",
+      "passed": true,
+      "details": "status=\"On Hold\"",
+      "screenshot": "08-inline-job-status-change-to-on-hold-persists.png"
+    },
+    {
+      "name": "New candidate appears in list",
+      "passed": true,
+      "details": "candidate visible: Riley Anderson",
+      "screenshot": "09-new-candidate-appears-in-list.png"
+    },
+    {
+      "name": "Active Candidates KPI updates to 1",
+      "passed": true,
+      "details": "Active Candidates = 1",
+      "screenshot": "10-active-candidates-kpi-updates-to-1.png"
+    },
+    {
+      "name": "Active Candidates KPI is 4 after bulk add",
+      "passed": true,
+      "details": "4",
+      "screenshot": "11-active-candidates-kpi-is-4-after-bulk-add.png"
+    },
+    {
+      "name": "Source-default-motion auto-set: Quinn (Outbound source) is Outbound",
+      "passed": true,
+      "details": "motion=\"Outbound\" (set from source default_motion)",
+      "screenshot": "12-source-default-motion-auto-set-quinn-outbound-source-is-outbound.png"
+    },
+    {
+      "name": "Search filter narrows list to 1 candidate",
+      "passed": true,
+      "details": "1 row matches \"Riley\"",
+      "screenshot": "13-search-filter-narrows-list-to-1-candidate.png"
+    },
+    {
+      "name": "Source filter narrows list to 1 candidate",
+      "passed": true,
+      "details": "1 row, name=\"Sam Patel\"",
+      "screenshot": "14-source-filter-narrows-list-to-1-candidate.png"
+    },
+    {
+      "name": "Reset clears the filter bar",
+      "passed": true,
+      "details": "4 rows",
+      "screenshot": "15-reset-clears-the-filter-bar.png"
+    },
+    {
+      "name": "Inline stage change persists after server roundtrip",
+      "passed": true,
+      "details": "stage=\"Reviewed\"",
+      "screenshot": "16-inline-stage-change-persists-after-server-roundtrip.png"
+    },
+    {
+      "name": "Inline recruiter assignment persists",
+      "passed": true,
+      "details": "recruiter=\"Jordan Sourcer\"",
+      "screenshot": "17-inline-recruiter-assignment-persists.png"
+    },
+    {
+      "name": "Peek opens with correct candidate name + email",
+      "passed": true,
+      "details": "name=\"Riley Anderson\" email=\"riley@example.com\"",
+      "screenshot": "18-peek-opens-with-correct-candidate-name-email.png"
+    },
+    {
+      "name": "Peek shows stage history with at least 2 entries",
+      "passed": true,
+      "details": "2 history items",
+      "screenshot": "19-peek-shows-stage-history-with-at-least-2-entries.png"
+    },
+    {
+      "name": "Advance stage button moves Riley one stage forward",
+      "passed": true,
+      "details": "server-side stage=\"Contacted\"",
+      "screenshot": "20-advance-stage-button-moves-riley-one-stage-forward.png"
+    },
+    {
+      "name": "Notes field saves on blur",
+      "passed": true,
+      "details": "notes saved to db: \"QA test note — strong screening signals.…\"",
+      "screenshot": "21-notes-field-saves-on-blur.png"
+    },
+    {
+      "name": "Kanban view shows columns for each enabled non-rejected stage",
+      "passed": true,
+      "details": "8 columns rendered",
+      "screenshot": "22-kanban-view-shows-columns-for-each-enabled-non-rejected-stage.png"
+    },
+    {
+      "name": "Kanban Contacted column has Riley card",
+      "passed": true,
+      "details": "Contacted column: Riley Anderson",
+      "screenshot": "23-kanban-contacted-column-has-riley-card.png"
+    },
+    {
+      "name": "Reject moves candidate to Rejected status",
+      "passed": true,
+      "details": "Rejected list: Morgan Lee",
+      "screenshot": "24-reject-moves-candidate-to-rejected-status.png"
+    },
+    {
+      "name": "Delete-job guard prevents deleting SDR (has candidates)",
+      "passed": true,
+      "details": "SDR still present (delete correctly rejected); current jobs: Account Executive (Test Delete), Sales Development Rep",
+      "screenshot": "25-delete-job-guard-prevents-deleting-sdr-has-candidates-.png"
+    },
+    {
+      "name": "Delete-job succeeds for AE (no candidates)",
+      "passed": true,
+      "details": "Remaining jobs: Sales Development Rep",
+      "screenshot": "26-delete-job-succeeds-for-ae-no-candidates-.png"
+    },
+    {
+      "name": "Edit job modal saves the new title",
+      "passed": true,
+      "details": "Job title updated: Sales Development Rep — Senior",
+      "screenshot": "27-edit-job-modal-saves-the-new-title.png"
+    },
+    {
+      "name": "Settings panel opens with 5 tabs",
+      "passed": true,
+      "details": "tabs: Stages, Recruiters, Sources, Regions, Reasons",
+      "screenshot": "28-settings-panel-opens-with-5-tabs.png"
+    },
+    {
+      "name": "New recruiter saved and visible in topbar filter",
+      "passed": true,
+      "details": "recruiter list now: All, — Unassigned —, Alex Recruiter, Jordan Sourcer, Casey New",
+      "screenshot": "29-new-recruiter-saved-and-visible-in-topbar-filter.png"
+    },
+    {
+      "name": "Stage validation: error toast for duplicate Hired flag",
+      "passed": true,
+      "details": "toast: \"Only one Hired stage allowed.\"",
+      "screenshot": "30-stage-validation-error-toast-for-duplicate-hired-flag.png"
+    },
+    {
+      "name": "Hires This Period KPI increments to 1 (after clearing status filter)",
+      "passed": true,
+      "details": "Hires This Period = 1 when status filter cleared",
+      "screenshot": "31-hires-this-period-kpi-increments-to-1-after-clearing-status-filter-.png"
+    },
+    {
+      "name": "Pipeline canvas renders pixels (non-empty)",
+      "passed": true,
+      "details": "pipelineChart drew pixels",
+      "screenshot": "32-pipeline-canvas-renders-pixels-non-empty-.png"
+    },
+    {
+      "name": "Source effectiveness table has rows for each used source",
+      "passed": true,
+      "details": "4 source rows",
+      "screenshot": "33-source-effectiveness-table-has-rows-for-each-used-source.png"
+    },
+    {
+      "name": "Recruiter performance table includes assigned recruiter",
+      "passed": true,
+      "details": "Jordan Sourcer is in team performance table",
+      "screenshot": "34-recruiter-performance-table-includes-assigned-recruiter.png"
+    },
+    {
+      "name": "Active Candidates KPI is clickable and toggles \"active\" class",
+      "passed": true,
+      "details": "KPI card .active = true",
+      "screenshot": "35-active-candidates-kpi-is-clickable-and-toggles-active-class.png"
+    },
+    {
+      "name": "No uncaught JavaScript errors during the entire run",
+      "passed": true,
+      "details": "1 expected 500 messages from server-side guards, 0 client errors",
+      "screenshot": "36-no-uncaught-javascript-errors-during-the-entire-run.png"
+    }
+  ],
+  "consoleErrors": [
+    "Failed to load resource: the server responded with a status of 500 (Internal Server Error)"
+  ]
+}

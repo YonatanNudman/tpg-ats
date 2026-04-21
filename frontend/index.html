@@ -1,0 +1,940 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>TPG ATS</title>
+
+  <link rel="stylesheet"
+    href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.2/dist/css/bootstrap.min.css"
+    crossorigin="anonymous">
+  <link rel="stylesheet"
+    href="https://fonts.googleapis.com/icon?family=Material+Icons">
+
+  <?!= include('styles.css') ?>
+</head>
+
+<body>
+
+<!--
+  Alpine.js 3 — pinned to 3.14.9 (NOT 3.13.5).
+
+  3.13.5 has a bug where <template x-teleport="body"> directives at body
+  root are silently skipped during initial walk (Alpine GH discussion #4461).
+  We rely on three body-root teleports (modals, peek panel, settings panel),
+  so we MUST be on >= 3.14.7 for them to render at all. Without this pin
+  every modal flow (Add Job, Add Candidate, Edit Job, peek, settings) is dead.
+-->
+<script defer
+  src="https://cdn.jsdelivr.net/npm/alpinejs@3.14.9/dist/cdn.min.js"></script>
+
+<!--
+   =============================================================
+   TPG ATS — single-page inline layout
+   Sections (top to bottom):
+     1. Topbar (title + user + add buttons + sync indicator)
+     2. Global filter bar (job, period, source, motion, region, recruiter)
+     3. KPI strip (4 cards, clickable drill-downs)
+     4. Candidates table / Kanban toggle (primary work surface)
+     5. Analytics sections (funnel, source, team, velocity)
+     6. Jobs section
+     7. Settings panel (slide-in from right on gear icon click)
+     8. Peek panel (slide-in from right on candidate click)
+   All edits happen inline — dropdowns save on change. Modals are
+   used only for adding candidates or jobs.
+   =============================================================
+-->
+
+<div id="app" x-data="atsApp()" x-init="init()" x-cloak>
+
+  <!-- ── Topbar ─────────────────────────────────────────── -->
+  <header class="topbar">
+    <div class="topbar-brand">
+      <div class="brand-mark">T</div>
+      <div>
+        <div class="brand-title">TPG Recruiting ATS</div>
+        <div class="brand-sub" x-text="userEmail || 'Signed in…'"></div>
+      </div>
+    </div>
+
+    <div class="topbar-spacer"></div>
+
+    <!-- Sync indicator -->
+    <div class="sync-indicator" :class="{ 'syncing': syncing, 'stale': syncStale }"
+      :title="syncStale ? 'Data may be stale — reloading…' : 'Live (auto-syncs every 15s)'">
+      <span class="sync-dot"></span>
+      <span x-text="syncing ? 'Syncing…' : (syncStale ? 'Refreshing' : 'Live')"></span>
+    </div>
+
+    <button class="btn btn-sm btn-outline-primary" @click="openModal('addJob')">
+      <span class="material-icons mi-inline">work</span>
+      Add Job
+    </button>
+    <button class="btn btn-sm btn-primary" @click="openModal('addCandidate')">
+      <span class="material-icons mi-inline">person_add</span>
+      Add Candidate
+    </button>
+    <button class="icon-btn" @click="openSettings()" title="Settings">
+      <span class="material-icons">settings</span>
+    </button>
+  </header>
+
+  <!-- ── Main content column ────────────────────────────── -->
+  <main class="page-content">
+
+    <!-- ── Global Filter Bar ───────────────────────────── -->
+    <div class="card filter-card">
+      <div class="filter-row">
+
+        <div class="filter-group">
+          <label>Period</label>
+          <select x-model="filters.preset" @change="onPresetChange()">
+            <option value="30d">Last 30 Days</option>
+            <option value="90d">Last 90 Days</option>
+            <option value="6m">Last 6 Months</option>
+            <option value="1y">Last Year</option>
+            <option value="all">All Time</option>
+          </select>
+        </div>
+
+        <div class="filter-group">
+          <label>Job Opening</label>
+          <select x-model="filters.jobId" @change="applyFilters()">
+            <option value="">All Jobs</option>
+            <template x-for="j in jobs" :key="j.id">
+              <option :value="j.id" x-text="j.title"></option>
+            </template>
+          </select>
+        </div>
+
+        <div class="filter-group">
+          <label>Source</label>
+          <select x-model="filters.sourceId" @change="applyFilters()">
+            <option value="">All</option>
+            <template x-for="s in settings.sources.filter(x => x.is_enabled)" :key="s.id">
+              <option :value="s.id" x-text="s.name"></option>
+            </template>
+          </select>
+        </div>
+
+        <div class="filter-group">
+          <label>Motion</label>
+          <select x-model="filters.motion" @change="applyFilters()">
+            <option value="">All</option>
+            <option value="Inbound">Inbound</option>
+            <option value="Outbound">Outbound</option>
+          </select>
+        </div>
+
+        <div class="filter-group">
+          <label>Region</label>
+          <select x-model="filters.regionId" @change="applyFilters()">
+            <option value="">All</option>
+            <template x-for="r in settings.regions.filter(x => x.is_enabled)" :key="r.id">
+              <option :value="r.id" x-text="r.name"></option>
+            </template>
+          </select>
+        </div>
+
+        <div class="filter-group">
+          <label>Recruiter</label>
+          <select x-model="filters.recruiterId" @change="applyFilters()">
+            <option value="">All</option>
+            <option value="__unassigned__">— Unassigned —</option>
+            <template x-for="r in settings.recruiters.filter(x => x.is_active)" :key="r.id">
+              <option :value="r.id" x-text="r.name"></option>
+            </template>
+          </select>
+        </div>
+
+        <div class="filter-group">
+          <label>Status</label>
+          <select x-model="filters.status" @change="applyFilters()">
+            <option value="">All</option>
+            <option value="Active">Active</option>
+            <option value="Hired">Hired</option>
+            <option value="Rejected">Rejected</option>
+          </select>
+        </div>
+
+        <div class="filter-group filter-search">
+          <label>Search</label>
+          <input type="text" x-model="filters.search"
+            @input.debounce.300ms="applyFilters()"
+            placeholder="Name, email…">
+        </div>
+
+        <button class="btn btn-sm btn-outline-secondary filter-reset"
+          @click="resetFilters()">Reset</button>
+      </div>
+    </div>
+
+    <!-- ── KPI strip ─────────────────────────────────────── -->
+    <div class="kpi-grid">
+      <div class="kpi-card kpi-accent-primary"
+        :class="{ 'active': drill === 'active' }"
+        @click="toggleDrill('active')">
+        <div class="kpi-label">Active Candidates</div>
+        <div class="kpi-value" x-text="kpi.activeCandidates"></div>
+        <div class="kpi-sub">Click to show list</div>
+      </div>
+
+      <div class="kpi-card kpi-accent-info">
+        <div class="kpi-label">Open Positions</div>
+        <div class="kpi-value" x-text="kpi.openPositions"></div>
+        <div class="kpi-sub">
+          <span x-text="kpi.expiredPostings"></span> expired ·
+          <span x-text="kpi.expiringPostings"></span> expiring soon
+        </div>
+      </div>
+
+      <div class="kpi-card kpi-accent-success">
+        <div class="kpi-label">Hires This Period</div>
+        <div class="kpi-value" x-text="kpi.hiresThisPeriod"></div>
+        <div class="kpi-sub">
+          Avg <span x-text="kpi.avgDaysToHire"></span> days to hire
+        </div>
+      </div>
+
+      <div class="kpi-card kpi-accent-danger"
+        :class="{ 'active': drill === 'sla' }"
+        @click="toggleDrill('sla')">
+        <div class="kpi-label">SLA Breaches</div>
+        <div class="kpi-value" x-text="kpi.slaBreaches"></div>
+        <div class="kpi-sub">
+          Offer accept: <span x-text="kpi.offerAcceptanceRate"></span>%
+        </div>
+      </div>
+    </div>
+
+    <!-- ── SLA Drilldown (inline under KPI strip) ───────── -->
+    <template x-if="drill === 'sla' && slaBreaches.length > 0">
+      <div class="card inline-drill">
+        <div class="card-header">
+          <span class="card-title">⚠ SLA Breaches (<span x-text="slaBreaches.length"></span>)</span>
+          <button class="icon-btn-sm" @click="drill = null">✕</button>
+        </div>
+        <table class="data-table">
+          <thead><tr><th>Candidate</th><th>Stage</th><th>Job</th><th>Recruiter</th><th>Hours Over</th></tr></thead>
+          <tbody>
+            <template x-for="b in slaBreaches" :key="b.candidate_id">
+              <tr @click="openPeek(b.candidate_id)">
+                <td x-text="b.candidate_name"></td>
+                <td><span class="stage-chip" :style="stageChipStyle(b.stage_color)" x-text="b.stage_name"></span></td>
+                <td x-text="b.job_title"></td>
+                <td x-text="b.recruiter_name || '—'"></td>
+                <td class="sla-over" x-text="Math.round(b.hours_overdue) + 'h'"></td>
+              </tr>
+            </template>
+          </tbody>
+        </table>
+      </div>
+    </template>
+
+    <!-- ── Candidates — primary work surface ───────────── -->
+    <div class="card section-card">
+      <div class="card-header">
+        <span class="card-title">
+          <span x-text="filteredCandidates.length"></span> Candidate<span x-text="filteredCandidates.length === 1 ? '' : 's'"></span>
+        </span>
+
+        <div class="view-toggle" role="group">
+          <button class="view-btn" :class="{ 'active': view === 'list' }" @click="view = 'list'">
+            <span class="material-icons">view_list</span> List
+          </button>
+          <button class="view-btn" :class="{ 'active': view === 'kanban' }" @click="view = 'kanban'">
+            <span class="material-icons">view_kanban</span> Kanban
+          </button>
+        </div>
+      </div>
+
+      <!-- LIST VIEW -->
+      <template x-if="view === 'list' && !loading">
+        <div class="table-wrapper">
+          <template x-if="filteredCandidates.length === 0">
+            <div class="empty-state">
+              <div class="empty-state-icon">👥</div>
+              <div class="empty-state-text">No candidates match your filters.</div>
+            </div>
+          </template>
+
+          <table class="data-table candidates-table" x-show="filteredCandidates.length > 0">
+            <thead>
+              <tr>
+                <th class="sortable" @click="sortBy('last_name')">Name <span x-text="sortIcon('last_name')"></span></th>
+                <th class="sortable" @click="sortBy('job_title')">Job <span x-text="sortIcon('job_title')"></span></th>
+                <th>Stage</th>
+                <th>Recruiter</th>
+                <th>Source</th>
+                <th>Motion</th>
+                <th class="sortable" @click="sortBy('days_in_stage')">Days <span x-text="sortIcon('days_in_stage')"></span></th>
+                <th>Status</th>
+              </tr>
+            </thead>
+            <tbody>
+              <template x-for="c in pagedCandidates" :key="c.id">
+                <tr class="candidate-row">
+                  <td @click="openPeek(c.id)" class="clickable-cell">
+                    <div class="name-primary" x-text="c.first_name + ' ' + c.last_name"></div>
+                    <div class="name-secondary" x-text="c.email"></div>
+                  </td>
+
+                  <td @click="openPeek(c.id)" class="clickable-cell" x-text="c.job_title || '—'"></td>
+
+                  <!-- Inline STAGE dropdown -->
+                  <td>
+                    <select class="inline-select" :data-id="c.id"
+                      @change="updateCandidateField(c, 'stage_id', parseInt($event.target.value))"
+                      @click.stop>
+                      <template x-for="s in settings.stages.filter(x => x.is_enabled)" :key="s.id">
+                        <option :value="s.id" :selected="s.id === c.stage_id" x-text="s.name"></option>
+                      </template>
+                    </select>
+                  </td>
+
+                  <!-- Inline RECRUITER dropdown -->
+                  <td>
+                    <select class="inline-select"
+                      @change="updateCandidateField(c, 'recruiter_id', $event.target.value === '' ? null : parseInt($event.target.value))"
+                      @click.stop>
+                      <option value="" :selected="c.recruiter_id === null">— Unassigned —</option>
+                      <template x-for="r in settings.recruiters.filter(x => x.is_active)" :key="r.id">
+                        <option :value="r.id" :selected="r.id === c.recruiter_id" x-text="r.name"></option>
+                      </template>
+                    </select>
+                  </td>
+
+                  <!-- Inline SOURCE dropdown -->
+                  <td>
+                    <select class="inline-select"
+                      @change="updateCandidateField(c, 'source_id', $event.target.value === '' ? null : parseInt($event.target.value))"
+                      @click.stop>
+                      <option value="" :selected="c.source_id === null">—</option>
+                      <template x-for="s in settings.sources.filter(x => x.is_enabled)" :key="s.id">
+                        <option :value="s.id" :selected="s.id === c.source_id" x-text="s.name"></option>
+                      </template>
+                    </select>
+                  </td>
+
+                  <!-- Inline MOTION dropdown -->
+                  <td>
+                    <select class="inline-select motion-select" :class="motionClass(c.motion)"
+                      @change="updateCandidateField(c, 'motion', $event.target.value)"
+                      @click.stop>
+                      <option value="Inbound" :selected="c.motion === 'Inbound'">Inbound</option>
+                      <option value="Outbound" :selected="c.motion === 'Outbound'">Outbound</option>
+                    </select>
+                  </td>
+
+                  <td @click="openPeek(c.id)" class="clickable-cell">
+                    <span class="days-badge" x-text="(c.days_in_stage || 0) + 'd'"></span>
+                  </td>
+
+                  <td @click="openPeek(c.id)" class="clickable-cell">
+                    <span class="status-badge" :class="'status-' + (c.status || 'active').toLowerCase()"
+                      x-text="c.status"></span>
+                  </td>
+                </tr>
+              </template>
+            </tbody>
+          </table>
+
+          <!-- Pagination -->
+          <div class="pagination-bar" x-show="filteredCandidates.length > pageSize">
+            <span class="text-muted">
+              Showing <span x-text="(page-1)*pageSize+1"></span>–<span x-text="Math.min(page*pageSize, filteredCandidates.length)"></span>
+              of <span x-text="filteredCandidates.length"></span>
+            </span>
+            <div>
+              <button class="page-btn" :disabled="page === 1" @click="page--">‹</button>
+              <span class="mx-2" x-text="page + ' / ' + totalPages"></span>
+              <button class="page-btn" :disabled="page === totalPages" @click="page++">›</button>
+            </div>
+          </div>
+        </div>
+      </template>
+
+      <!-- KANBAN VIEW -->
+      <template x-if="view === 'kanban' && !loading">
+        <div class="kanban-board">
+          <template x-for="stage in kanbanStages" :key="stage.id">
+            <div class="kanban-column">
+              <div class="kanban-column-header" :style="'--stage-color:' + (stage.color || 'var(--primary)')">
+                <span class="kanban-column-title" x-text="stage.name"></span>
+                <span class="kanban-column-count" x-text="candidatesByStage(stage.id).length"></span>
+              </div>
+              <div class="kanban-cards sortable-zone" :data-stage-id="stage.id">
+                <template x-for="c in candidatesByStage(stage.id)" :key="c.id">
+                  <div class="kanban-card" :data-candidate-id="c.id" @click="openPeek(c.id)">
+                    <div class="kanban-card-head">
+                      <div class="kanban-card-name" x-text="c.first_name + ' ' + c.last_name"></div>
+                      <span class="days-badge" x-text="(c.days_in_stage || 0) + 'd'"></span>
+                    </div>
+                    <div class="kanban-card-meta">
+                      <template x-if="c.recruiter_name">
+                        <span class="recruiter-avatar" :title="c.recruiter_name" x-text="initials(c.recruiter_name)"></span>
+                      </template>
+                      <span class="motion-chip" :class="motionClass(c.motion)" x-text="c.motion"></span>
+                      <template x-if="c.source_name">
+                        <span class="source-chip" x-text="c.source_name"></span>
+                      </template>
+                    </div>
+                  </div>
+                </template>
+                <template x-if="candidatesByStage(stage.id).length === 0">
+                  <div class="kanban-empty">No candidates</div>
+                </template>
+              </div>
+            </div>
+          </template>
+        </div>
+      </template>
+
+      <template x-if="loading">
+        <div class="section-loading"><div class="spinner"></div><span>Loading candidates…</span></div>
+      </template>
+    </div>
+
+    <!-- ── Jobs section (collapsible) ─────────────────────── -->
+    <div class="card section-card">
+      <div class="card-header clickable" @click="showJobs = !showJobs">
+        <span class="card-title">
+          <span class="material-icons mi-inline">work</span>
+          Job Openings (<span x-text="jobs.length"></span>)
+        </span>
+        <span class="material-icons collapse-icon" x-text="showJobs ? 'expand_less' : 'expand_more'"></span>
+      </div>
+
+      <div class="card-body" x-show="showJobs">
+        <div class="job-grid">
+          <template x-for="j in jobs" :key="j.id">
+            <div class="job-card">
+              <div class="job-card-head">
+                <div>
+                  <div class="job-card-title" x-text="j.title"></div>
+                  <div class="job-card-dept" x-text="[j.department, j.location].filter(Boolean).join(' · ')"></div>
+                </div>
+
+                <!-- Inline STATUS dropdown -->
+                <select class="inline-select job-status" :class="'job-status-' + (j.status || '').toLowerCase().replace(' ','-')"
+                  @change="updateJobField(j, 'status', $event.target.value)">
+                  <option value="Open" :selected="j.status === 'Open'">Open</option>
+                  <option value="On Hold" :selected="j.status === 'On Hold'">On Hold</option>
+                  <option value="Closed" :selected="j.status === 'Closed'">Closed</option>
+                </select>
+              </div>
+
+              <div class="job-card-body">
+                <div class="job-meta">
+                  <span class="material-icons mi-inline">group</span>
+                  <span x-text="j.head_count + ' position' + (j.head_count === 1 ? '' : 's')"></span>
+                </div>
+
+                <!-- Inline RECRUITER dropdown -->
+                <div class="job-meta">
+                  <span class="material-icons mi-inline">person</span>
+                  <select class="inline-select"
+                    @change="updateJobField(j, 'recruiter_id', $event.target.value === '' ? null : parseInt($event.target.value))">
+                    <option value="" :selected="j.recruiter_id === null">— Unassigned —</option>
+                    <template x-for="r in settings.recruiters.filter(x => x.is_active)" :key="r.id">
+                      <option :value="r.id" :selected="r.id === j.recruiter_id" x-text="r.name"></option>
+                    </template>
+                  </select>
+                </div>
+
+                <template x-if="j.salary_range">
+                  <div class="job-meta">
+                    <span class="material-icons mi-inline">payments</span>
+                    <span x-text="j.salary_range"></span>
+                  </div>
+                </template>
+
+                <div class="job-meta" x-text="'Candidates: ' + (j.candidate_count || 0)"></div>
+
+                <!-- Expiry warning -->
+                <template x-if="j.posting_expires && isExpired(j.posting_expires)">
+                  <div class="expiry-warning expired">✕ Expired <span x-text="fmtDate(j.posting_expires)"></span></div>
+                </template>
+                <template x-if="j.posting_expires && !isExpired(j.posting_expires) && isExpiringSoon(j.posting_expires)">
+                  <div class="expiry-warning soon">⚠ Expires <span x-text="fmtDate(j.posting_expires)"></span></div>
+                </template>
+              </div>
+
+              <div class="job-card-actions">
+                <button class="btn btn-sm btn-outline-primary" @click="filters.jobId = j.id; applyFilters(); scrollTop()">
+                  View Pipeline
+                </button>
+                <button class="btn btn-sm btn-outline-secondary" @click="openModal('editJob', { job: j })">
+                  Edit
+                </button>
+                <button class="btn btn-sm btn-outline-danger" @click="deleteJob(j)">Delete</button>
+              </div>
+            </div>
+          </template>
+
+          <template x-if="jobs.length === 0">
+            <div class="empty-state">
+              <div class="empty-state-icon">💼</div>
+              <div class="empty-state-text">No job openings yet.</div>
+              <button class="btn btn-primary btn-sm" @click="openModal('addJob')">Add Your First Job</button>
+            </div>
+          </template>
+        </div>
+      </div>
+    </div>
+
+    <!-- ── Analytics sections (collapsible) ─────────────── -->
+    <div class="card section-card">
+      <div class="card-header clickable" @click="showAnalytics = !showAnalytics">
+        <span class="card-title">
+          <span class="material-icons mi-inline">insights</span>
+          Analytics
+        </span>
+        <span class="material-icons collapse-icon" x-text="showAnalytics ? 'expand_less' : 'expand_more'"></span>
+      </div>
+
+      <div class="card-body" x-show="showAnalytics">
+
+        <!-- Pipeline + Funnel side-by-side -->
+        <div class="analytics-grid">
+          <div class="analytics-panel">
+            <div class="panel-header">Pipeline Snapshot</div>
+            <div class="chart-container"><canvas id="pipelineChart"></canvas></div>
+          </div>
+
+          <div class="analytics-panel">
+            <div class="panel-header">Funnel Conversion</div>
+            <div class="chart-container"><canvas id="funnelChart"></canvas></div>
+          </div>
+        </div>
+
+        <div class="analytics-grid">
+          <div class="analytics-panel">
+            <div class="panel-header">Source Effectiveness</div>
+            <div class="source-row">
+              <div class="source-donut"><canvas id="sourceDonutChart"></canvas></div>
+              <table class="data-table compact">
+                <thead><tr><th>Source</th><th>Total</th><th>Hired</th><th>Rate</th></tr></thead>
+                <tbody>
+                  <template x-for="s in analytics.sourceEffectiveness" :key="s.source_id">
+                    <tr>
+                      <td x-text="s.source_name"></td>
+                      <td x-text="s.total_candidates"></td>
+                      <td x-text="s.hired_candidates"></td>
+                      <td x-text="s.hire_rate + '%'"></td>
+                    </tr>
+                  </template>
+                </tbody>
+              </table>
+            </div>
+          </div>
+
+          <div class="analytics-panel">
+            <div class="panel-header">Time to Hire Trend</div>
+            <div class="chart-container"><canvas id="trendChart"></canvas></div>
+          </div>
+        </div>
+
+        <div class="analytics-grid">
+          <div class="analytics-panel">
+            <div class="panel-header">Team Performance</div>
+            <table class="data-table compact">
+              <thead>
+                <tr><th>Recruiter</th><th>Total</th><th>Active</th><th>Hired</th><th>Avg Days</th></tr>
+              </thead>
+              <tbody>
+                <template x-for="r in analytics.recruiterPerformance" :key="r.recruiter_id">
+                  <tr class="clickable" @click="filters.recruiterId = r.recruiter_id; applyFilters(); scrollTop()">
+                    <td x-text="r.recruiter_name"></td>
+                    <td x-text="r.total_candidates"></td>
+                    <td x-text="r.active_candidates"></td>
+                    <td x-text="r.hires"></td>
+                    <td x-text="r.avg_days_to_hire || '—'"></td>
+                  </tr>
+                </template>
+                <template x-if="analytics.recruiterPerformance.length === 0">
+                  <tr><td colspan="5" class="empty-state-row">No data yet.</td></tr>
+                </template>
+              </tbody>
+            </table>
+          </div>
+
+          <div class="analytics-panel">
+            <div class="panel-header">Stage Velocity</div>
+            <table class="data-table compact">
+              <thead><tr><th>Stage</th><th>Avg Days</th><th>Candidates</th></tr></thead>
+              <tbody>
+                <template x-for="v in analytics.stageVelocity" :key="v.stage_id">
+                  <tr>
+                    <td><span class="stage-chip" :style="stageChipStyle(v.stage_color)" x-text="v.stage_name"></span></td>
+                    <td x-text="v.avg_days_in_stage"></td>
+                    <td x-text="v.candidate_count"></td>
+                  </tr>
+                </template>
+                <template x-if="analytics.stageVelocity.length === 0">
+                  <tr><td colspan="3" class="empty-state-row">Not enough data yet.</td></tr>
+                </template>
+              </tbody>
+            </table>
+          </div>
+        </div>
+
+      </div>
+    </div>
+
+  </main>
+
+<!--
+  Modal / Peek / Settings teleport templates MUST live inside the #app
+  x-data root so Alpine's initial walk reaches them. Body-level templates
+  outside any x-data scope are silently skipped by Alpine 3.x's walker
+  (it only enters live-DOM elements that match its root selectors), which
+  meant every modal flow was dead before this move.
+-->
+
+<!-- ── Modals (Add Candidate / Add Job / Edit Job) ─────── -->
+<?!= include('modals') ?>
+
+<!-- ── Peek Panel (candidate detail) ─────────────────────── -->
+<template x-teleport="body">
+  <div x-data x-cloak>
+    <template x-if="$store.app.peek.open">
+      <div>
+        <div class="peek-backdrop" @click="$store.app.closePeek()"></div>
+        <div class="peek-panel" x-data="peekComponent()" x-init="init()">
+
+          <template x-if="$store.app.peek.loading">
+            <div class="section-loading" style="height:100%;">
+              <div class="spinner"></div><span>Loading…</span>
+            </div>
+          </template>
+
+          <template x-if="!$store.app.peek.loading && $store.app.peek.candidate">
+            <div class="peek-inner">
+
+              <!-- Header -->
+              <div class="peek-header">
+                <div class="peek-avatar" x-text="initials(peekName())"></div>
+                <div class="peek-head-info">
+                  <div class="peek-name" x-text="peekName()"></div>
+                  <div class="peek-email" x-text="$store.app.peek.candidate.email"></div>
+                </div>
+                <button class="icon-btn-sm" @click="$store.app.closePeek()">✕</button>
+              </div>
+
+              <!-- Body -->
+              <div class="peek-body">
+
+                <div class="peek-section-title">Stage</div>
+                <div class="peek-stage-row">
+                  <select class="form-select form-select-sm"
+                    x-model="editStageId"
+                    @change="saveStage()">
+                    <template x-for="s in $store.app.settings.stages.filter(x => x.is_enabled)" :key="s.id">
+                      <option :value="s.id" x-text="s.name"></option>
+                    </template>
+                  </select>
+                  <button class="btn btn-sm btn-outline-primary" @click="advanceStage()">Advance ›</button>
+                </div>
+
+                <div class="peek-section-title">Details</div>
+                <div class="peek-grid">
+
+                  <div class="peek-field">
+                    <div class="peek-field-label">Job</div>
+                    <div class="peek-field-value" x-text="$store.app.peek.candidate.job_title || '—'"></div>
+                  </div>
+
+                  <div class="peek-field">
+                    <div class="peek-field-label">Recruiter</div>
+                    <select class="form-select form-select-sm"
+                      x-model="editRecruiterId" @change="saveField('recruiter_id', editRecruiterId === '' ? null : parseInt(editRecruiterId))">
+                      <option value="">— Unassigned —</option>
+                      <template x-for="r in $store.app.settings.recruiters.filter(x => x.is_active)" :key="r.id">
+                        <option :value="r.id" x-text="r.name"></option>
+                      </template>
+                    </select>
+                  </div>
+
+                  <div class="peek-field">
+                    <div class="peek-field-label">Source</div>
+                    <select class="form-select form-select-sm"
+                      x-model="editSourceId" @change="saveField('source_id', editSourceId === '' ? null : parseInt(editSourceId))">
+                      <option value="">— None —</option>
+                      <template x-for="s in $store.app.settings.sources.filter(x => x.is_enabled)" :key="s.id">
+                        <option :value="s.id" x-text="s.name"></option>
+                      </template>
+                    </select>
+                  </div>
+
+                  <div class="peek-field">
+                    <div class="peek-field-label">Region</div>
+                    <select class="form-select form-select-sm"
+                      x-model="editRegionId" @change="saveField('region_id', editRegionId === '' ? null : parseInt(editRegionId))">
+                      <option value="">— None —</option>
+                      <template x-for="r in $store.app.settings.regions.filter(x => x.is_enabled)" :key="r.id">
+                        <option :value="r.id" x-text="r.name"></option>
+                      </template>
+                    </select>
+                  </div>
+
+                  <div class="peek-field">
+                    <div class="peek-field-label">Motion</div>
+                    <select class="form-select form-select-sm"
+                      x-model="editMotion" @change="saveField('motion', editMotion)">
+                      <option value="Inbound">Inbound</option>
+                      <option value="Outbound">Outbound</option>
+                    </select>
+                  </div>
+
+                  <div class="peek-field">
+                    <div class="peek-field-label">Kanban State</div>
+                    <select class="form-select form-select-sm"
+                      x-model="editKanban" @change="saveField('kanban_state', editKanban)">
+                      <option value="Normal">Normal</option>
+                      <option value="Blocked">Blocked</option>
+                      <option value="Ready">Ready</option>
+                    </select>
+                  </div>
+
+                  <div class="peek-field">
+                    <div class="peek-field-label">Status</div>
+                    <div class="peek-field-value">
+                      <span class="status-badge" :class="'status-' + ($store.app.peek.candidate.status || 'active').toLowerCase()"
+                        x-text="$store.app.peek.candidate.status"></span>
+                    </div>
+                  </div>
+
+                  <div class="peek-field">
+                    <div class="peek-field-label">Applied</div>
+                    <div class="peek-field-value" x-text="fmtDate($store.app.peek.candidate.date_applied)"></div>
+                  </div>
+
+                  <div class="peek-field">
+                    <div class="peek-field-label">Days in Stage</div>
+                    <div class="peek-field-value" x-text="$store.app.peek.candidate.days_in_stage + ' days'"></div>
+                  </div>
+
+                  <template x-if="$store.app.peek.candidate.status === 'Hired'">
+                    <div class="peek-field">
+                      <div class="peek-field-label">Post-Hire Status</div>
+                      <select class="form-select form-select-sm"
+                        x-model="editPostHire" @change="saveField('post_hire_status', editPostHire)">
+                        <option value="">— None —</option>
+                        <option value="Active">Active</option>
+                        <option value="OnNotice">On Notice</option>
+                        <option value="Resigned">Resigned</option>
+                        <option value="Terminated">Terminated</option>
+                      </select>
+                    </div>
+                  </template>
+
+                  <template x-if="$store.app.peek.candidate.linkedin_url">
+                    <div class="peek-field peek-field-wide">
+                      <div class="peek-field-label">LinkedIn</div>
+                      <a :href="$store.app.peek.candidate.linkedin_url" target="_blank" rel="noopener">View Profile ↗</a>
+                    </div>
+                  </template>
+                </div>
+
+                <div class="peek-section-title">Notes</div>
+                <textarea class="form-control form-control-sm" rows="3"
+                  x-model="editNotes" @blur="saveNotes()"
+                  placeholder="Add notes…"></textarea>
+
+                <div class="peek-section-title">Stage History</div>
+                <ul class="history-timeline">
+                  <template x-for="h in $store.app.peek.history" :key="h.id">
+                    <li class="history-item">
+                      <div class="history-dot"></div>
+                      <div>
+                        <div class="history-stage">
+                          <span x-text="h.stage_from_name || 'Start'"></span>
+                          <span class="history-arrow">→</span>
+                          <span x-text="h.stage_to_name"></span>
+                        </div>
+                        <div class="history-meta">
+                          <span x-text="fmtDate(h.timestamp.split('T')[0])"></span>
+                          · <span x-text="h.changed_by"></span>
+                          <template x-if="h.days_in_previous_stage > 0">
+                            <span> · <span x-text="h.days_in_previous_stage"></span> days</span>
+                          </template>
+                        </div>
+                      </div>
+                    </li>
+                  </template>
+                  <template x-if="$store.app.peek.history.length === 0">
+                    <li class="empty-row">No history yet.</li>
+                  </template>
+                </ul>
+
+              </div>
+
+              <!-- Footer -->
+              <div class="peek-footer">
+                <button class="btn btn-sm btn-outline-danger" @click="confirmReject()">Reject</button>
+                <button class="btn btn-sm btn-outline-secondary" @click="confirmDelete()">Delete</button>
+              </div>
+
+            </div>
+          </template>
+        </div>
+      </div>
+    </template>
+  </div>
+</template>
+
+<!-- ── Settings Panel (slide-in from right) ─────────────── -->
+<template x-teleport="body">
+  <div x-data x-cloak>
+    <template x-if="$store.app.settingsOpen">
+      <div>
+        <div class="peek-backdrop" @click="$store.app.settingsOpen = false"></div>
+        <div class="settings-panel" x-data="settingsComponent()" x-init="init()">
+          <div class="peek-header">
+            <div class="peek-head-info" style="flex:1;">
+              <div class="peek-name">Settings</div>
+              <div class="peek-email">Recruiters, stages, sources, regions, reasons</div>
+            </div>
+            <button class="icon-btn-sm" @click="$store.app.settingsOpen = false">✕</button>
+          </div>
+
+          <div class="settings-tabs">
+            <button class="settings-tab" :class="{ 'active': tab === 'stages' }" @click="tab = 'stages'">Stages</button>
+            <button class="settings-tab" :class="{ 'active': tab === 'recruiters' }" @click="tab = 'recruiters'">Recruiters</button>
+            <button class="settings-tab" :class="{ 'active': tab === 'sources' }" @click="tab = 'sources'">Sources</button>
+            <button class="settings-tab" :class="{ 'active': tab === 'regions' }" @click="tab = 'regions'">Regions</button>
+            <button class="settings-tab" :class="{ 'active': tab === 'reasons' }" @click="tab = 'reasons'">Reasons</button>
+          </div>
+
+          <div class="peek-body">
+
+            <!-- Stages -->
+            <template x-if="tab === 'stages'">
+              <div>
+                <template x-for="(s, idx) in stages" :key="idx">
+                  <div class="settings-row">
+                    <input type="text" class="form-control form-control-sm" x-model="s.name" placeholder="Stage name" style="flex:2;">
+                    <input type="color" class="color-input" x-model="s.color" style="width:40px;">
+                    <input type="number" class="form-control form-control-sm" x-model.number="s.target_hours" placeholder="SLA hrs" style="width:80px;" min="0">
+                    <label class="chk"><input type="checkbox" x-model="s.is_hired"> Hired</label>
+                    <label class="chk"><input type="checkbox" x-model="s.is_rejected"> Rej</label>
+                    <label class="chk"><input type="checkbox" x-model="s.is_offer"> Offer</label>
+                    <label class="chk"><input type="checkbox" x-model="s.is_enabled"> On</label>
+                    <button class="icon-btn-sm" @click="removeRow('stages', idx)">✕</button>
+                  </div>
+                </template>
+                <button class="btn btn-sm btn-outline-primary mt-2" @click="addStage()">+ Add Stage</button>
+                <div class="settings-save-row">
+                  <button class="btn btn-primary btn-sm" :disabled="saving" @click="save('stages')">Save Stages</button>
+                  <button class="btn btn-outline-secondary btn-sm ms-2" @click="reload('stages')">Discard</button>
+                </div>
+              </div>
+            </template>
+
+            <!-- Recruiters -->
+            <template x-if="tab === 'recruiters'">
+              <div>
+                <template x-for="(r, idx) in recruiters" :key="idx">
+                  <div class="settings-row">
+                    <input type="text" class="form-control form-control-sm" x-model="r.name" placeholder="Name" style="flex:2;">
+                    <input type="email" class="form-control form-control-sm" x-model="r.email" placeholder="Email" style="flex:2;">
+                    <label class="chk"><input type="checkbox" x-model="r.is_active"> Active</label>
+                    <button class="icon-btn-sm" @click="removeRow('recruiters', idx)">✕</button>
+                  </div>
+                </template>
+                <button class="btn btn-sm btn-outline-primary mt-2" @click="addRecruiter()">+ Add Recruiter</button>
+                <div class="settings-save-row">
+                  <button class="btn btn-primary btn-sm" :disabled="saving" @click="save('recruiters')">Save Recruiters</button>
+                  <button class="btn btn-outline-secondary btn-sm ms-2" @click="reload('recruiters')">Discard</button>
+                </div>
+              </div>
+            </template>
+
+            <!-- Sources -->
+            <template x-if="tab === 'sources'">
+              <div>
+                <template x-for="(s, idx) in sources" :key="idx">
+                  <div class="settings-row">
+                    <input type="text" class="form-control form-control-sm" x-model="s.name" placeholder="Name" style="flex:2;">
+                    <input type="text" class="form-control form-control-sm" x-model="s.medium" placeholder="Medium">
+                    <select class="form-select form-select-sm" x-model="s.default_motion" style="width:110px;">
+                      <option>Inbound</option>
+                      <option>Outbound</option>
+                    </select>
+                    <label class="chk"><input type="checkbox" x-model="s.is_enabled"> On</label>
+                    <button class="icon-btn-sm" @click="removeRow('sources', idx)">✕</button>
+                  </div>
+                </template>
+                <button class="btn btn-sm btn-outline-primary mt-2" @click="addSource()">+ Add Source</button>
+                <div class="settings-save-row">
+                  <button class="btn btn-primary btn-sm" :disabled="saving" @click="save('sources')">Save Sources</button>
+                  <button class="btn btn-outline-secondary btn-sm ms-2" @click="reload('sources')">Discard</button>
+                </div>
+              </div>
+            </template>
+
+            <!-- Regions -->
+            <template x-if="tab === 'regions'">
+              <div>
+                <template x-for="(r, idx) in regions" :key="idx">
+                  <div class="settings-row">
+                    <input type="text" class="form-control form-control-sm" x-model="r.name" placeholder="Name" style="flex:3;">
+                    <label class="chk"><input type="checkbox" x-model="r.is_enabled"> On</label>
+                    <button class="icon-btn-sm" @click="removeRow('regions', idx)">✕</button>
+                  </div>
+                </template>
+                <button class="btn btn-sm btn-outline-primary mt-2" @click="addRegion()">+ Add Region</button>
+                <div class="settings-save-row">
+                  <button class="btn btn-primary btn-sm" :disabled="saving" @click="save('regions')">Save Regions</button>
+                  <button class="btn btn-outline-secondary btn-sm ms-2" @click="reload('regions')">Discard</button>
+                </div>
+              </div>
+            </template>
+
+            <!-- Refuse reasons -->
+            <template x-if="tab === 'reasons'">
+              <div>
+                <template x-for="(r, idx) in refuseReasons" :key="idx">
+                  <div class="settings-row">
+                    <input type="text" class="form-control form-control-sm" x-model="r.name" placeholder="Reason" style="flex:3;">
+                    <label class="chk"><input type="checkbox" x-model="r.is_enabled"> On</label>
+                    <button class="icon-btn-sm" @click="removeRow('refuseReasons', idx)">✕</button>
+                  </div>
+                </template>
+                <button class="btn btn-sm btn-outline-primary mt-2" @click="addReason()">+ Add Reason</button>
+                <div class="settings-save-row">
+                  <button class="btn btn-primary btn-sm" :disabled="saving" @click="save('refuseReasons')">Save Reasons</button>
+                  <button class="btn btn-outline-secondary btn-sm ms-2" @click="reload('refuseReasons')">Discard</button>
+                </div>
+              </div>
+            </template>
+
+          </div>
+        </div>
+      </div>
+    </template>
+  </div>
+</template>
+
+</div><!-- /#app -->
+
+<!-- ── Toast container ───────────────────────────────────── -->
+<div class="toast-container" x-data>
+  <template x-for="t in $store.app.toasts" :key="t.id">
+    <div class="toast" :class="'toast-' + t.type">
+      <div class="toast-icon" x-text="t.icon"></div>
+      <div class="toast-message" x-text="t.message"></div>
+    </div>
+  </template>
+</div>
+
+<!-- CDNs -->
+<script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.2/dist/js/bootstrap.bundle.min.js" crossorigin="anonymous"></script>
+<script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/sortablejs@1.15.2/Sortable.min.js"></script>
+
+<?!= include('app.js') ?>
+
+</body>
+</html>

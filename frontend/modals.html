@@ -1,0 +1,338 @@
+<!-- ============================================================
+     Modals — teleported to body for clean z-index
+     ============================================================ -->
+
+<template x-teleport="body">
+  <div x-data x-cloak>
+
+    <!-- ── Add Candidate ─────────────────────────────────── -->
+    <template x-if="$store.app.modal.open && $store.app.modal.type === 'addCandidate'">
+      <div class="modal-overlay" @click.self="$store.app.closeModal()">
+        <div class="modal-dialog" x-data="addCandidateModal()" x-init="init()">
+
+          <div class="modal-header">
+            <span class="modal-title">Add Candidate</span>
+            <button class="icon-btn-sm" @click="$store.app.closeModal()">✕</button>
+          </div>
+
+          <div class="modal-body">
+            <div class="row g-3">
+
+              <div class="col-6">
+                <label class="form-label">First Name *</label>
+                <input type="text" class="form-control" x-model="form.first_name"
+                  :class="{ 'is-invalid': errors.first_name }">
+                <div class="invalid-feedback" x-text="errors.first_name"></div>
+              </div>
+
+              <div class="col-6">
+                <label class="form-label">Last Name *</label>
+                <input type="text" class="form-control" x-model="form.last_name"
+                  :class="{ 'is-invalid': errors.last_name }">
+                <div class="invalid-feedback" x-text="errors.last_name"></div>
+              </div>
+
+              <div class="col-6">
+                <label class="form-label">Email *</label>
+                <input type="email" class="form-control" x-model="form.email"
+                  :class="{ 'is-invalid': errors.email }">
+                <div class="invalid-feedback" x-text="errors.email"></div>
+              </div>
+
+              <div class="col-6">
+                <label class="form-label">Phone</label>
+                <input type="tel" class="form-control" x-model="form.phone">
+              </div>
+
+              <div class="col-12">
+                <label class="form-label">Job Opening *</label>
+                <select class="form-select" x-model="form.job_id" :class="{ 'is-invalid': errors.job_id }">
+                  <option value="">— Select job —</option>
+                  <template x-for="j in openJobs" :key="j.id">
+                    <option :value="j.id" x-text="j.title"></option>
+                  </template>
+                </select>
+                <div class="invalid-feedback" x-text="errors.job_id"></div>
+              </div>
+
+              <div class="col-4">
+                <label class="form-label">Source</label>
+                <select class="form-select" x-model="form.source_id" @change="onSourceChange()">
+                  <option value="">— None —</option>
+                  <template x-for="s in $store.app.settings.sources.filter(x => x.is_enabled)" :key="s.id">
+                    <option :value="s.id" x-text="s.name"></option>
+                  </template>
+                </select>
+              </div>
+
+              <div class="col-4">
+                <label class="form-label">Motion</label>
+                <select class="form-select" x-model="form.motion">
+                  <option>Inbound</option>
+                  <option>Outbound</option>
+                </select>
+              </div>
+
+              <div class="col-4">
+                <label class="form-label">Region</label>
+                <select class="form-select" x-model="form.region_id">
+                  <option value="">— None —</option>
+                  <template x-for="r in $store.app.settings.regions.filter(x => x.is_enabled)" :key="r.id">
+                    <option :value="r.id" x-text="r.name"></option>
+                  </template>
+                </select>
+              </div>
+
+              <div class="col-12">
+                <label class="form-label">LinkedIn URL</label>
+                <input type="url" class="form-control" x-model="form.linkedin_url" placeholder="https://linkedin.com/in/…">
+              </div>
+
+              <div class="col-12">
+                <label class="form-label">Notes</label>
+                <textarea class="form-control" rows="2" x-model="form.notes"></textarea>
+              </div>
+
+            </div>
+          </div>
+
+          <div class="modal-footer">
+            <button class="btn btn-outline-secondary" @click="$store.app.closeModal()">Cancel</button>
+            <button class="btn btn-primary" :disabled="submitting" @click="submit()"
+              x-text="submitting ? 'Adding…' : 'Add Candidate'"></button>
+          </div>
+        </div>
+      </div>
+    </template>
+
+    <!-- ── Add / Edit Job ───────────────────────────────── -->
+    <template x-if="$store.app.modal.open && ($store.app.modal.type === 'addJob' || $store.app.modal.type === 'editJob')">
+      <div class="modal-overlay" @click.self="$store.app.closeModal()">
+        <div class="modal-dialog modal-lg" x-data="jobModal()" x-init="init()">
+
+          <div class="modal-header">
+            <span class="modal-title" x-text="$store.app.modal.type === 'editJob' ? 'Edit Job' : 'Add Job Opening'"></span>
+            <button class="icon-btn-sm" @click="$store.app.closeModal()">✕</button>
+          </div>
+
+          <div class="modal-body">
+            <div class="row g-3">
+
+              <div class="col-8">
+                <label class="form-label">Title *</label>
+                <input type="text" class="form-control" x-model="form.title"
+                  :class="{ 'is-invalid': errors.title }">
+                <div class="invalid-feedback" x-text="errors.title"></div>
+              </div>
+
+              <div class="col-4">
+                <label class="form-label">Status</label>
+                <select class="form-select" x-model="form.status">
+                  <option>Open</option>
+                  <option>On Hold</option>
+                  <option>Closed</option>
+                </select>
+              </div>
+
+              <div class="col-6">
+                <label class="form-label">Department</label>
+                <input type="text" class="form-control" x-model="form.department">
+              </div>
+
+              <div class="col-6">
+                <label class="form-label">Location</label>
+                <input type="text" class="form-control" x-model="form.location">
+              </div>
+
+              <div class="col-4">
+                <label class="form-label">Region</label>
+                <select class="form-select" x-model="form.region_id">
+                  <option value="">— None —</option>
+                  <template x-for="r in $store.app.settings.regions.filter(x => x.is_enabled)" :key="r.id">
+                    <option :value="r.id" x-text="r.name"></option>
+                  </template>
+                </select>
+              </div>
+
+              <div class="col-4">
+                <label class="form-label">Head Count</label>
+                <input type="number" class="form-control" x-model.number="form.head_count" min="1">
+              </div>
+
+              <div class="col-4">
+                <label class="form-label">Recruiter</label>
+                <select class="form-select" x-model="form.recruiter_id">
+                  <option value="">— Unassigned —</option>
+                  <template x-for="r in $store.app.settings.recruiters.filter(x => x.is_active)" :key="r.id">
+                    <option :value="r.id" x-text="r.name"></option>
+                  </template>
+                </select>
+              </div>
+
+              <div class="col-4">
+                <label class="form-label">Salary Range</label>
+                <input type="text" class="form-control" x-model="form.salary_range" placeholder="e.g. $60k–$80k">
+              </div>
+
+              <div class="col-4">
+                <label class="form-label">Posted</label>
+                <input type="date" class="form-control" x-model="form.posted_date">
+              </div>
+
+              <div class="col-4">
+                <label class="form-label">Expires</label>
+                <input type="date" class="form-control" x-model="form.posting_expires">
+              </div>
+
+              <div class="col-12">
+                <label class="form-label">Notes</label>
+                <textarea class="form-control" rows="2" x-model="form.notes"></textarea>
+              </div>
+
+            </div>
+          </div>
+
+          <div class="modal-footer">
+            <button class="btn btn-outline-secondary" @click="$store.app.closeModal()">Cancel</button>
+            <button class="btn btn-primary" :disabled="submitting" @click="submit()"
+              x-text="submitting ? 'Saving…' : ($store.app.modal.type === 'editJob' ? 'Save Changes' : 'Add Job')"></button>
+          </div>
+        </div>
+      </div>
+    </template>
+
+  </div>
+</template>
+
+<script>
+document.addEventListener('alpine:init', function () {
+
+  Alpine.data('addCandidateModal', function () {
+    return {
+      submitting: false, openJobs: [], errors: {},
+      form: {
+        first_name: '', last_name: '', email: '', phone: '',
+        job_id: '', source_id: '', region_id: '',
+        motion: 'Inbound', linkedin_url: '', notes: '',
+      },
+
+      init: async function () {
+        try { this.openJobs = await gasCall('getJobOpenings', 'Open'); }
+        catch (e) { this.$store.app.toastError('Could not load jobs.'); }
+      },
+
+      onSourceChange: function () {
+        if (!this.form.source_id) return;
+        var id = parseInt(this.form.source_id, 10);
+        var src = this.$store.app.settings.sources.find(function (s) { return s.id === id; });
+        if (src) this.form.motion = src.default_motion;
+      },
+
+      validate: function () {
+        var e = {};
+        if (!this.form.first_name.trim()) e.first_name = 'Required.';
+        if (!this.form.last_name.trim()) e.last_name = 'Required.';
+        if (!this.form.email.trim()) e.email = 'Required.';
+        if (!this.form.job_id) e.job_id = 'Pick a job.';
+        this.errors = e;
+        return Object.keys(e).length === 0;
+      },
+
+      submit: async function () {
+        if (!this.validate()) return;
+        this.submitting = true;
+        try {
+          await gasCall('createCandidate', {
+            first_name: this.form.first_name.trim(),
+            last_name: this.form.last_name.trim(),
+            email: this.form.email.trim(),
+            phone: this.form.phone || '',
+            job_id: parseInt(this.form.job_id, 10),
+            source_id: this.form.source_id ? parseInt(this.form.source_id, 10) : null,
+            region_id: this.form.region_id ? parseInt(this.form.region_id, 10) : null,
+            motion: this.form.motion,
+            linkedin_url: this.form.linkedin_url || '',
+            notes: this.form.notes || '',
+          });
+          this.$store.app.toastSuccess('Candidate added.');
+          this.$store.app.closeModal();
+          var root = Alpine.$data(document.querySelector('#app'));
+          if (root) await root.reloadAll();
+        } catch (e) {
+          this.$store.app.toastError('Could not add: ' + e.message);
+        } finally { this.submitting = false; }
+      },
+    };
+  });
+
+  Alpine.data('jobModal', function () {
+    return {
+      submitting: false, errors: {},
+      form: {
+        title: '', department: '', location: '', region_id: '',
+        status: 'Open', head_count: 1, recruiter_id: '',
+        salary_range: '', posted_date: new Date().toISOString().split('T')[0],
+        closes_date: '', posting_expires: '', notes: '',
+      },
+
+      init: function () {
+        if (this.$store.app.modal.type === 'editJob' && this.$store.app.modal.data && this.$store.app.modal.data.job) {
+          var j = this.$store.app.modal.data.job;
+          this.form = {
+            title: j.title || '', department: j.department || '', location: j.location || '',
+            region_id: j.region_id || '', status: j.status || 'Open',
+            head_count: j.head_count || 1, recruiter_id: j.recruiter_id || '',
+            salary_range: j.salary_range || '', posted_date: j.posted_date || '',
+            closes_date: j.closes_date || '', posting_expires: j.posting_expires || '',
+            notes: j.notes || '',
+          };
+        }
+      },
+
+      validate: function () {
+        var e = {};
+        if (!this.form.title.trim()) e.title = 'Title required.';
+        this.errors = e;
+        return Object.keys(e).length === 0;
+      },
+
+      submit: async function () {
+        if (!this.validate()) return;
+        this.submitting = true;
+        try {
+          var payload = {
+            title: this.form.title.trim(),
+            department: this.form.department || '',
+            location: this.form.location || '',
+            region_id: this.form.region_id ? parseInt(this.form.region_id, 10) : null,
+            status: this.form.status,
+            head_count: parseInt(this.form.head_count, 10) || 1,
+            recruiter_id: this.form.recruiter_id ? parseInt(this.form.recruiter_id, 10) : null,
+            salary_range: this.form.salary_range || '',
+            posted_date: this.form.posted_date || '',
+            closes_date: this.form.closes_date || '',
+            posting_expires: this.form.posting_expires || '',
+            notes: this.form.notes || '',
+          };
+          if (this.$store.app.modal.type === 'editJob') {
+            await gasCall('updateJobOpening', this.$store.app.modal.data.job.id, payload);
+            this.$store.app.toastSuccess('Job updated.');
+          } else {
+            await gasCall('createJobOpening', payload);
+            this.$store.app.toastSuccess('Job created.');
+          }
+          this.$store.app.closeModal();
+          var root = Alpine.$data(document.querySelector('#app'));
+          if (root) {
+            root.jobs = await gasCall('getJobOpenings');
+            await root.loadCandidates();
+          }
+        } catch (e) {
+          this.$store.app.toastError('Save failed: ' + e.message);
+        } finally { this.submitting = false; }
+      },
+    };
+  });
+
+});
+</script>
