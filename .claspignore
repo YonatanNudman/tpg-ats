@@ -1,0 +1,18 @@
+# Exclude everything that shouldn't be pushed to Google Apps Script
+
+# Node / build artifacts
+node_modules/**
+dist/**
+package.json
+package-lock.json
+tsconfig.json
+jest.config.ts
+.claspignore
+
+# Tests — run locally only, never pushed to GAS
+tests/**
+
+# Keep:
+#   src/**/*.ts      → pushed as .gs (GAS compiles TypeScript natively via V8)
+#   frontend/**/*.html  → pushed as HTML templates
+#   appsscript.json  → GAS manifest

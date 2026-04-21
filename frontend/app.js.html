@@ -1,0 +1,763 @@
+<script>
+/* =============================================================
+   TPG ATS — App JS
+   Single Alpine.js component tree, all state centralized.
+   Fixes applied from audit:
+     C1 — getCurrentUserEmail name matches the backend
+     C2 — cross-section refresh via in-store mutations, not DOM events
+     C3 — "__unassigned__" sentinel for null-recruiter filter
+     C4 — delete flow uses modal.data directly (no rogue `this`)
+     C5 — settings save reloads from server to pick up real IDs
+     H2/H3 — peek panel uses real x-model on all selects
+     H6 — analytics re-fetch on filter change
+     H7 — single getAllHistory call in backend
+   Plus: 15s sync fingerprint poll for multi-user coordination.
+   ============================================================= */
+
+// ── Promise wrapper for google.script.run ───────────────────
+function gasCall(fnName, ...args) {
+  return new Promise(function (resolve, reject) {
+    var runner = google.script.run
+      .withSuccessHandler(resolve)
+      .withFailureHandler(function (err) {
+        reject(new Error(err.message || String(err)));
+      });
+    runner[fnName].apply(runner, args);
+  });
+}
+
+// ── Global helpers (used in HTML via x-text, x-html, @) ─────
+window.fmtDate = function (d) {
+  if (!d) return '—';
+  var dt = new Date(d);
+  if (isNaN(dt.getTime())) return d;
+  return dt.toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' });
+};
+window.initials = function (name) {
+  if (!name) return '?';
+  return name.split(/\s+/).filter(Boolean).map(function (p) { return p[0]; }).slice(0, 2).join('').toUpperCase();
+};
+window.stageChipStyle = function (color) {
+  var c = color || '#6c757d';
+  var r = parseInt(c.slice(1, 3), 16), g = parseInt(c.slice(3, 5), 16), b = parseInt(c.slice(5, 7), 16);
+  return 'background:rgba(' + r + ',' + g + ',' + b + ',0.15);color:' + c + ';';
+};
+window.motionClass = function (m) { return m === 'Outbound' ? 'outbound' : 'inbound'; };
+
+function presetRange(preset) {
+  var now = new Date();
+  var end = now.toISOString().split('T')[0];
+  var start;
+  switch (preset) {
+    case '30d':  start = new Date(now - 30 * 86400000).toISOString().split('T')[0]; break;
+    case '6m':   start = new Date(now.getFullYear(), now.getMonth() - 6, now.getDate()).toISOString().split('T')[0]; break;
+    case '1y':   start = new Date(now.getFullYear() - 1, now.getMonth(), now.getDate()).toISOString().split('T')[0]; break;
+    case 'all':  start = '2020-01-01'; end = '2099-12-31'; break;
+    case '90d':
+    default:     start = new Date(now - 90 * 86400000).toISOString().split('T')[0];
+  }
+  return { start: start, end: end };
+}
+
+// ── Alpine setup ────────────────────────────────────────────
+document.addEventListener('alpine:init', function () {
+
+  // Global store (peek panel, toasts, settings cache, modal)
+  Alpine.store('app', {
+    userEmail: '',
+    toasts: [],
+    _toastId: 0,
+
+    peek:     { open: false, candidateId: null, candidate: null, history: [], loading: false },
+    modal:    { open: false, type: null, data: null },
+    settings: { stages: [], sources: [], regions: [], recruiters: [], refuseReasons: [] },
+    settingsOpen: false,
+
+    // Toast
+    toast: function (msg, type) {
+      var id = ++this._toastId;
+      var icons = { success: '✓', error: '✕', warning: '⚠', info: 'ℹ' };
+      this.toasts.push({ id: id, message: msg, type: type || 'success', icon: icons[type || 'success'] });
+      var self = this;
+      setTimeout(function () { self.toasts = self.toasts.filter(function (t) { return t.id !== id; }); }, 4000);
+    },
+    toastSuccess: function (m) { this.toast(m, 'success'); },
+    toastError:   function (m) { this.toast(m, 'error'); },
+
+    // Peek
+    openPeek: async function (id) {
+      this.peek.open = true; this.peek.candidateId = id;
+      this.peek.candidate = null; this.peek.history = []; this.peek.loading = true;
+      try {
+        var r = await gasCall('getCandidateDetail', id);
+        this.peek.candidate = r.candidate;
+        this.peek.history = r.history;
+      } catch (e) {
+        this.toastError('Could not load candidate: ' + e.message);
+        this.peek.open = false;
+      } finally { this.peek.loading = false; }
+    },
+    closePeek: function () {
+      this.peek.open = false; this.peek.candidateId = null;
+      this.peek.candidate = null; this.peek.history = [];
+    },
+
+    // Modal
+    openModal: function (type, data) { this.modal.type = type; this.modal.data = data || null; this.modal.open = true; },
+    closeModal: function () { this.modal.open = false; this.modal.type = null; this.modal.data = null; },
+  });
+
+  // ── Main ATS app component ──────────────────────────────────
+  Alpine.data('atsApp', function () {
+    var syncTimer = null;
+    var lastSyncSig = '';
+    var pipelineChart = null, funnelChart = null, sourceChart = null, trendChart = null;
+    var sortableInstances = [];
+
+    return {
+      userEmail: '',
+      loading: true,
+      syncing: false,
+      syncStale: false,
+      view: 'list',
+      page: 1,
+      pageSize: 25,
+      sortField: 'date_applied',
+      sortDir: 'desc',
+      drill: null,               // 'active' | 'sla' | null
+      showJobs: true,
+      showAnalytics: true,
+
+      allCandidates: [],
+      jobs: [],
+      settings: { stages: [], sources: [], regions: [], recruiters: [], refuseReasons: [] },
+
+      filters: {
+        preset: '90d',
+        startDate: presetRange('90d').start,
+        endDate: presetRange('90d').end,
+        jobId: '', sourceId: '', motion: '', regionId: '', recruiterId: '',
+        status: 'Active', search: '',
+      },
+
+      kpi: {
+        activeCandidates: 0, openPositions: 0, hiresThisPeriod: 0, slaBreaches: 0,
+        avgDaysToHire: 0, offerAcceptanceRate: 0, expiredPostings: 0, expiringPostings: 0,
+      },
+      analytics: {
+        pipelineSnapshot: [], funnelConversion: [], recruiterPerformance: [],
+        sourceEffectiveness: [], timeToHireTrend: [], stageVelocity: [],
+      },
+      slaBreaches: [],
+
+      // ── Computed ─────────────────────────────────────────
+      get filteredCandidates() {
+        var f = this.filters;
+        var list = this.allCandidates.filter(function (c) {
+          if (f.status && c.status !== f.status) return false;
+          if (f.jobId && c.job_id != f.jobId) return false;
+          if (f.sourceId && c.source_id != f.sourceId) return false;
+          if (f.motion && c.motion !== f.motion) return false;
+          if (f.regionId && c.region_id != f.regionId) return false;
+          if (f.recruiterId === '__unassigned__') {
+            if (c.recruiter_id !== null && c.recruiter_id !== undefined && c.recruiter_id !== '') return false;
+          } else if (f.recruiterId) {
+            if (c.recruiter_id != f.recruiterId) return false;
+          }
+          if (f.search) {
+            var q = f.search.toLowerCase();
+            var hay = ((c.first_name || '') + ' ' + (c.last_name || '') + ' ' + (c.email || '')).toLowerCase();
+            if (hay.indexOf(q) === -1) return false;
+          }
+          // Date range
+          if (c.date_applied) {
+            var d = c.date_applied;
+            if (d < f.startDate) return false;
+            if (d > f.endDate) return false;
+          }
+          return true;
+        });
+
+        var sf = this.sortField, sd = this.sortDir;
+        list.sort(function (a, b) {
+          var av = a[sf] == null ? '' : a[sf];
+          var bv = b[sf] == null ? '' : b[sf];
+          if (typeof av === 'number') return sd === 'asc' ? av - bv : bv - av;
+          return sd === 'asc' ? String(av).localeCompare(String(bv)) : String(bv).localeCompare(String(av));
+        });
+        return list;
+      },
+
+      get pagedCandidates() {
+        var start = (this.page - 1) * this.pageSize;
+        return this.filteredCandidates.slice(start, start + this.pageSize);
+      },
+
+      get totalPages() { return Math.max(1, Math.ceil(this.filteredCandidates.length / this.pageSize)); },
+
+      get kanbanStages() {
+        return this.settings.stages
+          .filter(function (s) { return s.is_enabled && !s.is_rejected; })
+          .sort(function (a, b) { return a.sequence - b.sequence; });
+      },
+
+      candidatesByStage: function (stageId) {
+        return this.filteredCandidates.filter(function (c) {
+          return c.stage_id === stageId && c.status === 'Active';
+        });
+      },
+
+      // ── Lifecycle ────────────────────────────────────────
+      init: async function () {
+        var self = this;
+
+        try {
+          this.userEmail = await gasCall('getCurrentUserEmail');
+          Alpine.store('app').userEmail = this.userEmail;
+        } catch (e) { /* non-fatal */ }
+
+        await this.reloadAll();
+        this.startSyncPolling();
+
+        // Watch view changes to init Sortable for kanban
+        this.$watch('view', function (v) { self.$nextTick(function () { self.initSortable(); }); });
+        this.$watch('filteredCandidates', function () { self.$nextTick(function () { self.initSortable(); }); });
+      },
+
+      reloadAll: async function () {
+        this.loading = true;
+        try {
+          await this.loadSettings();
+          await Promise.all([this.loadCandidates(), this.loadJobs(), this.loadAnalytics()]);
+          this.$nextTick(function () { this.initSortable(); this.renderCharts(); }.bind(this));
+        } finally {
+          this.loading = false;
+        }
+      },
+
+      loadSettings: async function () {
+        var s = await gasCall('getSettings');
+        this.settings = {
+          stages: s.stages, sources: s.sources, regions: s.regions,
+          recruiters: s.recruiters, refuseReasons: s.refuseReasons,
+        };
+        Alpine.store('app').settings = this.settings;
+      },
+
+      loadCandidates: async function () {
+        this.allCandidates = await gasCall('getCandidates', {});
+      },
+
+      loadJobs: async function () {
+        this.jobs = await gasCall('getJobOpenings');
+      },
+
+      loadAnalytics: async function () {
+        var a = await gasCall('getDashboardData', this.buildDashboardFilters());
+        this.kpi = a.kpis;
+        this.analytics = {
+          pipelineSnapshot: a.pipelineSnapshot,
+          funnelConversion: a.funnelConversion,
+          recruiterPerformance: a.recruiterPerformance,
+          sourceEffectiveness: a.sourceEffectiveness,
+          timeToHireTrend: a.timeToHireTrend,
+          stageVelocity: a.stageVelocity,
+        };
+        this.slaBreaches = a.slaBreaches;
+      },
+
+      buildDashboardFilters: function () {
+        var f = this.filters;
+        return {
+          jobId: f.jobId || null,
+          sourceId: f.sourceId || null,
+          motion: f.motion || null,
+          regionId: f.regionId || null,
+          recruiterId: (f.recruiterId && f.recruiterId !== '__unassigned__') ? f.recruiterId : null,
+          status: f.status || null,
+          startDate: f.startDate,
+          endDate: f.endDate,
+        };
+      },
+
+      // ── Filter actions ───────────────────────────────────
+      onPresetChange: function () {
+        var r = presetRange(this.filters.preset);
+        this.filters.startDate = r.start;
+        this.filters.endDate = r.end;
+        this.applyFilters();
+      },
+
+      applyFilters: function () {
+        this.page = 1;
+        // Analytics / KPIs need a server reload when filters change
+        this.loadAnalytics().then(function () { this.renderCharts(); }.bind(this));
+      },
+
+      resetFilters: function () {
+        var r = presetRange('90d');
+        this.filters = {
+          preset: '90d', startDate: r.start, endDate: r.end,
+          jobId: '', sourceId: '', motion: '', regionId: '', recruiterId: '',
+          status: 'Active', search: '',
+        };
+        this.applyFilters();
+      },
+
+      sortBy: function (field) {
+        if (this.sortField === field) this.sortDir = this.sortDir === 'asc' ? 'desc' : 'asc';
+        else { this.sortField = field; this.sortDir = 'asc'; }
+      },
+      sortIcon: function (f) { return this.sortField === f ? (this.sortDir === 'asc' ? '↑' : '↓') : '⇅'; },
+
+      toggleDrill: function (key) { this.drill = this.drill === key ? null : key; },
+
+      scrollTop: function () { window.scrollTo({ top: 0, behavior: 'smooth' }); },
+
+      // ── Inline candidate field update ────────────────────
+      updateCandidateField: async function (c, field, value) {
+        var prev = c[field];
+        c[field] = value;   // optimistic
+
+        try {
+          if (field === 'stage_id') {
+            await gasCall('updateCandidateStage', c.id, value);
+            // Backend may set status to Hired/Rejected; reload this candidate
+            await this.refreshCandidate(c.id);
+          } else {
+            var updates = {};
+            updates[field] = value;
+            await gasCall('updateCandidate', c.id, updates);
+            // Refresh joined fields (names, stage_color, etc.)
+            await this.refreshCandidate(c.id);
+          }
+          Alpine.store('app').toastSuccess('Saved.');
+        } catch (e) {
+          c[field] = prev;   // rollback
+          Alpine.store('app').toastError('Save failed: ' + e.message);
+        }
+      },
+
+      refreshCandidate: async function (id) {
+        try {
+          var r = await gasCall('getCandidateDetail', id);
+          var idx = this.allCandidates.findIndex(function (x) { return x.id === id; });
+          if (idx >= 0) this.allCandidates[idx] = r.candidate;
+          // Keep peek in sync if open
+          if (Alpine.store('app').peek.open && Alpine.store('app').peek.candidateId === id) {
+            Alpine.store('app').peek.candidate = r.candidate;
+            Alpine.store('app').peek.history = r.history;
+          }
+        } catch (e) { /* silent */ }
+      },
+
+      // ── Inline job field update ──────────────────────────
+      updateJobField: async function (j, field, value) {
+        var prev = j[field];
+        j[field] = value;
+        try {
+          var updates = {}; updates[field] = value;
+          await gasCall('updateJobOpening', j.id, updates);
+          Alpine.store('app').toastSuccess('Job updated.');
+          // Refresh job list for recruiter_name denorm
+          this.jobs = await gasCall('getJobOpenings');
+        } catch (e) {
+          j[field] = prev;
+          Alpine.store('app').toastError('Save failed: ' + e.message);
+        }
+      },
+
+      deleteJob: async function (j) {
+        if (!confirm('Delete "' + j.title + '"?\n\nThis cannot be undone. Jobs with existing candidates cannot be deleted — close them instead.')) return;
+        try {
+          await gasCall('deleteJobOpening', j.id);
+          Alpine.store('app').toastSuccess('Job deleted.');
+          this.jobs = this.jobs.filter(function (x) { return x.id !== j.id; });
+        } catch (e) {
+          Alpine.store('app').toastError(e.message);
+        }
+      },
+
+      // ── Modals ────────────────────────────────────────────
+      openModal: function (type, data) { Alpine.store('app').openModal(type, data); },
+      openSettings: function () { Alpine.store('app').settingsOpen = true; },
+      openPeek: function (id) { Alpine.store('app').openPeek(id); },
+
+      // ── Expiry helpers ────────────────────────────────────
+      isExpired: function (d) { return d && new Date(d).getTime() < Date.now(); },
+      isExpiringSoon: function (d) {
+        if (!d) return false;
+        var t = new Date(d).getTime();
+        return t >= Date.now() && t <= Date.now() + 7 * 86400000;
+      },
+
+      // ── Kanban drag-and-drop ──────────────────────────────
+      initSortable: function () {
+        var self = this;
+        if (this.view !== 'kanban') return;
+        sortableInstances.forEach(function (s) { try { s.destroy(); } catch (e) {} });
+        sortableInstances = [];
+        document.querySelectorAll('.sortable-zone').forEach(function (el) {
+          sortableInstances.push(new Sortable(el, {
+            group: 'kanban',
+            animation: 150,
+            ghostClass: 'sortable-ghost',
+            onEnd: function (evt) {
+              var cid = parseInt(evt.item.dataset.candidateId, 10);
+              var toStage = parseInt(evt.to.dataset.stageId, 10);
+              var fromStage = parseInt(evt.from.dataset.stageId, 10);
+              if (toStage !== fromStage) {
+                var c = self.allCandidates.find(function (x) { return x.id === cid; });
+                if (c) self.updateCandidateField(c, 'stage_id', toStage);
+              }
+            },
+          }));
+        });
+      },
+
+      // ── Chart rendering ──────────────────────────────────
+      renderCharts: function () {
+        if (!this.showAnalytics) return;
+        this.renderPipelineChart();
+        this.renderFunnelChart();
+        this.renderSourceChart();
+        this.renderTrendChart();
+      },
+
+      renderPipelineChart: function () {
+        var el = document.getElementById('pipelineChart');
+        if (!el) return;
+        if (pipelineChart) pipelineChart.destroy();
+        var snap = this.analytics.pipelineSnapshot;
+        pipelineChart = new Chart(el, {
+          type: 'bar',
+          data: {
+            labels: snap.map(function (s) { return s.stage_name; }),
+            datasets: [{
+              data: snap.map(function (s) { return s.candidate_count; }),
+              backgroundColor: snap.map(function (s) { return (s.stage_color || '#6c757d') + 'B0'; }),
+              borderColor: snap.map(function (s) { return s.stage_color || '#6c757d'; }),
+              borderWidth: 1, borderRadius: 4,
+            }],
+          },
+          options: {
+            indexAxis: 'y', responsive: true, maintainAspectRatio: false,
+            plugins: { legend: { display: false } },
+            scales: { x: { ticks: { font: { size: 11 } } }, y: { ticks: { font: { size: 11 } } } },
+          },
+        });
+      },
+
+      renderFunnelChart: function () {
+        var el = document.getElementById('funnelChart');
+        if (!el) return;
+        if (funnelChart) funnelChart.destroy();
+        var f = this.analytics.funnelConversion;
+        funnelChart = new Chart(el, {
+          type: 'bar',
+          data: {
+            labels: f.map(function (x) { return x.stage_name; }),
+            datasets: [{
+              data: f.map(function (x) { return x.conversion_rate; }),
+              backgroundColor: 'rgba(89,74,226,0.7)',
+              borderColor: '#594AE2', borderWidth: 1, borderRadius: 4,
+            }],
+          },
+          options: {
+            responsive: true, maintainAspectRatio: false,
+            plugins: {
+              legend: { display: false },
+              tooltip: { callbacks: { label: function (c) { return c.raw + '%'; } } },
+            },
+            scales: {
+              y: { min: 0, max: 100, ticks: { callback: function (v) { return v + '%'; }, font: { size: 11 } } },
+              x: { ticks: { font: { size: 11 } } },
+            },
+          },
+        });
+      },
+
+      renderSourceChart: function () {
+        var el = document.getElementById('sourceDonutChart');
+        if (!el) return;
+        if (sourceChart) sourceChart.destroy();
+        var s = this.analytics.sourceEffectiveness;
+        var colors = ['#594AE2','#039be5','#4caf50','#fb8c00','#e53935','#8e24aa'];
+        sourceChart = new Chart(el, {
+          type: 'doughnut',
+          data: {
+            labels: s.map(function (x) { return x.source_name; }),
+            datasets: [{
+              data: s.map(function (x) { return x.total_candidates; }),
+              backgroundColor: s.map(function (_, i) { return colors[i % colors.length]; }),
+              borderColor: '#fff', borderWidth: 2,
+            }],
+          },
+          options: { responsive: true, maintainAspectRatio: false, plugins: { legend: { position: 'bottom', labels: { font: { size: 11 } } } }, cutout: '60%' },
+        });
+      },
+
+      renderTrendChart: function () {
+        var el = document.getElementById('trendChart');
+        if (!el) return;
+        if (trendChart) trendChart.destroy();
+        var t = this.analytics.timeToHireTrend;
+        trendChart = new Chart(el, {
+          type: 'line',
+          data: {
+            labels: t.map(function (x) { return x.month_label; }),
+            datasets: [{
+              data: t.map(function (x) { return x.avg_days_to_hire; }),
+              borderColor: '#594AE2', backgroundColor: 'rgba(89,74,226,0.08)',
+              fill: true, tension: 0.35, pointRadius: 4,
+            }],
+          },
+          options: {
+            responsive: true, maintainAspectRatio: false,
+            plugins: { legend: { display: false } },
+            scales: { y: { min: 0, ticks: { font: { size: 11 } } }, x: { ticks: { font: { size: 11 } } } },
+          },
+        });
+      },
+
+      // ── Multi-user sync polling ──────────────────────────
+      startSyncPolling: function () {
+        var self = this;
+        syncTimer = setInterval(function () { self.checkSync(); }, 15000);
+      },
+
+      checkSync: async function () {
+        var self = this;
+        if (document.hidden) return;         // skip if tab inactive
+        if (Alpine.store('app').peek.open) return; // don't disrupt active editing
+        try {
+          self.syncing = true;
+          var fp = await gasCall('getSyncFingerprint');
+          if (lastSyncSig && fp.sig !== lastSyncSig) {
+            self.syncStale = true;
+            await self.reloadAll();
+            Alpine.store('app').toastSuccess('Updated with teammate changes.');
+            self.syncStale = false;
+          }
+          lastSyncSig = fp.sig;
+        } catch (e) {
+          /* network blip — ignore */
+        } finally {
+          self.syncing = false;
+        }
+      },
+    };
+  });
+
+  // ── Peek Panel component ─────────────────────────────────
+  Alpine.data('peekComponent', function () {
+    return {
+      editStageId: 0, editRecruiterId: '', editSourceId: '', editRegionId: '',
+      editMotion: 'Inbound', editKanban: 'Normal', editPostHire: '', editNotes: '',
+
+      init: function () {
+        var c = this.$store.app.peek.candidate;
+        if (!c) return;
+        this.editStageId    = c.stage_id;
+        this.editRecruiterId = c.recruiter_id == null ? '' : String(c.recruiter_id);
+        this.editSourceId   = c.source_id == null ? '' : String(c.source_id);
+        this.editRegionId   = c.region_id == null ? '' : String(c.region_id);
+        this.editMotion     = c.motion || 'Inbound';
+        this.editKanban     = c.kanban_state || 'Normal';
+        this.editPostHire   = c.post_hire_status || '';
+        this.editNotes      = c.notes || '';
+
+        // Re-init when candidate changes (e.g. after stage save)
+        var self = this;
+        this.$watch('$store.app.peek.candidate', function (c) {
+          if (!c) return;
+          self.editStageId    = c.stage_id;
+          self.editRecruiterId = c.recruiter_id == null ? '' : String(c.recruiter_id);
+          self.editSourceId   = c.source_id == null ? '' : String(c.source_id);
+          self.editRegionId   = c.region_id == null ? '' : String(c.region_id);
+          self.editMotion     = c.motion || 'Inbound';
+          self.editKanban     = c.kanban_state || 'Normal';
+          self.editPostHire   = c.post_hire_status || '';
+          self.editNotes      = c.notes || '';
+        });
+      },
+
+      peekName: function () {
+        var c = this.$store.app.peek.candidate;
+        return c ? (c.first_name || '') + ' ' + (c.last_name || '') : '';
+      },
+
+      saveStage: async function () {
+        var id = this.$store.app.peek.candidateId;
+        var newStage = parseInt(this.editStageId, 10);
+        try {
+          await gasCall('updateCandidateStage', id, newStage);
+          var r = await gasCall('getCandidateDetail', id);
+          this.$store.app.peek.candidate = r.candidate;
+          this.$store.app.peek.history = r.history;
+          // Also update the main list
+          var root = document.querySelector('#app').__x.$data;
+          if (root && root.refreshCandidate) await root.refreshCandidate(id);
+          this.$store.app.toastSuccess('Stage updated.');
+        } catch (e) {
+          this.$store.app.toastError('Stage update failed: ' + e.message);
+        }
+      },
+
+      advanceStage: async function () {
+        var stages = this.$store.app.settings.stages
+          .filter(function (s) { return s.is_enabled && !s.is_rejected; })
+          .sort(function (a, b) { return a.sequence - b.sequence; });
+        var idx = stages.findIndex(function (s) { return s.id === parseInt(this.editStageId, 10); }.bind(this));
+        if (idx < stages.length - 1) {
+          this.editStageId = stages[idx + 1].id;
+          await this.saveStage();
+        }
+      },
+
+      saveField: async function (field, value) {
+        var id = this.$store.app.peek.candidateId;
+        try {
+          var updates = {}; updates[field] = value;
+          await gasCall('updateCandidate', id, updates);
+          var r = await gasCall('getCandidateDetail', id);
+          this.$store.app.peek.candidate = r.candidate;
+          var root = document.querySelector('#app').__x.$data;
+          if (root && root.refreshCandidate) await root.refreshCandidate(id);
+          this.$store.app.toastSuccess('Saved.');
+        } catch (e) {
+          this.$store.app.toastError('Save failed: ' + e.message);
+        }
+      },
+
+      saveNotes: async function () {
+        var current = this.$store.app.peek.candidate.notes || '';
+        if (this.editNotes === current) return;
+        await this.saveField('notes', this.editNotes);
+      },
+
+      confirmReject: function () {
+        var reasonId = prompt(
+          'Reject ' + this.peekName() + '?\n\n' +
+          'Enter refuse reason ID from Settings:\n\n' +
+          this.$store.app.settings.refuseReasons
+            .filter(function (r) { return r.is_enabled; })
+            .map(function (r) { return r.id + '. ' + r.name; }).join('\n')
+        );
+        if (!reasonId) return;
+        var self = this;
+        var rid = parseInt(reasonId, 10);
+        if (isNaN(rid)) { self.$store.app.toastError('Invalid reason ID.'); return; }
+        gasCall('rejectCandidate', self.$store.app.peek.candidateId, rid).then(function () {
+          self.$store.app.toastSuccess('Candidate rejected.');
+          var root = document.querySelector('#app').__x.$data;
+          if (root) root.reloadAll();
+          self.$store.app.closePeek();
+        }).catch(function (e) { self.$store.app.toastError('Reject failed: ' + e.message); });
+      },
+
+      confirmDelete: async function () {
+        if (!confirm('Delete ' + this.peekName() + '?\n\nHistory is retained. This cannot be undone.')) return;
+        var id = this.$store.app.peek.candidateId;
+        try {
+          await gasCall('deleteCandidate', id);
+          this.$store.app.toastSuccess('Candidate deleted.');
+          var root = document.querySelector('#app').__x.$data;
+          if (root) root.reloadAll();
+          this.$store.app.closePeek();
+        } catch (e) {
+          this.$store.app.toastError('Delete failed: ' + e.message);
+        }
+      },
+    };
+  });
+
+  // ── Settings panel component ─────────────────────────────
+  Alpine.data('settingsComponent', function () {
+    function clone(a) { return JSON.parse(JSON.stringify(a)); }
+    return {
+      tab: 'recruiters',
+      saving: false,
+      stages: [], sources: [], regions: [], recruiters: [], refuseReasons: [],
+
+      init: function () {
+        this.reload('stages'); this.reload('sources'); this.reload('regions');
+        this.reload('recruiters'); this.reload('refuseReasons');
+      },
+
+      reload: function (kind) {
+        var map = {
+          stages: 'stages', sources: 'sources', regions: 'regions',
+          recruiters: 'recruiters', refuseReasons: 'refuseReasons',
+        };
+        this[map[kind]] = clone(this.$store.app.settings[map[kind]] || []);
+      },
+
+      removeRow: function (kind, idx) { this[kind].splice(idx, 1); },
+
+      addStage: function () {
+        var maxSeq = this.stages.reduce(function (m, s) { return Math.max(m, s.sequence || 0); }, 0);
+        this.stages.push({ id: 0, name: '', sequence: maxSeq + 100, color: '#607d8b', is_hired: false, is_rejected: false, is_offer: false, target_hours: null, is_enabled: true });
+      },
+      addRecruiter: function () { this.recruiters.push({ id: 0, name: '', email: '', is_active: true }); },
+      addSource: function () { this.sources.push({ id: 0, name: '', medium: '', default_motion: 'Inbound', is_enabled: true }); },
+      addRegion: function () { this.regions.push({ id: 0, name: '', is_enabled: true }); },
+      addReason: function () { this.refuseReasons.push({ id: 0, name: '', is_enabled: true }); },
+
+      save: async function (kind) {
+        var self = this;
+        var map = {
+          stages: { local: 'stages', gas: 'saveStages' },
+          sources: { local: 'sources', gas: 'saveSources' },
+          regions: { local: 'regions', gas: 'saveRegions' },
+          recruiters: { local: 'recruiters', gas: 'saveRecruiters' },
+          refuseReasons: { local: 'refuseReasons', gas: 'saveRefuseReasons' },
+        };
+        var conf = map[kind];
+
+        var rows = this[conf.local].map(function (r) {
+          var copy = {};
+          for (var k in r) copy[k] = r[k];
+          if (copy.id == null || copy.id <= 0) copy.id = 0;
+          return copy;
+        });
+
+        if (kind === 'stages') {
+          // Validate flag uniqueness
+          var errs = [];
+          if (rows.filter(function (r) { return r.is_hired; }).length > 1) errs.push('Only one Hired stage allowed.');
+          if (rows.filter(function (r) { return r.is_rejected; }).length > 1) errs.push('Only one Rejected stage allowed.');
+          if (rows.filter(function (r) { return r.is_offer; }).length > 1) errs.push('Only one Offer stage allowed.');
+          if (rows.some(function (r) { return !r.name.trim(); })) errs.push('All stages need names.');
+          if (errs.length) { this.$store.app.toastError(errs.join(' ')); return; }
+          rows.forEach(function (s, i) { s.sequence = (i + 1) * 100; });
+        }
+
+        this.saving = true;
+        try {
+          await gasCall(conf.gas, rows);
+          // Reload from server so local copy has real IDs  (fixes C5)
+          var fresh = await gasCall('getSettings');
+          this.$store.app.settings = {
+            stages: fresh.stages, sources: fresh.sources, regions: fresh.regions,
+            recruiters: fresh.recruiters, refuseReasons: fresh.refuseReasons,
+          };
+          this.reload(kind);
+          // Notify main app to refresh
+          var root = document.querySelector('#app').__x.$data;
+          if (root) {
+            root.settings = self.$store.app.settings;
+            root.loadCandidates();
+          }
+          this.$store.app.toastSuccess('Saved.');
+        } catch (e) {
+          this.$store.app.toastError('Save failed: ' + e.message);
+        } finally {
+          this.saving = false;
+        }
+      },
+    };
+  });
+
+});
+</script>

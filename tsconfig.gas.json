@@ -1,0 +1,19 @@
+{
+  "compilerOptions": {
+    "target": "ES2019",
+    "module": "none",
+    "moduleResolution": "node",
+    "outDir": "./dist",
+    "rootDir": "./src",
+    "removeComments": false,
+    "skipLibCheck": true,
+    "strict": false,
+    "noImplicitAny": false,
+    "esModuleInterop": true,
+    "lib": ["ES2019"],
+    "types": ["google-apps-script"],
+    "isolatedModules": false
+  },
+  "include": ["src/**/*.ts"],
+  "exclude": ["node_modules", "tests", "dist", "frontend"]
+}
