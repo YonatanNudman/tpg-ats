@@ -560,6 +560,15 @@ html, body {
   max-height: 90vh;
   display: flex; flex-direction: column;
   animation: scaleIn 0.18s cubic-bezier(0.4,0,0.2,1);
+  /*
+   * Bootstrap 5 sets `.modal-dialog { pointer-events: none }` so its
+   * own modal plumbing can selectively re-enable pointer events on the
+   * inner `.modal-content`. We use `.modal-dialog` as the actual content
+   * container, so inherit that and clicks on form fields, footer buttons,
+   * and the close icon would all fall through to the backdrop and
+   * accidentally dismiss the modal. Re-enable pointer events here.
+   */
+  pointer-events: auto;
 }
 .modal-dialog.modal-lg { width: 720px; }
 @keyframes scaleIn {
