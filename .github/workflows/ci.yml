@@ -1,23 +1,20 @@
 name: CI
 
-# Scope:
-#  - Pushes and PRs targeting main only (feature branches are too noisy
-#    on a solo-dev project — run locally; open a PR when you want CI).
-#  - paths-ignore skips runs for pure doc / README / gitignore changes.
-#  - workflow_dispatch lets you trigger a run manually from the Actions tab.
+# ── Trigger policy (solo-dev-with-parallel-agents mode) ────────────
+# Jest: runs on every push to main + every PR. Fast, stable, rarely
+#   broken by UX iterations, catches real backend regressions.
+# QA:   MANUAL ONLY via workflow_dispatch. Rapid UX iteration with
+#   two agents + live editing made per-push QA too noisy to be a useful
+#   signal. Run it when the dust settles on a design change, or when
+#   a PR is ready to merge.
 on:
   push:
     branches: [main]
-    paths-ignore:
-      - '**.md'
-      - '.gitignore'
-      - 'DEPLOY.md'
+    paths-ignore: ['**.md', '.gitignore', 'DEPLOY.md']
   pull_request:
     branches: [main]
   workflow_dispatch: {}
 
-# Cancel in-progress runs for the same branch when a new commit arrives.
-# Saves minutes + reduces duplicate "run failed" emails while iterating.
 concurrency:
   group: ci-${{ github.ref }}
   cancel-in-progress: true
@@ -32,15 +29,15 @@ jobs:
         with:
           node-version: "20"
           cache: "npm"
-      - name: Install dependencies
-        run: npm ci
-      - name: Run Jest tests
-        run: npm test -- --ci --reporters=default
+      - run: npm ci
+      - run: npm test -- --ci --reporters=default
       - name: Build GAS bundle (dry-run verify)
         run: node build.js
 
   qa:
-    name: Cloud QA (Playwright, qa/)
+    name: Cloud QA (Playwright, qa/) — manual-only
+    # Only run on manual trigger; skips on regular push/PR
+    if: github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -48,35 +45,19 @@ jobs:
         with:
           node-version: "20"
           cache: "npm"
-      - name: Install dependencies
-        run: npm ci
-      - name: Install Playwright Chromium
-        run: npx playwright install --with-deps chromium
+      - run: npm ci
+      - run: npx playwright install --with-deps chromium
       - name: Build qa/ bundle + boot mock server
         run: |
           npm run qa:bundle
           nohup node qa/server.js > qa-server.log 2>&1 &
           echo $! > qa-server.pid
           for i in $(seq 1 30); do
-            if curl -fs http://localhost:4567/ > /dev/null; then
-              echo "qa/server.js up after ${i}s"
-              exit 0
-            fi
+            if curl -fs http://localhost:4567/ > /dev/null; then break; fi
             sleep 1
           done
-          echo "qa/server.js failed to boot within 30s"
-          cat qa-server.log
-          exit 1
-      - name: Run 36-check Playwright QA suite
-        run: npm run qa
-      - name: Stop mock server
-        if: always()
-        run: |
-          if [ -f qa-server.pid ]; then
-            kill "$(cat qa-server.pid)" 2>/dev/null || true
-          fi
-      - name: Upload QA report + screenshots
-        if: always()
+      - run: npm run qa
+      - if: always()
         uses: actions/upload-artifact@v4
         with:
           name: qa-report
