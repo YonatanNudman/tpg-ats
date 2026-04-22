@@ -31,6 +31,7 @@ import {
   computeTimeToHireTrend,
   computeStageVelocity,
   computeSlaBreaches,
+  computeStaleCandidates,
 } from "./Analytics";
 import type {
   SettingsResult,
@@ -180,6 +181,34 @@ function getCandidates(filters: CandidateFilters): CandidateRow[] {
   }
 
   return joinCandidates(all, db);
+}
+
+/**
+ * Duplicate-candidate check by email (case-insensitive, trimmed).
+ * Returns a list of matching candidates with enough info for the UI to
+ * offer "Open existing" / "Add anyway" choices. Email match is the
+ * conservative signal — phone collisions are noisy; name collisions are
+ * frequent among common names.
+ */
+function findDuplicateCandidatesByEmail(email: string): CandidateRow[] {
+  if (!email) return [];
+  const db = getDB();
+  const needle = String(email).trim().toLowerCase();
+  if (!needle) return [];
+  const matches = db.getAllCandidates().filter(c =>
+    (c.email || "").trim().toLowerCase() === needle
+  );
+  if (matches.length === 0) return [];
+  // Join so the UI can show job title + stage name + status, not just IDs
+  return matches.map(c => joinCandidate(
+    c,
+    db.getAllStages(),
+    db.getAllJobs(),
+    db.getAllRecruiters(),
+    db.getAllSources(),
+    db.getAllRegions(),
+    db.getAllRefuseReasons()
+  ));
 }
 
 function getCandidateDetail(id: number): CandidateDetailResult {
@@ -444,6 +473,7 @@ function getDashboardData(filters: DashboardFilters): DashboardResult {
     timeToHireTrend:      computeTimeToHireTrend(candidates),
     stageVelocity:        computeStageVelocity(allHistory, stages, filters),
     slaBreaches:          computeSlaBreaches(candidates, stages, recruiters, jobs, filters),
+    staleCandidates:      computeStaleCandidates(candidates, stages, recruiters, jobs, filters),
     recentHires,
   };
 }

@@ -44,6 +44,28 @@ window.stageChipStyle = function (color) {
 };
 window.motionClass = function (m) { return m === 'Outbound' ? 'outbound' : 'inbound'; };
 
+/**
+ * Trend comparison helpers for KPI cards.
+ *   trendArrow(current, prev)        → "↗ +2" / "↘ -1" / "→ ="  (bigger = better)
+ *   trendArrow(current, prev, invert) → inverts color semantics for metrics where
+ *                                       lower is better (e.g. avgDaysToHire)
+ *   trendClass(current, prev)        → 'trend-up' / 'trend-down' / 'trend-flat'
+ */
+window.trendArrow = function (current, prev) {
+  if (prev == null || isNaN(prev)) return '';
+  var delta = (current || 0) - prev;
+  if (delta > 0)  return '<span class="trend-sym">\u2197</span>&nbsp;+' + delta;
+  if (delta < 0)  return '<span class="trend-sym">\u2198</span>&nbsp;' + delta;
+  return '<span class="trend-sym">\u2192</span>';
+};
+window.trendClass = function (current, prev) {
+  if (prev == null || isNaN(prev)) return 'trend-empty';
+  var delta = (current || 0) - prev;
+  if (delta > 0) return 'trend-up';
+  if (delta < 0) return 'trend-down';
+  return 'trend-flat';
+};
+
 function presetRange(preset) {
   var now = new Date();
   var end = now.toISOString().split('T')[0];
@@ -149,6 +171,7 @@ document.addEventListener('alpine:init', function () {
         sourceEffectiveness: [], timeToHireTrend: [], stageVelocity: [],
       },
       slaBreaches: [],
+      staleCandidates: [],      // pipeline health alerts (2×+ past SLA or >14d no-SLA)
 
       // ── Computed ─────────────────────────────────────────
       get filteredCandidates() {
@@ -269,6 +292,7 @@ document.addEventListener('alpine:init', function () {
           stageVelocity: a.stageVelocity,
         };
         this.slaBreaches = a.slaBreaches;
+        this.staleCandidates = a.staleCandidates || [];
       },
 
       buildDashboardFilters: function () {

@@ -22,6 +22,7 @@ import type {
   MonthlyTrendItem,
   StageVelocityItem,
   SlaBreachItem,
+  StaleCandidateItem,
 } from "./types";
 
 // ---------- Filters ----------
@@ -114,6 +115,38 @@ export function computeKpis(
     return exp >= today.getTime() && exp <= sevenDays;
   }).length;
 
+  // ── Previous-period comparison for trend arrows ─────────────────
+  // If the user's period is N days long, run the same KPI calc over
+  // the N days immediately before startDate. Skip if the window is
+  // longer than 2 years or invalid (returns undefined → no arrows shown).
+  let prev: KpiData["prev"] | undefined = undefined;
+  try {
+    const startMs = new Date(filtersNoStatus.startDate).getTime();
+    const endMs   = new Date(filtersNoStatus.endDate).getTime();
+    const spanMs  = endMs - startMs;
+    if (spanMs > 0 && spanMs < 365 * 86_400_000 * 2) {
+      const prevEndMs   = startMs - 86_400_000;
+      const prevStartMs = prevEndMs - spanMs;
+      const prevFilters: DashboardFilters = {
+        ...filtersNoStatus,
+        startDate: new Date(prevStartMs).toISOString().split("T")[0],
+        endDate:   new Date(prevEndMs).toISOString().split("T")[0],
+      };
+      const prevInScope = filterCandidates(candidates, prevFilters);
+      const prevHires = prevInScope.filter(c => c.status === "Hired" && c.date_applied && c.date_last_stage_update);
+      const prevAvgDays = prevHires.length > 0
+        ? prevHires.reduce((s, c) =>
+            s + (new Date(c.date_last_stage_update).getTime() - new Date(c.date_applied).getTime()) / 86_400_000, 0
+          ) / prevHires.length
+        : 0;
+      prev = {
+        activeCandidates: prevInScope.filter(c => c.status === "Active").length,
+        hiresThisPeriod:  prevHires.length,
+        avgDaysToHire:    Math.round(prevAvgDays * 10) / 10,
+      };
+    }
+  } catch { /* swallow — previous-period is nice-to-have */ }
+
   return {
     activeCandidates,
     openPositions,
@@ -123,6 +156,7 @@ export function computeKpis(
     offerAcceptanceRate: Math.round(offerAcceptanceRate * 10) / 10,
     expiredPostings,
     expiringPostings,
+    prev,
   };
 }
 
@@ -373,4 +407,66 @@ export function computeSlaBreaches(
   }
 
   return breaches.sort((a, b) => b.hours_overdue - a.hours_overdue);
+}
+
+// ---------- Stale Candidates (pipeline health alerts) ----------
+
+/**
+ * Candidates that are not just past SLA but *deeply* stalled — the kind
+ * a recruiter should chase today. Complements computeSlaBreaches by filtering
+ * to a more severe tier:
+ *   stale      — 2× target_hours past (or >14 days if stage has no SLA)
+ *   abandoned  — 4× target_hours past (or >30 days if stage has no SLA)
+ */
+export function computeStaleCandidates(
+  candidates: CandidateRow[],
+  stages: StageRow[],
+  recruiters: RecruiterRow[],
+  jobs: JobRow[],
+  filters: DashboardFilters
+): StaleCandidateItem[] {
+  const filtered = filterCandidates(candidates, filters).filter(c => c.status === "Active");
+  const stageMap = new Map(stages.map(s => [s.id, s]));
+  const recruiterMap = new Map(recruiters.map(r => [r.id, r.name]));
+  const jobMap = new Map(jobs.map(j => [j.id, j.title]));
+  const now = new Date();
+  const items: StaleCandidateItem[] = [];
+
+  for (const c of filtered) {
+    const stage = stageMap.get(c.stage_id);
+    if (!stage || stage.is_hired || stage.is_rejected) continue;  // terminal stages don't count
+    const lastUpdate = c.date_last_stage_update
+      ? new Date(c.date_last_stage_update)
+      : new Date(c.date_applied);
+    const hoursInStage = (now.getTime() - lastUpdate.getTime()) / 3_600_000;
+    const daysInStage  = Math.round(hoursInStage / 24);
+
+    let severity: "stale" | "abandoned" | null = null;
+    if (stage.target_hours) {
+      if (hoursInStage > stage.target_hours * 4) severity = "abandoned";
+      else if (hoursInStage > stage.target_hours * 2) severity = "stale";
+    } else {
+      // No SLA configured → use day-based heuristic
+      if (daysInStage > 30) severity = "abandoned";
+      else if (daysInStage > 14) severity = "stale";
+    }
+    if (!severity) continue;
+
+    items.push({
+      candidate_id: c.id,
+      candidate_name: `${c.first_name} ${c.last_name}`,
+      stage_name: stage.name,
+      stage_color: stage.color,
+      job_title: jobMap.get(c.job_id) ?? "Unknown",
+      recruiter_name: c.recruiter_id ? (recruiterMap.get(c.recruiter_id) ?? "Unassigned") : "Unassigned",
+      days_in_stage: daysInStage,
+      severity,
+    });
+  }
+
+  // Abandoned first, then stale; within each severity, longest-stalled first
+  return items.sort((a, b) => {
+    if (a.severity !== b.severity) return a.severity === "abandoned" ? -1 : 1;
+    return b.days_in_stage - a.days_in_stage;
+  });
 }

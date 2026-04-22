@@ -182,7 +182,11 @@
         :class="{ 'active': drill === 'active' }"
         @click="toggleDrill('active')">
         <div class="kpi-label">Active Candidates</div>
-        <div class="kpi-value" x-text="kpi.activeCandidates"></div>
+        <div class="kpi-value">
+          <span x-text="kpi.activeCandidates"></span>
+          <span class="trend" :class="trendClass(kpi.activeCandidates, kpi.prev?.activeCandidates)"
+            x-html="trendArrow(kpi.activeCandidates, kpi.prev?.activeCandidates)"></span>
+        </div>
         <div class="kpi-sub">Click to show list</div>
       </div>
 
@@ -197,9 +201,19 @@
 
       <div class="kpi-card kpi-accent-success">
         <div class="kpi-label">Hires This Period</div>
-        <div class="kpi-value" x-text="kpi.hiresThisPeriod"></div>
+        <div class="kpi-value">
+          <span x-text="kpi.hiresThisPeriod"></span>
+          <span class="trend" :class="trendClass(kpi.hiresThisPeriod, kpi.prev?.hiresThisPeriod)"
+            x-html="trendArrow(kpi.hiresThisPeriod, kpi.prev?.hiresThisPeriod)"></span>
+        </div>
         <div class="kpi-sub">
           Avg <span x-text="kpi.avgDaysToHire"></span> days to hire
+          <template x-if="kpi.prev && kpi.prev.avgDaysToHire > 0">
+            <span class="trend-inline"
+              :class="trendClass(kpi.prev.avgDaysToHire, kpi.avgDaysToHire)"
+              x-html="trendArrow(kpi.prev.avgDaysToHire, kpi.avgDaysToHire, true)"
+              title="Lower is better"></span>
+          </template>
         </div>
       </div>
 
@@ -213,6 +227,82 @@
         </div>
       </div>
     </div>
+
+    <!-- ── Pipeline Health Banner ─────────────────────────── -->
+    <!-- Shows when there are "stale" or "abandoned" candidates (past 2× or 4× SLA,
+         or >14/30 days on stages with no SLA). Click to toggle the full list. -->
+    <template x-if="staleCandidates.length > 0">
+      <div class="health-banner"
+        :class="{
+          'health-banner-critical': staleCandidates.some(s => s.severity === 'abandoned'),
+          'active': drill === 'stale'
+        }"
+        @click="toggleDrill('stale')">
+        <div class="health-banner-icon">
+          <span class="material-icons"
+            x-text="staleCandidates.some(s => s.severity === 'abandoned') ? 'error' : 'warning'"></span>
+        </div>
+        <div class="health-banner-body">
+          <div class="health-banner-title">
+            <span x-text="staleCandidates.length"></span>
+            candidate<span x-text="staleCandidates.length === 1 ? '' : 's'"></span>
+            need<span x-text="staleCandidates.length === 1 ? 's' : ''"></span> attention
+          </div>
+          <div class="health-banner-meta">
+            <template x-if="staleCandidates.filter(s => s.severity === 'abandoned').length > 0">
+              <span>
+                <strong x-text="staleCandidates.filter(s => s.severity === 'abandoned').length"></strong>
+                abandoned (4×+ past SLA)
+              </span>
+            </template>
+            <template x-if="staleCandidates.filter(s => s.severity === 'stale').length > 0">
+              <span>
+                <strong x-text="staleCandidates.filter(s => s.severity === 'stale').length"></strong>
+                stale (2×+ past SLA)
+              </span>
+            </template>
+          </div>
+        </div>
+        <span class="material-icons health-banner-arrow"
+          x-text="drill === 'stale' ? 'expand_less' : 'expand_more'"></span>
+      </div>
+    </template>
+
+    <!-- Stale candidates drill-down -->
+    <template x-if="drill === 'stale' && staleCandidates.length > 0">
+      <div class="card inline-drill">
+        <div class="card-header">
+          <span class="card-title">Candidates needing attention</span>
+          <button class="icon-btn-sm" @click="drill = null">✕</button>
+        </div>
+        <table class="data-table">
+          <thead>
+            <tr>
+              <th>Candidate</th><th>Stage</th><th>Job</th><th>Recruiter</th>
+              <th>Days in stage</th><th>Severity</th>
+            </tr>
+          </thead>
+          <tbody>
+            <template x-for="s in staleCandidates" :key="s.candidate_id">
+              <tr @click="openPeek(s.candidate_id)">
+                <td x-text="s.candidate_name"></td>
+                <td>
+                  <span class="stage-chip" :style="stageChipStyle(s.stage_color)"
+                    x-text="s.stage_name"></span>
+                </td>
+                <td x-text="s.job_title"></td>
+                <td x-text="s.recruiter_name"></td>
+                <td x-text="s.days_in_stage + 'd'"></td>
+                <td>
+                  <span class="severity-badge" :class="'severity-' + s.severity"
+                    x-text="s.severity"></span>
+                </td>
+              </tr>
+            </template>
+          </tbody>
+        </table>
+      </div>
+    </template>
 
     <!-- ── SLA Drilldown (inline under KPI strip) ───────── -->
     <template x-if="drill === 'sla' && slaBreaches.length > 0">

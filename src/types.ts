@@ -208,6 +208,14 @@ export interface KpiData {
   offerAcceptanceRate: number;
   expiredPostings: number;
   expiringPostings: number;
+  /** Same KPIs from the previous equivalent period, for trend arrows.
+   *  E.g. if filters are "last 30d", this is "31–60d ago".
+   *  Absent if the period is too long to have a comparable previous window. */
+  prev?: {
+    activeCandidates: number;
+    hiresThisPeriod: number;
+    avgDaysToHire: number;
+  };
 }
 
 export interface PipelineSnapshotItem {
@@ -270,6 +278,24 @@ export interface SlaBreachItem {
   hours_overdue: number;
 }
 
+/**
+ * Candidates that have been in their stage much longer than expected.
+ * Severity tiers:
+ *   "sla"        — past target_hours but under 2× (already the existing SLA breach view)
+ *   "stale"      — past 2× target_hours, or >14 days if stage has no SLA
+ *   "abandoned"  — past 4× target_hours, or >30 days if stage has no SLA
+ */
+export interface StaleCandidateItem {
+  candidate_id: number;
+  candidate_name: string;
+  stage_name: string;
+  stage_color: string;
+  job_title: string;
+  recruiter_name: string;
+  days_in_stage: number;
+  severity: "stale" | "abandoned";
+}
+
 export interface DashboardResult {
   kpis: KpiData;
   pipelineSnapshot: PipelineSnapshotItem[];
@@ -279,6 +305,7 @@ export interface DashboardResult {
   timeToHireTrend: MonthlyTrendItem[];
   stageVelocity: StageVelocityItem[];
   slaBreaches: SlaBreachItem[];
+  staleCandidates: StaleCandidateItem[];
   recentHires: CandidateRow[];
 }
 

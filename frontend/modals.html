@@ -35,6 +35,7 @@
               <div class="col-6">
                 <label class="form-label">Email *</label>
                 <input type="email" class="form-control" x-model="form.email"
+                  @blur="checkDuplicates()"
                   :class="{ 'is-invalid': errors.email }">
                 <div class="invalid-feedback" x-text="errors.email"></div>
               </div>
@@ -43,6 +44,44 @@
                 <label class="form-label">Phone</label>
                 <input type="tel" class="form-control" x-model="form.phone">
               </div>
+
+              <!-- Duplicate warning banner ─ shown when an existing candidate
+                   already has this email. Offers Open / Add-anyway escape hatches. -->
+              <template x-if="duplicates.length > 0">
+                <div class="col-12">
+                  <div class="dup-warning">
+                    <div class="dup-warning-title">
+                      <span class="material-icons mi-inline">warning</span>
+                      <span x-text="duplicates.length === 1
+                        ? 'This email is already in the system.'
+                        : 'This email matches ' + duplicates.length + ' existing records.'"></span>
+                    </div>
+                    <ul class="dup-warning-list">
+                      <template x-for="d in duplicates" :key="d.id">
+                        <li>
+                          <button type="button" class="dup-link"
+                            @click="openExistingCandidate(d.id)">
+                            <strong x-text="(d.first_name || '') + ' ' + (d.last_name || '')"></strong>
+                          </button>
+                          <span class="dup-meta">
+                            on <span x-text="d.job_title || '—'"></span>
+                            · <span class="stage-chip"
+                              :style="stageChipStyle(d.stage_color)"
+                              x-text="d.stage_name || '—'"></span>
+                            · <span x-text="d.status"></span>
+                          </span>
+                        </li>
+                      </template>
+                    </ul>
+                    <div class="dup-warning-actions">
+                      <label class="dup-override">
+                        <input type="checkbox" x-model="forceCreate">
+                        <span>Add this as a new record anyway</span>
+                      </label>
+                    </div>
+                  </div>
+                </div>
+              </template>
 
               <div class="col-12">
                 <label class="form-label">Job Opening *</label>
@@ -210,6 +249,9 @@ document.addEventListener('alpine:init', function () {
   Alpine.data('addCandidateModal', function () {
     return {
       submitting: false, openJobs: [], errors: {},
+      duplicates: [],          // populated when email matches an existing candidate
+      duplicatesChecked: '',   // the email we last checked, to avoid re-query spam
+      forceCreate: false,      // user explicitly chose "Add anyway" after seeing dupes
       form: {
         first_name: '', last_name: '', email: '', phone: '',
         job_id: '', source_id: '', region_id: '',
@@ -228,6 +270,25 @@ document.addEventListener('alpine:init', function () {
         if (src) this.form.motion = src.default_motion;
       },
 
+      // Called on email blur — checks for duplicates but doesn't block anything yet
+      checkDuplicates: async function () {
+        var email = (this.form.email || '').trim().toLowerCase();
+        if (!email) { this.duplicates = []; this.duplicatesChecked = ''; this.forceCreate = false; return; }
+        if (email === this.duplicatesChecked) return;   // already checked this exact value
+        this.duplicatesChecked = email;
+        this.forceCreate = false;
+        try {
+          this.duplicates = await gasCall('findDuplicateCandidatesByEmail', email);
+        } catch (err) {
+          this.duplicates = [];   // non-fatal — don't block submit on a check failure
+        }
+      },
+
+      openExistingCandidate: function (id) {
+        this.$store.app.closeModal();
+        this.$store.app.openPeek(id);
+      },
+
       validate: function () {
         var e = {};
         if (!this.form.first_name.trim()) e.first_name = 'Required.';
@@ -240,6 +301,12 @@ document.addEventListener('alpine:init', function () {
 
       submit: async function () {
         if (!this.validate()) return;
+        // If we found duplicates and the user hasn't explicitly opted to add anyway,
+        // hold the submit — the warning banner will render in the modal body.
+        if (this.duplicates.length > 0 && !this.forceCreate) {
+          this.$store.app.toastError('Already have someone with that email \u2014 confirm below to add anyway.');
+          return;
+        }
         this.submitting = true;
         try {
           await gasCall('createCandidate', {
@@ -254,7 +321,9 @@ document.addEventListener('alpine:init', function () {
             linkedin_url: this.form.linkedin_url || '',
             notes: this.form.notes || '',
           });
-          this.$store.app.toastSuccess('Candidate added.');
+          this.$store.app.toastSuccess(
+            this.duplicates.length > 0 ? 'Duplicate candidate added.' : 'Candidate added.'
+          );
           this.$store.app.closeModal();
           var root = Alpine.$data(document.querySelector('#app'));
           if (root) await root.reloadAll();
