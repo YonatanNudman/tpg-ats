@@ -175,6 +175,78 @@ function withLock<T>(fn: () => T): T {
 }
 
 // ============================================================
+// Error message normalization
+// ============================================================
+//
+// Catches the most common backend failure shapes and rewrites them
+// into actionable user-readable messages so the toast tells the user
+// what to do, not just that something broke. Previously the frontend
+// surfaced raw "TypeError: undefined is not an object…" strings,
+// which are useless to a recruiter trying to decide whether to retry,
+// refresh, or escalate.
+//
+// Categories also feed the failure counter so the ?debug=1 panel can
+// show "9 lock-timeout failures in the last hour" at a glance.
+//
+// Conflict prefix is preserved untouched — the frontend matches on it
+// to surface a Reload action button, and rewriting the prefix would
+// silently break that detection.
+
+function _humanizeError(err: unknown, context: string): Error {
+  const raw = err instanceof Error ? err.message : String(err);
+  let category = "unknown";
+  let humanMsg = raw;
+
+  if (raw.startsWith(CONFLICT_PREFIX)) {
+    // Don't touch — frontend depends on this prefix for the Reload affordance.
+    category = "conflict";
+    humanMsg = raw;
+  } else if (/Lock(Service)?.*(timeout|wait)/i.test(raw) || raw.includes("lock could not be acquired")) {
+    category = "lock-timeout";
+    humanMsg = "The sheet is busy with another save. Try again in a moment.";
+  } else if (raw.includes("not found") || raw.includes("Not found")) {
+    category = "not-found";
+    humanMsg = raw;   // these are already actionable ("Candidate 42 not found")
+  } else if (/Quota|exceeded.*time/i.test(raw)) {
+    category = "quota";
+    humanMsg = "Hit a Google Apps Script quota limit. Wait a minute and retry; if it persists, contact admin.";
+  } else if (/permission|authoriz/i.test(raw)) {
+    category = "permission";
+    humanMsg = "Permission denied. You may need to refresh the page to re-authenticate.";
+  } else if (/network|fetch|connect/i.test(raw)) {
+    category = "network";
+    humanMsg = "Network error reaching the sheet. Check your connection and retry.";
+  } else if (/required/i.test(raw) && raw.length < 80) {
+    category = "validation";
+    humanMsg = raw;
+  } else {
+    // Unknown shape — keep the raw message but prefix with a hint so
+    // the recruiter knows it's worth surfacing rather than retrying.
+    category = "unknown";
+    humanMsg = "Unexpected error: " + raw + " — refresh and retry; if it sticks, copy this message to support.";
+  }
+
+  _bumpFailureCounter(context + ":" + category);
+  return new Error(humanMsg);
+}
+
+// Wraps every frontend-callable function in a try/catch that normalizes
+// the error before re-throwing. google.script.run ferries the message
+// across to the client; the rewritten message is what the user sees.
+function _wrapHandler<TArgs extends unknown[], TReturn>(
+  name: string,
+  fn: (...args: TArgs) => TReturn,
+): (...args: TArgs) => TReturn {
+  return function (...args: TArgs): TReturn {
+    try {
+      return fn(...args);
+    } catch (err) {
+      throw _humanizeError(err, name);
+    }
+  };
+}
+
+// ============================================================
 // Settings / Initialization
 // ============================================================
 
@@ -489,6 +561,158 @@ function deleteCandidate(id: number): void {
 
 function assignRecruiter(id: number, recruiterId: number): void {
   withLock(() => getDB().updateCandidate(id, { recruiter_id: recruiterId }));
+}
+
+// ============================================================
+// Bulk operations — batch endpoints for the multi-select UI
+// ============================================================
+//
+// Each bulk endpoint runs every individual write in a single withLock
+// span so the whole batch is atomic relative to other writers (no
+// interleaving with a single-row save mid-batch). Per-row failures
+// don't abort the rest — the result envelope reports per-id success
+// so the UI can highlight the failures and let the user retry just
+// those. This matters when 50+ candidates are being processed and a
+// single conflict shouldn't tank the whole bulk.
+//
+// All bulk endpoints follow the same shape so the frontend can use
+// a single executeBulk() helper:
+//   { successIds: [...], failures: [{ id, message }] }
+//
+// Conflict detection is OPT-IN per row (each id can carry an
+// expectedDate) but bulk usage typically passes none — the UX is
+// "I have these N people in front of me, advance them all" and a
+// stale read is acceptable for a batch operation.
+
+interface BulkResult {
+  successIds: number[];
+  failures: Array<{ id: number; message: string }>;
+}
+
+function _runBulk(
+  ids: number[],
+  perRow: (id: number) => void,
+): BulkResult {
+  const successIds: number[] = [];
+  const failures: Array<{ id: number; message: string }> = [];
+  // Single lock span for the whole batch so concurrent single-row
+  // writes don't slip in between bulk steps and produce surprising
+  // mid-batch state.
+  withLock(() => {
+    for (const rawId of ids) {
+      const id = Number(rawId);
+      if (!id || isNaN(id)) {
+        failures.push({ id: rawId, message: "Invalid id" });
+        continue;
+      }
+      try {
+        perRow(id);
+        successIds.push(id);
+      } catch (e: unknown) {
+        // Humanize per-row failures so the action-bar toast tells the
+        // user something useful even when the batch is half-failed,
+        // e.g. "Candidate 42 not found" instead of "TypeError: ...".
+        const humanized = _humanizeError(e, "bulk");
+        failures.push({ id, message: humanized.message });
+      }
+    }
+  });
+  return { successIds, failures };
+}
+
+function bulkAdvanceStage(ids: number[], targetStageId: number): BulkResult {
+  if (!Array.isArray(ids) || ids.length === 0) return { successIds: [], failures: [] };
+  const stageId = Number(targetStageId);
+  if (!stageId) throw new Error("targetStageId required");
+
+  const db = getDB();
+  const targetStage = db.getAllStages().find(s => s.id === stageId);
+  if (!targetStage) throw new Error(`Stage ${stageId} not found`);
+  if (!targetStage.is_enabled) throw new Error(`Stage "${targetStage.name}" is not enabled`);
+
+  const stages = db.getAllStages();
+  const userEmail = getSessionEmail();
+  const today = todayStr();
+
+  return _runBulk(ids, function (id) {
+    const candidate = db.getCandidateById(id);
+    if (!candidate) throw new Error(`Candidate ${id} not found`);
+    if (candidate.stage_id === stageId) return;   // already there, no-op success
+
+    const fromStage = stages.find(s => s.id === candidate.stage_id);
+    let newStatus = candidate.status;
+    if (targetStage.is_hired)         newStatus = "Hired";
+    else if (targetStage.is_rejected) newStatus = "Rejected";
+
+    logHistory(
+      db,
+      id, `${candidate.first_name} ${candidate.last_name}`,
+      candidate.job_id, "",
+      candidate.stage_id, fromStage?.name ?? "",
+      stageId, targetStage.name,
+      userEmail, candidate.date_last_stage_update,
+    );
+
+    db.updateCandidate(id, {
+      stage_id:               stageId,
+      status:                 newStatus,
+      date_last_stage_update: today,
+    });
+  });
+}
+
+function bulkAssignRecruiter(ids: number[], recruiterId: number | null): BulkResult {
+  if (!Array.isArray(ids) || ids.length === 0) return { successIds: [], failures: [] };
+  const rid = recruiterId == null ? null : Number(recruiterId);
+
+  const db = getDB();
+  if (rid != null) {
+    const r = db.getAllRecruiters().find(x => x.id === rid);
+    if (!r) throw new Error(`Recruiter ${rid} not found`);
+  }
+
+  return _runBulk(ids, function (id) {
+    const candidate = db.getCandidateById(id);
+    if (!candidate) throw new Error(`Candidate ${id} not found`);
+    db.updateCandidate(id, { recruiter_id: rid });
+  });
+}
+
+function bulkRejectCandidates(ids: number[], refuseReasonId: number): BulkResult {
+  if (!Array.isArray(ids) || ids.length === 0) return { successIds: [], failures: [] };
+  const reasonId = Number(refuseReasonId);
+  if (!reasonId) throw new Error("refuseReasonId required");
+
+  const db = getDB();
+  const stages = db.getAllStages();
+  const rejectedStage = stages.find(s => s.is_rejected && s.is_enabled);
+  if (!rejectedStage) throw new Error("No rejected stage configured");
+
+  const userEmail = getSessionEmail();
+  const today = todayStr();
+
+  return _runBulk(ids, function (id) {
+    const candidate = db.getCandidateById(id);
+    if (!candidate) throw new Error(`Candidate ${id} not found`);
+    if (candidate.status === "Rejected") return;   // already rejected, no-op success
+
+    const fromStage = stages.find(s => s.id === candidate.stage_id);
+    logHistory(
+      db,
+      id, `${candidate.first_name} ${candidate.last_name}`,
+      candidate.job_id, "",
+      candidate.stage_id, fromStage?.name ?? "",
+      rejectedStage.id, rejectedStage.name,
+      userEmail, candidate.date_last_stage_update,
+    );
+
+    db.updateCandidate(id, {
+      stage_id:               rejectedStage.id,
+      status:                 "Rejected",
+      refuse_reason_id:       reasonId,
+      date_last_stage_update: today,
+    });
+  });
 }
 
 function updateKanbanState(id: number, state: "Normal" | "Blocked" | "Ready"): void {
@@ -975,10 +1199,124 @@ function logClientError(payload: ClientErrorPayload): { ok: boolean } {
       ts: payload.ts,
       stack: payload.stack ? payload.stack.slice(0, 2000) : undefined,
     }));
+    // Also bump the failure counter so the ?debug=1 panel can surface
+    // recent error volume without us having to query Cloud Logging.
+    _bumpFailureCounter("client:" + payload.kind);
   } catch (_e) {
     // Never throw — this would loop the unhandledrejection handler.
   }
   return { ok: true };
+}
+
+// ============================================================
+// Failure counter (for ?debug=1 panel)
+// ============================================================
+//
+// CacheService-backed rolling counter of recent backend failures by
+// category. Surfaced in getDebugInfo() so the ops health check is
+// "open ?debug=1, look for non-zero counters" instead of digging
+// through Cloud Logging. Counters auto-expire after 1 hour so the
+// panel reflects "recent" trouble, not historical noise.
+
+const FAILURE_COUNTER_KEY    = "tpg.ats.failure-counters.v1";
+const FAILURE_COUNTER_TTL_SEC = 3600;
+
+function _bumpFailureCounter(category: string): void {
+  if (typeof CacheService === "undefined") return;
+  try {
+    const cache = CacheService.getScriptCache();
+    const raw = cache.get(FAILURE_COUNTER_KEY);
+    const counters: Record<string, number> = raw ? JSON.parse(raw) : {};
+    counters[category] = (counters[category] || 0) + 1;
+    cache.put(FAILURE_COUNTER_KEY, JSON.stringify(counters), FAILURE_COUNTER_TTL_SEC);
+  } catch (_e) { /* never throw from instrumentation */ }
+}
+
+function _readFailureCounters(): Record<string, number> {
+  if (typeof CacheService === "undefined") return {};
+  try {
+    const raw = CacheService.getScriptCache().get(FAILURE_COUNTER_KEY);
+    return raw ? JSON.parse(raw) : {};
+  } catch (_e) { return {}; }
+}
+
+// ============================================================
+// Debug endpoint (?debug=1 panel)
+// ============================================================
+//
+// Single endpoint that returns everything the ?debug=1 panel needs
+// to show in one round-trip: deployed version, user identity, schema
+// validation result, sample raw vs parsed candidate, settings cache
+// state, recent failure counters. Replaces the throw-away diagnostic
+// panels we kept shipping during the v25-v31 parseStr Date hunt.
+
+interface DebugInfo {
+  version: string;            // commit SHA / deploy id (best-effort)
+  user: string;
+  serverTime: string;
+  schema: { ok: boolean; errors: string[] };
+  sampleCandidate: {
+    raw: unknown;             // first cell, untouched, with type info
+    parsed: unknown;          // what _rowToCandidate produced
+  } | null;
+  counts: {
+    candidates: number;
+    jobs: number;
+    history: number;
+    stages: number;
+    sources: number;
+    regions: number;
+    recruiters: number;
+  };
+  failureCounters: Record<string, number>;
+  spreadsheetId: string;
+  scriptTimezone: string;
+}
+
+function getDebugInfo(): DebugInfo {
+  const db = getDB();
+  const schema = db.validateSchema();
+  // Sample candidate: read row 2 from the candidates sheet directly so
+  // we can show both the RAW cell values (with their types) and the
+  // PARSED CandidateRow side-by-side. This is the diagnostic that
+  // would have caught the parseStr-Date bug in seconds instead of
+  // requiring 6 redeploys to pin down.
+  let sampleCandidate: DebugInfo["sampleCandidate"] = null;
+  try {
+    const ss = SpreadsheetApp.openById(SPREADSHEET_ID);
+    const sheet = ss.getSheetByName("candidates");
+    if (sheet && sheet.getLastRow() >= 2) {
+      const row = sheet.getRange(2, 1, 1, sheet.getLastColumn()).getValues()[0];
+      sampleCandidate = {
+        raw: row.map(v => ({
+          value: v instanceof Date ? v.toString() : v,
+          type:  v === null ? "null" : v === undefined ? "undefined" :
+                 v instanceof Date ? "Date" : typeof v,
+        })),
+        parsed: db.getAllCandidates()[0] || null,
+      };
+    }
+  } catch (_e) { /* schema check above will already report any sheet access errors */ }
+
+  return {
+    version: ScriptApp.getScriptId(),
+    user: getSessionEmail() || "unknown",
+    serverTime: new Date().toISOString(),
+    schema,
+    sampleCandidate,
+    counts: {
+      candidates: db.getAllCandidates().length,
+      jobs:       db.getAllJobs().length,
+      history:    db.getAllHistory().length,
+      stages:     db.getAllStages().length,
+      sources:    db.getAllSources().length,
+      regions:    db.getAllRegions().length,
+      recruiters: db.getAllRecruiters().length,
+    },
+    failureCounters: _readFailureCounters(),
+    spreadsheetId: SPREADSHEET_ID,
+    scriptTimezone: Session.getScriptTimeZone(),
+  };
 }
 
 // ============================================================

@@ -402,16 +402,43 @@
                 <template x-if="expandedStages.includes(stage.stage_id)">
                   <div class="funnel-stage-candidates">
                     <!--
-                      One-click "Move →" advance directly on the row, plus
+                      Bulk-select header. Appears as soon as a stage is
+                      expanded so the "select all in this stage" checkbox
+                      is one click away from the candidate rows it controls.
+                      Hidden when there are no candidates (nothing to act on).
+                    -->
+                    <template x-if="funnelCandidatesForStage(stage.stage_id).length > 0">
+                      <div class="funnel-stage-bulk-header">
+                        <label class="funnel-stage-bulk-label" @click.stop>
+                          <input type="checkbox"
+                            :checked="stageAllSelected(stage.stage_id)"
+                            @change="toggleStageSelectAll(stage.stage_id)">
+                          <span x-text="stageAllSelected(stage.stage_id) ? 'Deselect all' : 'Select all'"></span>
+                        </label>
+                      </div>
+                    </template>
+                    <!--
+                      Move-to picker dropdown directly on the row, plus
                       the whole row remains clickable to open the peek panel
                       for full editing. This was the #1 friction Janice hit
                       on the 2026/04/22 design call ("How do I move someone
-                      to the next stage?") — now the common case is a single
-                      click without ever opening the side panel.
+                      to the next stage?") — now jumping any number of
+                      stages takes a single click without ever opening
+                      the side panel.
+
+                      The leading checkbox enables the bulk action bar
+                      that appears at the bottom of the viewport when ≥1
+                      candidate is selected.
                     -->
                     <template x-for="c in funnelCandidatesForStage(stage.stage_id)" :key="c.id">
-                      <div class="funnel-candidate-row" @click="openPeek(c.id)"
+                      <div class="funnel-candidate-row"
+                        :class="{ 'funnel-candidate-row-selected': isSelected(c.id) }"
+                        @click="openPeek(c.id)"
                         :title="'Click to open ' + c.first_name + ' ' + c.last_name">
+                        <label class="funnel-cand-check" @click.stop>
+                          <input type="checkbox" :checked="isSelected(c.id)"
+                            @change="toggleSelected(c.id)">
+                        </label>
                         <div class="funnel-cand-name" x-text="c.first_name + ' ' + c.last_name"></div>
                         <div class="funnel-cand-job" x-text="c.job_title || '—'"></div>
                         <div class="funnel-cand-meta">
@@ -422,12 +449,24 @@
                           <span class="motion-chip" :class="motionClass(c.motion)"
                                 x-text="c.motion"></span>
                           <span class="days-badge" x-text="(c.days_in_stage || 0) + 'd'"></span>
+                          <!--
+                            Stage picker dropdown. Native <select> sized
+                            to look like the old "Move ›" button so users
+                            get the browser's accessible dropdown for free
+                            (keyboard, screen-reader, mobile native picker).
+                            Resets after each pick so the placeholder text
+                            stays as the visible label.
+                          -->
                           <template x-if="canAdvance(c)">
-                            <button class="btn btn-xs btn-outline-primary funnel-cand-advance"
-                              @click.stop="advanceCandidateInline(c)"
-                              :title="'Move to ' + (nextStageName(c) || 'next stage')">
-                              Move ›
-                            </button>
+                            <select class="funnel-cand-move-select"
+                              @click.stop=""
+                              @change.stop="moveCandidateTo(c, $event.target.value); $event.target.value=''"
+                              title="Move this candidate to a different stage">
+                              <option value="" selected>Move to\u2026</option>
+                              <template x-for="s in moveTargetStages(c)" :key="s.id">
+                                <option :value="s.id" x-text="s.name"></option>
+                              </template>
+                            </select>
                           </template>
                         </div>
                         <span class="material-icons funnel-cand-arrow">chevron_right</span>
@@ -1037,6 +1076,33 @@
                   <div class="peek-email" x-text="$store.app.peek.candidate.email"></div>
                 </div>
 
+                <!--
+                  Panel-wide save status. Persistent indicator at the top
+                  of the peek so the saved/dirty state of the WHOLE candidate
+                  is unmissable no matter which field the user just edited.
+                  Flashes a green pulse on every successful save (notes,
+                  dropdowns, stage) so confirmation is impossible to miss
+                  even if the user wasn't looking at the field they changed.
+                  Hidden until something has actually saved this session.
+                -->
+                <template x-if="anySaveActivity()">
+                  <div class="peek-save-status"
+                    :class="peekSaveStatusClass()"
+                    :title="peekSaveStatusTitle()">
+                    <template x-if="anySaving">
+                      <span class="peek-save-status-icon">
+                        <span class="material-icons mi-inline">sync</span>
+                      </span>
+                    </template>
+                    <template x-if="!anySaving && lastSavedAt">
+                      <span class="peek-save-status-icon">
+                        <span class="material-icons mi-inline">check_circle</span>
+                      </span>
+                    </template>
+                    <span class="peek-save-status-text" x-text="peekSaveStatusText()"></span>
+                  </div>
+                </template>
+
                 <!-- Real-time presence: avatars of other viewers right now -->
                 <template x-if="otherViewers.length > 0">
                   <div class="presence-indicator"
@@ -1400,6 +1466,176 @@
   </div>
 </template>
 
+  <!--
+    ── Debug panel (?debug=1) ──────────────────────────────
+    Floating diagnostic surface for ops + AI debugging. Opens via
+    the ?debug=1 URL parameter or programmatic openDebug() call.
+    Replaces the throw-away diagnostic panels we kept shipping
+    during the v25-v31 parseStr Date hunt — anything we'd want to
+    look at when something is broken should land here so the
+    next investigation is one URL load, not six redeploys.
+  -->
+  <template x-if="debugOpen">
+    <div class="debug-panel" @click.self="closeDebug()">
+      <div class="debug-card">
+        <div class="debug-header">
+          <strong class="debug-title">Debug \u00b7 ?debug=1</strong>
+          <button class="btn btn-sm btn-outline-secondary"
+            :disabled="debugLoading"
+            @click="refreshDebug()" x-text="debugLoading ? 'Loading\u2026' : 'Refresh'"></button>
+          <button class="icon-btn-sm" @click="closeDebug()">\u2715</button>
+        </div>
+        <div class="debug-body">
+          <template x-if="!debugInfo">
+            <div class="debug-section">
+              <div class="debug-muted">Loading\u2026</div>
+            </div>
+          </template>
+          <template x-if="debugInfo">
+            <div>
+              <div class="debug-section">
+                <div class="debug-section-title">App</div>
+                <div>User: <code x-text="debugInfo.user"></code></div>
+                <div>Server time: <code x-text="debugInfo.serverTime"></code></div>
+                <div>Script timezone: <code x-text="debugInfo.scriptTimezone"></code></div>
+                <div>Script ID: <code x-text="debugInfo.version"></code></div>
+                <div>Spreadsheet: <code x-text="debugInfo.spreadsheetId"></code></div>
+              </div>
+
+              <div class="debug-section">
+                <div class="debug-section-title">Schema</div>
+                <template x-if="debugInfo.schema.ok">
+                  <div class="debug-ok">\u2713 All sheets validated</div>
+                </template>
+                <template x-if="!debugInfo.schema.ok">
+                  <div>
+                    <div class="debug-error">\u2717 Schema problems detected:</div>
+                    <ul>
+                      <template x-for="(err, idx) in debugInfo.schema.errors" :key="idx">
+                        <li x-text="err"></li>
+                      </template>
+                    </ul>
+                  </div>
+                </template>
+              </div>
+
+              <div class="debug-section">
+                <div class="debug-section-title">Row counts</div>
+                <pre x-text="JSON.stringify(debugInfo.counts, null, 2)"></pre>
+              </div>
+
+              <div class="debug-section">
+                <div class="debug-section-title">Failure counters (last hour)</div>
+                <template x-if="Object.keys(debugInfo.failureCounters).length === 0">
+                  <div class="debug-ok">\u2713 No recent failures</div>
+                </template>
+                <template x-if="Object.keys(debugInfo.failureCounters).length > 0">
+                  <pre x-text="JSON.stringify(debugInfo.failureCounters, null, 2)"></pre>
+                </template>
+              </div>
+
+              <template x-if="debugInfo.sampleCandidate">
+                <div class="debug-section">
+                  <div class="debug-section-title">Sample candidate row</div>
+                  <div class="debug-muted" style="margin-bottom:4px;">
+                    Raw values from sheet (with cell type \u2014 watch for
+                    Date \u2192 string coercion that breaks lex compares):
+                  </div>
+                  <pre x-text="JSON.stringify(debugInfo.sampleCandidate.raw, null, 2)"></pre>
+                  <div class="debug-muted" style="margin:6px 0 4px;">After _rowToCandidate:</div>
+                  <pre x-text="JSON.stringify(debugInfo.sampleCandidate.parsed, null, 2)"></pre>
+                </div>
+              </template>
+
+              <div class="debug-section">
+                <div class="debug-section-title">Recent gasCall log (newest first)</div>
+                <template x-if="gasCallLog.length === 0">
+                  <div class="debug-muted">No calls yet this session.</div>
+                </template>
+                <table class="debug-table" x-show="gasCallLog.length > 0">
+                  <thead><tr><th>Fn</th><th>ms</th><th>OK</th><th>Time</th><th>Error</th></tr></thead>
+                  <tbody>
+                    <template x-for="(c, idx) in gasCallLog.slice(0, 30)" :key="idx">
+                      <tr :class="{ 'debug-row-fail': !c.ok }">
+                        <td x-text="c.fn"></td>
+                        <td x-text="c.ms"></td>
+                        <td x-text="c.ok ? '\u2713' : '\u2717'"></td>
+                        <td x-text="c.ts.split('T')[1].split('.')[0]"></td>
+                        <td x-text="c.error || ''" style="max-width:280px; overflow:hidden; text-overflow:ellipsis;"></td>
+                      </tr>
+                    </template>
+                  </tbody>
+                </table>
+              </div>
+
+              <div class="debug-section">
+                <div class="debug-section-title">localStorage \u00b7 section state</div>
+                <pre x-text="(localStorage.getItem('tpg-ats.section-state.v1') || '\u2014')"></pre>
+              </div>
+            </div>
+          </template>
+        </div>
+      </div>
+    </div>
+  </template>
+
+  <!--
+    ── Bulk action bar ─────────────────────────────────────
+    Slides up from the bottom of the viewport whenever ≥1 candidate is
+    selected via the funnel-row checkboxes. Lets the user move/assign/
+    reject many candidates at once instead of clicking each peek panel
+    in turn — the highest-leverage UX win once the legacy-tracker
+    import lands and Janice has dozens of "Applied" candidates to
+    triage.
+  -->
+  <template x-if="selectedIds.length > 0">
+    <div class="bulk-action-bar" :class="{ 'bulk-action-bar-busy': bulkBusy }">
+      <div class="bulk-count">
+        <strong x-text="selectedIds.length"></strong>
+        candidate<span x-text="selectedIds.length === 1 ? '' : 's'"></span> selected
+      </div>
+
+      <div class="bulk-actions">
+        <!-- Move to stage -->
+        <select class="form-select form-select-sm bulk-action-select"
+          x-model="bulkActionStageId"
+          :disabled="bulkBusy"
+          @change="bulkAdvance()">
+          <option value="">Move to stage\u2026</option>
+          <template x-for="s in settings.stages.filter(x => x.is_enabled && !x.is_rejected)" :key="s.id">
+            <option :value="s.id" x-text="s.name"></option>
+          </template>
+        </select>
+
+        <!-- Assign recruiter -->
+        <select class="form-select form-select-sm bulk-action-select"
+          x-model="bulkActionRecruiterId"
+          :disabled="bulkBusy"
+          @change="bulkAssign()">
+          <option value="">Assign recruiter\u2026</option>
+          <template x-for="r in settings.recruiters.filter(x => x.is_active)" :key="r.id">
+            <option :value="r.id" x-text="r.name"></option>
+          </template>
+        </select>
+
+        <!-- Reject -->
+        <button class="btn btn-sm btn-outline-danger"
+          :disabled="bulkBusy"
+          @click="bulkReject()">Reject\u2026</button>
+
+        <button class="btn btn-sm btn-outline-secondary"
+          :disabled="bulkBusy"
+          @click="clearSelection()">Clear</button>
+      </div>
+
+      <template x-if="bulkBusy">
+        <div class="bulk-busy-pip">
+          <span class="material-icons mi-inline">sync</span> Working\u2026
+        </div>
+      </template>
+    </div>
+  </template>
+
 </div><!-- /#app -->
 
 <!-- ── Toast container ───────────────────────────────────── -->
@@ -1407,7 +1643,19 @@
   <template x-for="t in $store.app.toasts" :key="t.id">
     <div class="toast" :class="'toast-' + t.type">
       <div class="toast-icon" x-text="t.icon"></div>
-      <div class="toast-message" x-text="t.message"></div>
+      <div class="toast-content">
+        <div class="toast-message" x-text="t.message"></div>
+        <!--
+          Error toasts get a "Copy error" affordance that bundles up
+          the raw error text + URL + user + UA + timestamp into the
+          clipboard. Means bug reports can be pasted instead of
+          retyped from memory.
+        -->
+        <template x-if="t.copyable">
+          <button class="toast-copy"
+            @click="$store.app.copyErrorToClipboard(t.id)">Copy error</button>
+        </template>
+      </div>
       <template x-if="t.actionLabel">
         <button class="toast-action"
           @click="$store.app.invokeToastAction(t.id)"

@@ -81,14 +81,39 @@ window.addEventListener('unhandledrejection', function (e) {
 });
 
 // ── Promise wrapper for google.script.run ───────────────────
+// Rolling buffer of the most recent gasCall invocations. Populated by
+// the gasCall wrapper below and read by the ?debug=1 panel so we can
+// see "what just talked to the server" without scattering instrumentation
+// through every handler. Capped to the last 50 entries so memory stays
+// bounded even on long-lived sessions.
+window.__gasCallLog = window.__gasCallLog || [];
+function _logGasCall(entry) {
+  window.__gasCallLog.push(entry);
+  if (window.__gasCallLog.length > 50) {
+    window.__gasCallLog.shift();
+  }
+}
+
 function gasCall(fnName, ...args) {
+  var startedAt = Date.now();
   return new Promise(function (resolve, reject) {
     var runner = google.script.run
-      .withSuccessHandler(resolve)
+      .withSuccessHandler(function (result) {
+        _logGasCall({
+          fn: fnName, ms: Date.now() - startedAt,
+          ok: true, ts: new Date(startedAt).toISOString(),
+        });
+        resolve(result);
+      })
       .withFailureHandler(function (err) {
         // Note: caller errors typically surface via the per-action toast
         // (e.g. "Save failed: …"). _reportClientError is for the cases
         // where the rejection bubbles all the way up to unhandledrejection.
+        _logGasCall({
+          fn: fnName, ms: Date.now() - startedAt,
+          ok: false, error: err.message || String(err),
+          ts: new Date(startedAt).toISOString(),
+        });
         reject(new Error(err.message || String(err)));
       });
     runner[fnName].apply(runner, args);
@@ -438,8 +463,56 @@ document.addEventListener('alpine:init', function () {
       if (t.onAction) { try { t.onAction(); } catch (e) { /* non-fatal */ } }
     },
     toastSuccess: function (m, opts) { this.toast(m, 'success', opts); },
-    toastError:   function (m, opts) { this.toast(m, 'error',   opts); },
-    toastInfo:    function (m, opts) { this.toast(m, 'info',    opts); },
+    toastError:   function (m, opts) {
+      // Error toasts get the raw message attached so the "Copy error"
+      // affordance can include the exact text (without truncation /
+      // i18n) in the clipboard payload. Lets users paste a useful
+      // bug report instead of describing the error from memory.
+      var enriched = Object.assign({ rawError: m, copyable: true, duration: 7000 }, opts || {});
+      this.toast(m, 'error', enriched);
+    },
+    toastInfo:    function (m, opts) { this.toast(m, 'info', opts); },
+
+    // Build a clipboard payload with everything support would want:
+    // raw error, current URL, deployed user, viewport, browser, time.
+    // Triggered by the inline "Copy error" link on error toasts.
+    copyErrorToClipboard: function (toastId) {
+      var t = this.toasts.find(function (x) { return x.id === toastId; });
+      if (!t) return;
+      var payload = [
+        '== TPG ATS error report ==',
+        'When:    ' + new Date().toISOString(),
+        'User:    ' + (this.userEmail || 'unknown'),
+        'URL:     ' + window.location.href,
+        'UA:      ' + navigator.userAgent,
+        'Message: ' + (t.rawError || t.message),
+      ].join('\n');
+      var done = false;
+      try {
+        if (navigator.clipboard && navigator.clipboard.writeText) {
+          navigator.clipboard.writeText(payload).then(function () {});
+          done = true;
+        }
+      } catch (_e) { /* fall through */ }
+      if (!done) {
+        // Fallback for older browsers / iframe restrictions.
+        try {
+          var ta = document.createElement('textarea');
+          ta.value = payload;
+          ta.style.position = 'fixed'; ta.style.opacity = '0';
+          document.body.appendChild(ta);
+          ta.select();
+          document.execCommand('copy');
+          document.body.removeChild(ta);
+          done = true;
+        } catch (_e) { /* give up — can't copy in this env */ }
+      }
+      if (done) {
+        this.toast('Error details copied to clipboard.', 'success', { duration: 2000 });
+      } else {
+        this.toast('Could not copy. Open dev tools or screenshot.', 'error', { duration: 4000 });
+      }
+    },
 
     // Peek — opt { suppressHistory: true } skips pushing a new history frame
     // (used when restoring from a URL on initial load, or reacting to popstate)
@@ -519,6 +592,32 @@ document.addEventListener('alpine:init', function () {
       // array so multiple can be open simultaneously — useful for cross-
       // stage comparison when triaging).
       expandedStages: [],
+
+      // ── Bulk selection state ─────────────────────────────
+      // Plain array (not Set) for Alpine reactivity. Selected candidate
+      // ids drive the floating action bar at the bottom of the funnel.
+      // bulkBusy gates the action bar while a bulk operation is in
+      // flight so the user can't double-fire (and the UI shows a
+      // "Working…" state instead of looking unresponsive).
+      selectedIds:        [],
+      bulkBusy:           false,
+      bulkActionStageId:  '',   // dropdown value for "Move to…" in action bar
+      bulkActionRecruiterId: '',
+
+      // ── Debug panel state (?debug=1) ──────────────────────
+      // Toggled on by `?debug=1` in the URL or by the keyboard
+      // shortcut (none in v1 — kept intentional so users don't trigger
+      // it by accident). Holds the most recent getDebugInfo() response
+      // so the panel can render without an extra round-trip per
+      // expand/collapse.
+      debugOpen:    false,
+      debugInfo:    null,
+      debugLoading: false,
+      // Rolling buffer of recent gasCall() invocations — populated by
+      // the gasCall wrapper (see top of this file) so the debug panel
+      // can show "what just talked to the server" with no instrumentation
+      // changes scattered through the codebase.
+      gasCallLog:   [],
 
       // Per-section loading flags. Toggled by reloadRecruiterPerf /
       // reloadSourceEffectiveness so the user gets visible feedback that
@@ -627,6 +726,28 @@ document.addEventListener('alpine:init', function () {
         } catch (e) { /* malformed JSON or storage error — start clean */ }
       },
 
+      // ── Debug panel (?debug=1) ───────────────────────────
+      // Loads the diagnostic info bundle and toggles the floating
+      // panel. Refreshes on every open so the data is current; the
+      // gasCall log is read straight from window.__gasCallLog
+      // (populated by the gasCall wrapper itself).
+      openDebug: async function () {
+        this.debugOpen = true;
+        await this.refreshDebug();
+      },
+      closeDebug: function () { this.debugOpen = false; },
+      refreshDebug: async function () {
+        this.debugLoading = true;
+        try {
+          this.debugInfo = await gasCall('getDebugInfo');
+          this.gasCallLog = (window.__gasCallLog || []).slice().reverse();   // newest first
+        } catch (e) {
+          this.toastError('Debug info failed: ' + (e.message || String(e)));
+        } finally {
+          this.debugLoading = false;
+        }
+      },
+
       // ── Lifecycle ────────────────────────────────────────
       init: async function () {
         var self = this;
@@ -635,6 +756,24 @@ document.addEventListener('alpine:init', function () {
         // trip so the funnel renders with the right filter scope on the
         // initial paint, not after a re-render.
         this._restoreSectionState();
+
+        // ?debug=1 deep-link → auto-open the debug panel after the
+        // first reload so the data is populated. Also accept ?debug=true
+        // for forgiving URL-handcrafting.
+        //
+        // GAS runs the app inside an iframe; `window.location.search`
+        // is the iframe URL, NOT the user-facing URL where the param
+        // lives. google.script.url.getLocation is the only reliable
+        // way to read parent-frame query parameters from inside the
+        // sandboxed iframe.
+        try {
+          if (google && google.script && google.script.url && google.script.url.getLocation) {
+            google.script.url.getLocation(function (loc) {
+              var p = loc && loc.parameter;
+              if (p && (p.debug === '1' || p.debug === 'true')) self.openDebug();
+            });
+          }
+        } catch (_e) { /* noop */ }
 
         try {
           this.userEmail = await gasCall('getCurrentUserEmail');
@@ -1040,21 +1179,30 @@ document.addEventListener('alpine:init', function () {
         if (idx < 0 || idx >= stages.length - 1) return '';
         return stages[idx + 1].name;
       },
-      // One-click stage advance from the funnel row, no peek panel
-      // required. Uses the same backend conflict check as peek-panel
-      // saves (passes c.date_last_stage_update as the optimistic
-      // version stamp), so two recruiters racing on the same candidate
-      // still get the Reload toast instead of silently overwriting
-      // each other.
-      advanceCandidateInline: async function (c) {
-        if (!this.canAdvance(c)) return;
-        var stages = this._activeStages();
-        var idx = stages.findIndex(function (s) { return s.id === c.stage_id; });
-        var nextStage = stages[idx + 1];
+      // Stages a candidate can be moved TO from the funnel-row dropdown.
+      // Excludes the candidate's current stage (no point in offering a
+      // no-op) and the Rejected stage (rejection is a separate flow that
+      // requires a reason — see the rejectModal).
+      moveTargetStages: function (c) {
+        if (!c) return [];
+        return (this.settings.stages || [])
+          .filter(function (s) { return s.is_enabled && !s.is_rejected; })
+          .filter(function (s) { return s.id !== c.stage_id; })
+          .sort(function (a, b) { return a.sequence - b.sequence; });
+      },
+      // Move a candidate to an arbitrary target stage (the picker can
+      // jump multiple stages, not just next). Same conflict check and
+      // optimistic-update pattern as the previous advanceCandidateInline.
+      moveCandidateTo: async function (c, stageIdRaw) {
+        if (!stageIdRaw) return;
+        var stageId = parseInt(stageIdRaw, 10);
+        if (isNaN(stageId) || stageId === c.stage_id) return;
+        var target = (this.settings.stages || []).find(function (s) { return s.id === stageId; });
+        if (!target) return;
         try {
-          await gasCall('updateCandidateStage', c.id, nextStage.id, c.date_last_stage_update);
+          await gasCall('updateCandidateStage', c.id, stageId, c.date_last_stage_update);
           await this.refreshCandidate(c.id);
-          this.toastSuccess(c.first_name + ' \u2192 ' + nextStage.name);
+          this.toastSuccess(c.first_name + ' \u2192 ' + target.name);
         } catch (e) {
           var msg = (e && e.message) || String(e);
           if (msg.indexOf('CONFLICT: ') === 0) {
@@ -1064,9 +1212,122 @@ document.addEventListener('alpine:init', function () {
               onAction: function () { self.refreshCandidate(c.id); },
             });
           } else {
-            this.toastError('Could not advance: ' + msg);
+            this.toastError('Could not move: ' + msg);
           }
         }
+      },
+      // Kept for backward compatibility / Advance button in peek panel.
+      // The funnel rows now use moveCandidateTo via the picker dropdown
+      // so they can jump to any stage rather than only the next one.
+      advanceCandidateInline: async function (c) {
+        if (!this.canAdvance(c)) return;
+        var stages = this._activeStages();
+        var idx = stages.findIndex(function (s) { return s.id === c.stage_id; });
+        return this.moveCandidateTo(c, stages[idx + 1].id);
+      },
+
+      // ── Bulk selection ────────────────────────────────────
+      isSelected: function (id) {
+        return this.selectedIds.indexOf(id) >= 0;
+      },
+      toggleSelected: function (id) {
+        var idx = this.selectedIds.indexOf(id);
+        if (idx >= 0) this.selectedIds.splice(idx, 1);
+        else          this.selectedIds.push(id);
+      },
+      // Select-all-in-stage and inverse. The button label flips between
+      // "Select all" and "Deselect all" based on whether every visible
+      // candidate in the stage is already selected.
+      stageAllSelected: function (stageId) {
+        var visible = this.funnelCandidatesForStage(stageId);
+        if (visible.length === 0) return false;
+        var self = this;
+        return visible.every(function (c) { return self.isSelected(c.id); });
+      },
+      toggleStageSelectAll: function (stageId) {
+        var visible = this.funnelCandidatesForStage(stageId);
+        var ids = visible.map(function (c) { return c.id; });
+        if (this.stageAllSelected(stageId)) {
+          // Remove all visible-stage ids from selection
+          this.selectedIds = this.selectedIds.filter(function (id) { return ids.indexOf(id) < 0; });
+        } else {
+          // Add any missing ids
+          var have = {};
+          this.selectedIds.forEach(function (id) { have[id] = true; });
+          ids.forEach(function (id) { if (!have[id]) this.selectedIds.push(id); }.bind(this));
+        }
+      },
+      clearSelection: function () { this.selectedIds = []; },
+
+      // ── Bulk actions (call backend, show summary toast) ─────────
+      _summarizeBulkResult: function (verb, result) {
+        var ok  = (result && result.successIds || []).length;
+        var bad = (result && result.failures   || []).length;
+        if (bad === 0) {
+          this.toastSuccess(verb + ' ' + ok + ' candidate' + (ok === 1 ? '' : 's') + '.');
+        } else if (ok === 0) {
+          this.toastError('Could not ' + verb.toLowerCase() + ' any of ' + bad + ' candidates. First error: ' +
+            (result.failures[0].message || 'unknown'));
+        } else {
+          this.toastError(verb + ' ' + ok + ', ' + bad + ' failed. First error: ' +
+            (result.failures[0].message || 'unknown'), { duration: 8000 });
+        }
+      },
+      bulkAdvance: async function () {
+        if (this.bulkBusy) return;
+        if (!this.bulkActionStageId) return;
+        if (this.selectedIds.length === 0) return;
+        var targetId = parseInt(this.bulkActionStageId, 10);
+        var ids = this.selectedIds.slice();
+        this.bulkBusy = true;
+        try {
+          var result = await gasCall('bulkAdvanceStage', ids, targetId);
+          this._summarizeBulkResult('Moved', result);
+          // Refresh just the affected candidates instead of full reload —
+          // way faster on a 100+ candidate dataset and the funnel
+          // re-renders reactively from allCandidates.
+          var fresh = await gasCall('getCandidates', {});
+          this.allCandidates = fresh;
+          // Drop successfully-moved candidates from selection so the
+          // action bar doesn't keep them around as if still pending.
+          var done = {};
+          (result.successIds || []).forEach(function (id) { done[id] = true; });
+          this.selectedIds = this.selectedIds.filter(function (id) { return !done[id]; });
+          this.bulkActionStageId = '';
+        } catch (e) {
+          this.toastError('Bulk move failed: ' + (e.message || String(e)));
+        } finally {
+          this.bulkBusy = false;
+        }
+      },
+      bulkAssign: async function () {
+        if (this.bulkBusy) return;
+        if (this.selectedIds.length === 0) return;
+        var rid = this.bulkActionRecruiterId === '' ? null : parseInt(this.bulkActionRecruiterId, 10);
+        var ids = this.selectedIds.slice();
+        this.bulkBusy = true;
+        try {
+          var result = await gasCall('bulkAssignRecruiter', ids, rid);
+          this._summarizeBulkResult('Assigned', result);
+          var fresh = await gasCall('getCandidates', {});
+          this.allCandidates = fresh;
+          this.bulkActionRecruiterId = '';
+        } catch (e) {
+          this.toastError('Bulk assign failed: ' + (e.message || String(e)));
+        } finally {
+          this.bulkBusy = false;
+        }
+      },
+      bulkReject: function () {
+        // Defer to the existing rejectModal but in bulk mode so the
+        // refuse_reason picker is reused. Modal calls bulkRejectCandidates
+        // on confirm.
+        if (this.bulkBusy) return;
+        if (this.selectedIds.length === 0) return;
+        this.openModal('confirmReject', {
+          bulk: true,
+          ids: this.selectedIds.slice(),
+        });
       },
 
       // ── Cross-section linking ─────────────────────────────
@@ -1500,7 +1761,52 @@ document.addEventListener('alpine:init', function () {
       lastSavedAt: 0,                       // ms epoch — drives the "Saved · just now" hint
       notesSaving: false,                   // inflight guard — prevents the @blur + @click double-save
       notesJustSaved: false,                // 1.5s flash after successful save (button: "✓ Saved!")
+      anySaving: false,                     // any field save inflight (drives the panel-header indicator)
+      anyJustSaved: false,                  // 2s flash after any successful save (panel header pulse)
       otherViewers: [],   // [{ email, secondsAgo }]
+
+      // Panel-header save status helpers. The indicator only shows once
+      // there's been at least one save activity in the session (no point
+      // showing "Saved · just now" the moment a user opens a fresh panel),
+      // and it adapts to three states: saving, just-saved (green pulse
+      // for 2s), idle-but-saved-recently. Returns plain strings so the
+      // HTML can keep its bindings simple.
+      anySaveActivity: function () {
+        return this.anySaving || !!this.lastSavedAt;
+      },
+      peekSaveStatusText: function () {
+        if (this.anySaving) return 'Saving\u2026';
+        if (!this.lastSavedAt) return '';
+        var secs = Math.round((Date.now() - this.lastSavedAt) / 1000);
+        if (secs < 5)    return 'Saved \u00b7 just now';
+        if (secs < 60)   return 'Saved \u00b7 ' + secs + 's ago';
+        if (secs < 3600) return 'Saved \u00b7 ' + Math.floor(secs / 60) + 'm ago';
+        return 'Saved';
+      },
+      peekSaveStatusClass: function () {
+        if (this.anySaving)    return 'peek-save-status-saving';
+        if (this.anyJustSaved) return 'peek-save-status-flash';
+        if (this.lastSavedAt)  return 'peek-save-status-saved';
+        return '';
+      },
+      peekSaveStatusTitle: function () {
+        if (this.anySaving) return 'Saving your changes\u2026';
+        if (!this.lastSavedAt) return '';
+        return 'All changes saved at ' + new Date(this.lastSavedAt).toLocaleTimeString();
+      },
+      // Called from every save path (saveStage, saveField, saveNotes) so
+      // the header indicator always reflects the truth. Single source for
+      // the 2s green pulse animation so each individual save site doesn't
+      // need to know about the panel-wide visual.
+      _markSaved: function () {
+        var self = this;
+        this.lastSavedAt = Date.now();
+        this.anyJustSaved = true;
+        clearTimeout(this._anyJustSavedTimer);
+        this._anyJustSavedTimer = setTimeout(function () {
+          self.anyJustSaved = false;
+        }, 2000);
+      },
 
       // Notes-section helpers — drive the explicit Save button & status
       // hint added per Janice's 2026/04/22 ask. The button only enables
@@ -1611,6 +1917,7 @@ document.addEventListener('alpine:init', function () {
         var expected = this.$store.app.peek.candidate
           ? this.$store.app.peek.candidate.date_last_stage_update
           : null;
+        this.anySaving = true;
         try {
           await gasCall('updateCandidateStage', id, newStage, expected);
           var r = await gasCall('getCandidateDetail', id);
@@ -1618,10 +1925,12 @@ document.addEventListener('alpine:init', function () {
           this.$store.app.peek.history = r.history;
           var root = Alpine.$data(document.querySelector('#app'));
           if (root && root.refreshCandidate) await root.refreshCandidate(id);
-          this.lastSavedAt = Date.now();
+          this._markSaved();
           this.$store.app.toastSuccess('Stage updated.');
         } catch (e) {
           this._handleSaveError(e, 'Stage update failed: ', id);
+        } finally {
+          this.anySaving = false;
         }
       },
 
@@ -1666,6 +1975,7 @@ document.addEventListener('alpine:init', function () {
         var expected = this.$store.app.peek.candidate
           ? this.$store.app.peek.candidate.date_last_stage_update
           : null;
+        this.anySaving = true;
         try {
           var updates = {}; updates[field] = value;
           await gasCall('updateCandidate', id, updates, expected);
@@ -1673,10 +1983,12 @@ document.addEventListener('alpine:init', function () {
           this.$store.app.peek.candidate = r.candidate;
           var root = Alpine.$data(document.querySelector('#app'));
           if (root && root.refreshCandidate) await root.refreshCandidate(id);
-          this.lastSavedAt = Date.now();
+          this._markSaved();
           this.$store.app.toastSuccess('Saved.');
         } catch (e) {
           this._handleSaveError(e, 'Save failed: ', id);
+        } finally {
+          this.anySaving = false;
         }
       },
 

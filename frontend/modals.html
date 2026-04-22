@@ -308,14 +308,23 @@
       <div class="modal-overlay" @click.self="$store.app.closeModal()">
         <div class="modal-dialog" x-data="rejectModal()" x-init="init()">
           <div class="modal-header">
-            <span class="modal-title">Reject Candidate</span>
+            <span class="modal-title"
+              x-text="$store.app.modal.data?.bulk ? ('Reject ' + ($store.app.modal.data.ids?.length || 0) + ' candidates') : 'Reject Candidate'"></span>
             <button class="icon-btn-sm" @click="$store.app.closeModal()">\u2715</button>
           </div>
 
           <div class="modal-body">
-            <p class="modal-lead">
-              Reject <strong x-text="$store.app.modal.data?.candidateName || 'candidate'"></strong>?
-            </p>
+            <template x-if="!$store.app.modal.data?.bulk">
+              <p class="modal-lead">
+                Reject <strong x-text="$store.app.modal.data?.candidateName || 'candidate'"></strong>?
+              </p>
+            </template>
+            <template x-if="$store.app.modal.data?.bulk">
+              <p class="modal-lead">
+                Reject <strong x-text="$store.app.modal.data.ids?.length || 0"></strong> selected candidates?
+                The same reason will be applied to all of them.
+              </p>
+            </template>
 
             <div class="mb-3">
               <label class="form-label">Reason *</label>
@@ -701,9 +710,37 @@ document.addEventListener('alpine:init', function () {
         }
         this.error = '';
         this.submitting = true;
-        var candidateId = this.$store.app.modal.data?.candidateId;
+        var data = this.$store.app.modal.data || {};
         var reasonId = parseInt(this.refuseReasonId, 10);
         try {
+          if (data.bulk && Array.isArray(data.ids) && data.ids.length > 0) {
+            // Bulk path \u2014 single backend call rejects all selected
+            // candidates, returns per-id success/failure for the toast.
+            var result = await gasCall('bulkRejectCandidates', data.ids, reasonId);
+            var ok  = (result.successIds || []).length;
+            var bad = (result.failures   || []).length;
+            if (bad === 0) {
+              this.$store.app.toastSuccess('Rejected ' + ok + ' candidate' + (ok === 1 ? '' : 's') + '.');
+            } else {
+              this.$store.app.toastError(
+                'Rejected ' + ok + ', ' + bad + ' failed. First error: ' +
+                  (result.failures[0].message || 'unknown'),
+                { duration: 8000 }
+              );
+            }
+            this.$store.app.closeModal();
+            var rootBulk = Alpine.$data(document.querySelector('#app'));
+            if (rootBulk) {
+              // Drop rejected ids from selection so the action bar
+              // doesn't keep showing them as pending.
+              var done = {};
+              (result.successIds || []).forEach(function (id) { done[id] = true; });
+              rootBulk.selectedIds = rootBulk.selectedIds.filter(function (id) { return !done[id]; });
+              await rootBulk.reloadAll();
+            }
+            return;
+          }
+          var candidateId = data.candidateId;
           await gasCall('rejectCandidate', candidateId, reasonId);
           // If a note was provided, append it to the candidate's notes.
           if (this.note && this.note.trim()) {
