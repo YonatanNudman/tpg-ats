@@ -581,6 +581,13 @@ document.addEventListener('alpine:init', function () {
       showJobs: true,
       showAnalytics: false,       // collapsed by default — funnel-primary view surfaces the important stuff above
       showActivity: false,     // collapsed by default so the fold stays analytics-first
+      // The three primary dashboards default to expanded (they're the
+      // value the page exists to show), but recruiters can collapse any
+      // of them when they want to focus on one. State persists via
+      // localStorage in _persistSectionState / _restoreSectionState.
+      showFunnel: true,
+      showRecruiters: true,
+      showSources: true,
       activity: [],            // array of HistoryRow, newest first
       activityLoading: false,
 
@@ -731,6 +738,12 @@ document.addEventListener('alpine:init', function () {
             recruiterFilters: this.recruiterFilters,
             sourceFilters:    this.sourceFilters,
             expandedStages:   this.expandedStages,
+            // Collapse state for the 3 primary dashboards. Persisted so
+            // a recruiter who collapsed Sourcing ROI to focus on the
+            // funnel doesn't have to re-collapse every page load.
+            showFunnel:     this.showFunnel,
+            showRecruiters: this.showRecruiters,
+            showSources:    this.showSources,
           };
           localStorage.setItem(this._SECTION_STATE_KEY, JSON.stringify(snapshot));
         } catch (e) { /* quota / private mode — non-fatal */ }
@@ -748,6 +761,9 @@ document.addEventListener('alpine:init', function () {
             if (snap.recruiterFilters) Object.assign(this.recruiterFilters, snap.recruiterFilters);
             if (snap.sourceFilters)    Object.assign(this.sourceFilters,    snap.sourceFilters);
             if (Array.isArray(snap.expandedStages)) this.expandedStages = snap.expandedStages.slice();
+            if (typeof snap.showFunnel     === 'boolean') this.showFunnel     = snap.showFunnel;
+            if (typeof snap.showRecruiters === 'boolean') this.showRecruiters = snap.showRecruiters;
+            if (typeof snap.showSources    === 'boolean') this.showSources    = snap.showSources;
           }
         } catch (e) { /* malformed JSON or storage error — start clean */ }
       },
@@ -816,6 +832,11 @@ document.addEventListener('alpine:init', function () {
         // Funnel filters are applied client-side (no network call), so
         // they don't go through reload* — watch them too.
         this.$watch('funnelFilters', function () { self._persistSectionState(); }, { deep: true });
+        // Persist collapse state for the three primary dashboards so
+        // a refresh restores the user's preferred section visibility.
+        this.$watch('showFunnel',     function () { self._persistSectionState(); });
+        this.$watch('showRecruiters', function () { self._persistSectionState(); });
+        this.$watch('showSources',    function () { self._persistSectionState(); });
 
         // Esc key clears any active bulk selection — common shortcut for
         // "abandon what I just started" that recruiters expect to work.

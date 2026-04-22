@@ -221,6 +221,47 @@ html, body {
 }
 .card-header.clickable { cursor: pointer; user-select: none; }
 .card-header.clickable:hover { background: #FAFBFE; }
+
+/* Two-row variant for the primary dashboards (Pipeline Funnel,
+   Recruiter Performance, Sourcing ROI). The clickable title row
+   toggles the section open/closed; the filter row is rendered as
+   a sibling beneath it, only visible when expanded. The outer
+   container drops the default padding so each row owns its own
+   spacing. */
+.card-header.section-card-header {
+  display: block;
+  padding: 0;
+}
+.section-card-header-row {
+  padding: 14px 18px;
+  display: flex; align-items: center; justify-content: space-between; gap: 12px;
+  user-select: none;
+  transition: background 0.12s ease;
+}
+.section-card-header-row.clickable { cursor: pointer; }
+.section-card-header-row.clickable:hover { background: #FAFBFE; }
+/* When the section is expanded, the filter row sits below the title
+   row inside the same .card-header, separated by a hairline. When
+   collapsed (filter row x-show=false) the hairline disappears too
+   so the header reads as a single tidy strip. */
+.card-header.section-card-header > .section-filters {
+  padding: 8px 18px 12px;
+  border-top: 1px dashed var(--border);
+  margin-left: 0;
+}
+
+/* Collapsed-state badge — small count chip next to the title so users
+   can see the section's scale without expanding it. */
+.section-badge {
+  display: inline-flex; align-items: center;
+  margin-left: 8px;
+  padding: 2px 8px;
+  border-radius: 999px;
+  background: rgba(var(--primary-rgb, 89, 74, 226), 0.10);
+  color: var(--primary, #594AE2);
+  font-size: 11px;
+  font-weight: 600;
+}
 .card-title { font-weight: 700; font-size: 14px; color: var(--text); }
 .card-body { padding: 16px 18px; }
 .card-body.p-0 { padding: 0; }

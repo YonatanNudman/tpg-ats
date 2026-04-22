@@ -309,12 +309,25 @@
       without disturbing the rest of the dashboards on this page.
     -->
     <div class="card section-card funnel-card" id="sec-funnel">
-      <div class="card-header">
-        <span class="card-title">
-          <span class="material-icons mi-inline">filter_list</span>
-          Pipeline Funnel
-        </span>
-        <div class="section-filters">
+      <!--
+        Header is now two rows: a clickable title row that toggles the
+        whole section, and the filter row below it that's only visible
+        when expanded. @click.stop on the filter row keeps clicks from
+        bubbling up to the toggle so picking a dropdown doesn't
+        accidentally collapse the section.
+      -->
+      <div class="card-header section-card-header">
+        <div class="section-card-header-row clickable" @click="showFunnel = !showFunnel">
+          <span class="card-title">
+            <span class="material-icons mi-inline">filter_list</span>
+            Pipeline Funnel
+            <template x-if="!showFunnel && funnelTotalActive() > 0">
+              <span class="section-badge" x-text="funnelTotalActive() + ' active'"></span>
+            </template>
+          </span>
+          <span class="material-icons collapse-icon" x-text="showFunnel ? 'expand_less' : 'expand_more'"></span>
+        </div>
+        <div class="section-filters" x-show="showFunnel" @click.stop>
           <select class="section-filter" x-model="funnelFilters.jobId">
             <option value="">Job (global)</option>
             <template x-for="j in jobs" :key="j.id">
@@ -371,7 +384,7 @@
         pipeline" via the perf table can see WHY the funnel looks different
         from the global state, and clear it without hunting for the right ×.
       -->
-      <template x-if="funnelScopeLabel()">
+      <template x-if="funnelScopeLabel() && showFunnel">
         <div class="scope-banner">
           <span class="material-icons mi-inline">filter_alt</span>
           <span>Scoped to: <strong x-text="funnelScopeLabel()"></strong></span>
@@ -382,7 +395,7 @@
         </div>
       </template>
 
-      <div class="card-body funnel-body">
+      <div class="card-body funnel-body" x-show="showFunnel">
         <template x-if="loading">
           <div class="skeleton-section">
             <template x-for="i in 5" :key="i">
@@ -610,14 +623,20 @@
       span a wider window.
     -->
     <div class="card section-card recruiter-perf-card" id="sec-recruiters">
-      <div class="card-header">
-        <span class="card-title">
-          <span class="material-icons mi-inline">groups</span>
-          Recruiter Performance
-          <span class="section-loading-pip" x-show="recruiterLoading"
-                title="Refreshing…" aria-hidden="true"></span>
-        </span>
-        <div class="section-filters">
+      <div class="card-header section-card-header">
+        <div class="section-card-header-row clickable" @click="showRecruiters = !showRecruiters">
+          <span class="card-title">
+            <span class="material-icons mi-inline">groups</span>
+            Recruiter Performance
+            <span class="section-loading-pip" x-show="recruiterLoading"
+                  title="Refreshing…" aria-hidden="true"></span>
+            <template x-if="!showRecruiters && recruiterPerformance.length > 0">
+              <span class="section-badge" x-text="recruiterPerformance.length + ' recruiter' + (recruiterPerformance.length === 1 ? '' : 's')"></span>
+            </template>
+          </span>
+          <span class="material-icons collapse-icon" x-text="showRecruiters ? 'expand_less' : 'expand_more'"></span>
+        </div>
+        <div class="section-filters" x-show="showRecruiters" @click.stop>
           <select class="section-filter" x-model="recruiterFilters.jobId"
                   @change="reloadRecruiterPerf()">
             <option value="">Job (global)</option>
@@ -663,7 +682,7 @@
         </div>
       </div>
 
-      <div class="card-body p-0">
+      <div class="card-body p-0" x-show="showRecruiters">
         <table class="data-table recruiter-perf-table">
           <thead>
             <tr>
@@ -719,14 +738,20 @@
       sources and de-prioritize the dead ones.
     -->
     <div class="card section-card source-roi-card" id="sec-sources">
-      <div class="card-header">
-        <span class="card-title">
-          <span class="material-icons mi-inline">trending_up</span>
-          Sourcing ROI
-          <span class="section-loading-pip" x-show="sourceLoading"
-                title="Refreshing…" aria-hidden="true"></span>
-        </span>
-        <div class="section-filters">
+      <div class="card-header section-card-header">
+        <div class="section-card-header-row clickable" @click="showSources = !showSources">
+          <span class="card-title">
+            <span class="material-icons mi-inline">trending_up</span>
+            Sourcing ROI
+            <span class="section-loading-pip" x-show="sourceLoading"
+                  title="Refreshing…" aria-hidden="true"></span>
+            <template x-if="!showSources && sourceEffectiveness.length > 0">
+              <span class="section-badge" x-text="sourceEffectiveness.length + ' source' + (sourceEffectiveness.length === 1 ? '' : 's')"></span>
+            </template>
+          </span>
+          <span class="material-icons collapse-icon" x-text="showSources ? 'expand_less' : 'expand_more'"></span>
+        </div>
+        <div class="section-filters" x-show="showSources" @click.stop>
           <select class="section-filter" x-model="sourceFilters.jobId"
                   @change="reloadSourceEffectiveness()">
             <option value="">Job (global)</option>
@@ -771,7 +796,7 @@
         </div>
       </div>
 
-      <div class="card-body source-roi-body">
+      <div class="card-body source-roi-body" x-show="showSources">
         <!--
           Two states:
             - Have data → donut + table side-by-side (the original layout).
