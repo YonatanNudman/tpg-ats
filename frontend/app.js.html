@@ -131,6 +131,25 @@ window.initials = function (name) {
   if (!name) return '?';
   return name.split(/\s+/).filter(Boolean).map(function (p) { return p[0]; }).slice(0, 2).join('').toUpperCase();
 };
+// Deterministic palette color from an email so the same person always
+// gets the same avatar tint across sessions and across surfaces (peek
+// panel presence, topbar app presence). Avoids a server round-trip
+// for what is purely a visual identity cue. Hoisted to window so both
+// the topbar (atsApp scope) and the peek panel (peekComponent scope)
+// can call it without code duplication.
+window.presenceColor = function (email) {
+  if (!email) return '#8A90A2';
+  var hash = 0;
+  for (var i = 0; i < email.length; i++) {
+    hash = ((hash << 5) - hash) + email.charCodeAt(i);
+    hash |= 0;
+  }
+  var palette = [
+    '#594AE2', '#F2831F', '#239ED8', '#3AA76D',
+    '#E14B4B', '#8E5DC9', '#D17907', '#1A8FB3',
+  ];
+  return palette[Math.abs(hash) % palette.length];
+};
 window.stageChipStyle = function (color) {
   var c = color || '#6c757d';
   var r = parseInt(c.slice(1, 3), 16), g = parseInt(c.slice(3, 5), 16), b = parseInt(c.slice(5, 7), 16);
@@ -604,6 +623,12 @@ document.addEventListener('alpine:init', function () {
       bulkBusy:           false,
       bulkActionStageId:  '',   // dropdown value for "Move to…" in action bar
       bulkActionRecruiterId: '',
+
+      // ── App-wide presence (Google-Sheets-style avatar stack in the topbar) ──
+      // Pinged every 30s while the tab is open. Self is included so the
+      // topbar can render the user's own avatar leftmost; the avatar
+      // stack helper filters self into a different visual treatment.
+      appViewers: [],   // [{ email, secondsAgo, isSelf }]
 
       // ── Debug panel state (?debug=1) ──────────────────────
       // Toggled on by `?debug=1` in the URL or by the keyboard
@@ -1715,6 +1740,33 @@ document.addEventListener('alpine:init', function () {
       startSyncPolling: function () {
         var self = this;
         syncTimer = setInterval(function () { self.checkSync(); }, 20000);
+        // App-wide presence: ping every 30s so the avatar stack in the
+        // topbar reflects who's currently using the app. Faster than
+        // we strictly need (60s TTL) but keeps the staleness < 30s
+        // even if a tab dies between pings. Skipped while the tab is
+        // hidden so backgrounded tabs don't hold their avatar slot.
+        self._appPresenceTick();
+        setInterval(function () { self._appPresenceTick(); }, 30000);
+      },
+      _appPresenceTick: async function () {
+        if (document.hidden) return;
+        try {
+          await gasCall('touchAppPresence');
+          var viewers = await gasCall('getAppPresence');
+          this.appViewers = viewers || [];
+        } catch (_e) { /* network flake — non-fatal */ }
+      },
+      // Helpers for the topbar avatar stack. otherAppViewers excludes
+      // self because the user already knows they're here; the count
+      // and tooltip include self for the "X people on this app" total.
+      otherAppViewers: function () {
+        return (this.appViewers || []).filter(function (v) { return !v.isSelf; });
+      },
+      appPresenceTooltip: function () {
+        if (!this.appViewers || this.appViewers.length === 0) return '';
+        var others = this.otherAppViewers();
+        if (others.length === 0) return 'You are the only one here right now.';
+        return 'Also here right now: ' + others.map(function (v) { return v.email; }).join(', ');
       },
 
       // Manual refresh — wired to the 🔄 button in the topbar.
@@ -1851,23 +1903,11 @@ document.addEventListener('alpine:init', function () {
       },
 
       /**
-       * Deterministic avatar color from an email — used to color the
-       * presence avatars in a stable way. Same email = same color every
-       * time, no server round-trip needed, feels like a consistent identity.
+       * Local alias for the global window.presenceColor so the existing
+       * x-text bindings in the peek panel (presenceColor(v.email))
+       * keep working without churn.
        */
-      presenceColor: function (email) {
-        if (!email) return '#8A90A2';
-        var hash = 0;
-        for (var i = 0; i < email.length; i++) {
-          hash = ((hash << 5) - hash) + email.charCodeAt(i);
-          hash |= 0;
-        }
-        var palette = [
-          '#594AE2', '#F2831F', '#239ED8', '#3AA76D',
-          '#E14B4B', '#8E5DC9', '#D17907', '#1A8FB3',
-        ];
-        return palette[Math.abs(hash) % palette.length];
-      },
+      presenceColor: function (email) { return window.presenceColor(email); },
 
       /** Tick — pings the server we're here, then reads other viewers. */
       _presenceTick: async function () {

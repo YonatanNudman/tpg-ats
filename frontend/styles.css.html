@@ -71,6 +71,43 @@ html, body {
   font-size: 11.5px; font-weight: 600;
   transition: background 0.2s, color 0.2s;
 }
+
+/* ── Topbar app-presence avatar stack ─────────────────────────
+   Google Sheets-style "who's here right now" indicator. Self avatar
+   leftmost (with a subtle ring marker so users see themselves
+   represented), others stacked overlapping to the right with negative
+   margin. Reads as a single chip from a distance, expands into
+   identifiable initials on hover. */
+.app-presence {
+  display: inline-flex;
+  align-items: center;
+  padding: 0 4px;
+}
+.app-presence-avatar {
+  width: 26px; height: 26px;
+  border-radius: 50%;
+  background: var(--text-muted);
+  color: white;
+  font-size: 10.5px; font-weight: 700;
+  display: inline-flex; align-items: center; justify-content: center;
+  border: 2px solid white;
+  box-shadow: 0 1px 3px rgba(0,0,0,0.12);
+  margin-left: -8px;
+  cursor: default;
+  transition: transform 0.12s ease, z-index 0s;
+  position: relative;
+}
+.app-presence-avatar:first-child { margin-left: 0; }
+.app-presence-avatar:hover { transform: translateY(-1px) scale(1.06); z-index: 5; }
+.app-presence-self {
+  /* Subtle accent ring so the user's own avatar is identifiable
+     without being visually heavier than the others. */
+  box-shadow: 0 0 0 2px var(--success, #3aa76d), 0 1px 3px rgba(0,0,0,0.12);
+}
+.app-presence-more {
+  background: var(--text-muted);
+  font-size: 9.5px;
+}
 .sync-indicator.syncing { background: rgba(35,158,216,0.1); color: var(--info); }
 .sync-indicator.stale { background: rgba(242,149,48,0.12); color: var(--warning); }
 .sync-dot {

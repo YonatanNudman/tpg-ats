@@ -59,6 +59,36 @@
 
     <div class="topbar-spacer"></div>
 
+    <!--
+      App-wide presence avatars (Google-Sheets-style "who's here right now").
+      Backed by touchAppPresence/getAppPresence on a 30s tick + 60s TTL,
+      same plumbing as the per-candidate presence indicator in the peek
+      panel. Self avatar is leftmost (so users see themselves represented),
+      others follow. Hidden when no other viewers, since a single avatar
+      next to "Live" reads as redundant noise.
+    -->
+    <template x-if="otherAppViewers().length > 0">
+      <div class="app-presence" :title="appPresenceTooltip()">
+        <template x-if="userEmail">
+          <div class="app-presence-avatar app-presence-self"
+            :style="'background: ' + presenceColor(userEmail) + ';'"
+            x-text="initials(userEmail.split('@')[0])"
+            title="You"></div>
+        </template>
+        <template x-for="v in otherAppViewers().slice(0, 4)" :key="v.email">
+          <div class="app-presence-avatar"
+            :style="'background: ' + presenceColor(v.email) + ';'"
+            x-text="initials(v.email.split('@')[0])"
+            :title="v.email"></div>
+        </template>
+        <template x-if="otherAppViewers().length > 4">
+          <div class="app-presence-avatar app-presence-more"
+            x-text="'+' + (otherAppViewers().length - 4)"
+            :title="appPresenceTooltip()"></div>
+        </template>
+      </div>
+    </template>
+
     <!-- Manual refresh — users can force a reload without waiting 20s -->
     <button class="icon-btn refresh-btn" :class="{ 'spinning': syncing }"
       :disabled="syncing" @click="manualRefresh()"

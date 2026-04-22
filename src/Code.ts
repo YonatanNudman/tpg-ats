@@ -1061,6 +1061,68 @@ function getPresence(candidateId: number): Array<{ email: string; secondsAgo: nu
   return out;
 }
 
+// ============================================================
+// App-wide presence (who's on the app right now)
+// ============================================================
+//
+// Same shape as the per-candidate presence above, but scoped to the
+// app as a whole rather than a single candidate. Powers the avatar
+// stack in the topbar — the "Google Sheets style" indicator that
+// shows everyone currently using the app. Uses the same 60s TTL so
+// browser tab closures auto-clean within a minute even without an
+// explicit "leaving" signal.
+
+const APP_PRESENCE_BUCKET = "__app__";   // sentinel candidate ID for app-level keys
+
+function touchAppPresence(): { ok: boolean } {
+  if (typeof CacheService === "undefined") return { ok: false };
+  const email = getSessionEmail() || "unknown";
+  const cache = CacheService.getScriptCache();
+  const key = PRESENCE_KEY_PREFIX + APP_PRESENCE_BUCKET + ":" + email;
+  const value = JSON.stringify({ email, ts: Date.now() });
+  try {
+    cache.put(key, value, PRESENCE_TTL_SEC);
+    const idxKey = PRESENCE_KEY_PREFIX + APP_PRESENCE_BUCKET + ":__idx";
+    const existing = cache.get(idxKey);
+    const viewers: string[] = existing ? JSON.parse(existing) : [];
+    if (viewers.indexOf(email) < 0) viewers.push(email);
+    cache.put(idxKey, JSON.stringify(viewers), PRESENCE_TTL_SEC);
+  } catch { /* cache flake — non-fatal */ }
+  return { ok: true };
+}
+
+// Returns ALL active viewers (including self). The frontend filters
+// out the caller for the avatar stack but uses the self-entry to
+// show the user's own status / freshness. Same shape as getPresence.
+function getAppPresence(): Array<{ email: string; secondsAgo: number; isSelf: boolean }> {
+  if (typeof CacheService === "undefined") return [];
+  const myEmail = getSessionEmail() || "unknown";
+  const cache = CacheService.getScriptCache();
+  const idxKey = PRESENCE_KEY_PREFIX + APP_PRESENCE_BUCKET + ":__idx";
+  let viewers: string[] = [];
+  try {
+    const raw = cache.get(idxKey);
+    viewers = raw ? JSON.parse(raw) : [];
+  } catch { return []; }
+
+  const now = Date.now();
+  const out: Array<{ email: string; secondsAgo: number; isSelf: boolean }> = [];
+  for (const v of viewers) {
+    try {
+      const raw = cache.get(PRESENCE_KEY_PREFIX + APP_PRESENCE_BUCKET + ":" + v);
+      if (!raw) continue;   // expired
+      const rec = JSON.parse(raw);
+      out.push({
+        email: rec.email,
+        secondsAgo: Math.round((now - rec.ts) / 1000),
+        isSelf: rec.email === myEmail,
+      });
+    } catch { /* skip bad entry */ }
+  }
+  // Self first (so the avatar stack reads self → others left to right)
+  return out.sort((a, b) => (a.isSelf === b.isSelf ? a.email.localeCompare(b.email) : a.isSelf ? -1 : 1));
+}
+
 /**
  * Bulk create candidates in one locked transaction.
  * Accepts an array of CreateCandidateInput — each validated the same way
