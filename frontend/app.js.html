@@ -399,9 +399,19 @@ document.addEventListener('alpine:init', function () {
       staleCandidates:  [],     // pipeline health alerts (2×+ past SLA or >14d no-SLA)
 
       // ── Computed ─────────────────────────────────────────
+      // Currently consumed only by the topbar Export-CSV button. Everything
+      // else (the Pipeline Funnel section and its stage expansions) goes
+      // through the funnel-specific predicate below, which adds the
+      // section-filter override layer and uses timestamp comparison for
+      // dates instead of fragile lexicographic strings.
+      //
+      // Sort intentionally omitted — there's no list view to drive a sort
+      // order from anymore. Export keeps the natural order returned by the
+      // backend, which is already date_applied desc by virtue of how
+      // candidates are appended.
       get filteredCandidates() {
         var f = this.filters;
-        var list = this.allCandidates.filter(function (c) {
+        return this.allCandidates.filter(function (c) {
           if (f.status && c.status !== f.status) return false;
           if (f.jobId && c.job_id != f.jobId) return false;
           if (f.sourceId && c.source_id != f.sourceId) return false;
@@ -417,23 +427,19 @@ document.addEventListener('alpine:init', function () {
             var hay = ((c.first_name || '') + ' ' + (c.last_name || '') + ' ' + (c.email || '')).toLowerCase();
             if (hay.indexOf(q) === -1) return false;
           }
-          // Date range
           if (c.date_applied) {
-            var d = c.date_applied;
-            if (d < f.startDate) return false;
-            if (d > f.endDate) return false;
+            // Compare via Date.parse so non-ISO strings (e.g. when Sheets
+            // returns a Date object that the backend then String()s) still
+            // sort correctly. Falls back to safe-truthy-ish behavior for
+            // unparseable values (treat as in-range rather than dropping).
+            var ts = Date.parse(c.date_applied);
+            if (!isNaN(ts)) {
+              if (f.startDate && ts < Date.parse(f.startDate)) return false;
+              if (f.endDate   && ts > Date.parse(f.endDate))   return false;
+            }
           }
           return true;
         });
-
-        var sf = this.sortField, sd = this.sortDir;
-        list.sort(function (a, b) {
-          var av = a[sf] == null ? '' : a[sf];
-          var bv = b[sf] == null ? '' : b[sf];
-          if (typeof av === 'number') return sd === 'asc' ? av - bv : bv - av;
-          return sd === 'asc' ? String(av).localeCompare(String(bv)) : String(bv).localeCompare(String(av));
-        });
-        return list;
       },
 
       // (List/Kanban view + pagination removed — funnel-primary layout doesn't
@@ -644,20 +650,40 @@ document.addEventListener('alpine:init', function () {
       // Always scopes to status='Active' since the funnel by definition
       // shows currently-in-pipeline counts. Bar widths are proportional
       // to the largest stage so the visualization works with any data shape.
+      //
+      // The predicate is extracted into _funnelMatch so the bar counts
+      // (this getter) and the inline candidate lists (funnelCandidatesForStage
+      // below) cannot drift apart. Previously the two had subtly different
+      // filter logic — pipelineFunnelData applied a date filter that the
+      // expanded list ignored, producing the visible bug "stage shows
+      // count 0 but the expanded panel lists candidates".
+      _funnelMatch: function (c, f) {
+        if (c.status !== 'Active') return false;
+        if (f.jobId    && c.job_id    != f.jobId)    return false;
+        if (f.sourceId && c.source_id != f.sourceId) return false;
+        if (f.recruiterId === '__unassigned__') {
+          if (c.recruiter_id != null && c.recruiter_id !== '') return false;
+        } else if (f.recruiterId) {
+          if (c.recruiter_id != f.recruiterId) return false;
+        }
+        // Timestamp-based date comparison so a Sheets-returned Date object
+        // (stringified by the backend's parseStr fallback) doesn't break
+        // the filter. parseStr now normalizes to ISO, but defense in depth.
+        if (c.date_applied && (f.startDate || f.endDate)) {
+          var ts = Date.parse(c.date_applied);
+          if (!isNaN(ts)) {
+            if (f.startDate && ts < Date.parse(f.startDate)) return false;
+            if (f.endDate   && ts > Date.parse(f.endDate))   return false;
+          }
+        }
+        return true;
+      },
+
       get pipelineFunnelData() {
         var f = this.mergeSectionFilters(this.funnelFilters);
+        var self = this;
         var inScope = this.allCandidates.filter(function (c) {
-          if (c.status !== 'Active') return false;
-          if (f.jobId && c.job_id != f.jobId) return false;
-          if (f.sourceId && c.source_id != f.sourceId) return false;
-          if (f.recruiterId === '__unassigned__') {
-            if (c.recruiter_id != null && c.recruiter_id !== '') return false;
-          } else if (f.recruiterId) {
-            if (c.recruiter_id != f.recruiterId) return false;
-          }
-          if (f.startDate && c.date_applied && c.date_applied < f.startDate) return false;
-          if (f.endDate   && c.date_applied && c.date_applied > f.endDate)   return false;
-          return true;
+          return self._funnelMatch(c, f);
         });
         var counts = {};
         for (var i = 0; i < inScope.length; i++) {
@@ -696,18 +722,11 @@ document.addEventListener('alpine:init', function () {
 
       funnelCandidatesForStage: function (stageId) {
         var f = this.mergeSectionFilters(this.funnelFilters);
+        var self = this;
         return this.allCandidates
           .filter(function (c) {
             if (c.stage_id !== stageId) return false;
-            if (c.status !== 'Active')  return false;
-            if (f.jobId && c.job_id != f.jobId) return false;
-            if (f.sourceId && c.source_id != f.sourceId) return false;
-            if (f.recruiterId === '__unassigned__') {
-              if (c.recruiter_id != null && c.recruiter_id !== '') return false;
-            } else if (f.recruiterId) {
-              if (c.recruiter_id != f.recruiterId) return false;
-            }
-            return true;
+            return self._funnelMatch(c, f);
           })
           .sort(function (a, b) { return (a.last_name || '').localeCompare(b.last_name || ''); });
       },
@@ -762,8 +781,10 @@ document.addEventListener('alpine:init', function () {
       },
 
       applyFilters: function () {
-        this.page = 1;
-        // Analytics / KPIs need a server reload when filters change
+        // Funnel data is derived client-side from allCandidates so it
+        // updates reactively as `filters` mutate. Only the server-side
+        // dashboards (Recruiter Performance, Sourcing ROI, historical
+        // analytics) need a refetch when global filters change.
         this.loadAnalytics().then(function () { this.renderCharts(); }.bind(this));
       },
 

@@ -493,10 +493,11 @@ function getDashboardData(filters: DashboardFilters): DashboardResult {
 // in the same execution are essentially free. They DON'T share between
 // executions (each frontend call is its own GAS request).
 
-function getPipelineFunnel(filters: DashboardFilters): import("./types").PipelineSnapshotItem[] {
-  const db = getDB();
-  return computePipelineSnapshot(db.getAllCandidates(), db.getAllStages(), filters);
-}
+// (getPipelineFunnel removed — the frontend computes the funnel client-side
+//  from `allCandidates`, since the data is already loaded for other dashboards
+//  and per-section filter changes don't need a network round trip. Re-add
+//  here if a server-side compute becomes useful, e.g. when the candidate
+//  list grows past what's reasonable to ship to the browser.)
 
 /**
  * Recruiter performance leaderboard — supports an OPTIONAL `hiresFilters`

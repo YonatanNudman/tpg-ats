@@ -74,8 +74,37 @@ function parseBool(val: unknown): boolean {
   return val === true || val === "TRUE" || val === "true" || val === 1 || val === "1";
 }
 
+/**
+ * Parse any sheet cell value into a string for the typed row mapper.
+ *
+ * IMPORTANT: Sheets auto-detects ISO date strings on write and stores
+ * them as native Date values. When read back via `getRange().getValues()`
+ * those cells return JS `Date` objects, not strings. The naive
+ * `String(date)` produces the locale-aware toString format
+ * (`"Wed Apr 22 2026 00:00:00 GMT-0400 (EDT)"`), which:
+ *   - breaks lexicographic compares against `"YYYY-MM-DD"` filters on
+ *     the client (capital "W" sorts before any digit),
+ *   - looks awful in CSV exports and the activity feed,
+ *   - is non-deterministic across server timezones.
+ *
+ * Detect Date instances and emit a stable ISO string so every consumer
+ * sees the same shape regardless of how Sheets chose to coerce the cell.
+ * Date-only fields end up as `"YYYY-MM-DD"`; datetime fields keep the
+ * full `"YYYY-MM-DDTHH:mm:ss.sssZ"`. Both formats sort correctly via
+ * string comparison.
+ */
 function parseStr(val: unknown): string {
-  return val == null ? "" : String(val);
+  if (val == null) return "";
+  if (val instanceof Date) {
+    // A Sheets-stored date with no explicit time component comes back
+    // as midnight UTC (or midnight local, depending on the spreadsheet
+    // locale). Truncating to YYYY-MM-DD when the time slice is exactly
+    // midnight keeps date-only fields visually clean while preserving
+    // the full ISO for true datetime fields like `created_at`.
+    const iso = val.toISOString();
+    return iso.endsWith("T00:00:00.000Z") ? iso.split("T")[0] : iso;
+  }
+  return String(val);
 }
 
 function today(): string {

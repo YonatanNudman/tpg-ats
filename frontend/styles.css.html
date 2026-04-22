@@ -213,32 +213,9 @@ html, body {
   opacity: 0.7; font-weight: 400; margin-left: 2px;
 }
 
-/* ── KPI strip ─────────────────────────────────────────── */
-.kpi-grid {
-  display: grid; grid-template-columns: repeat(4, 1fr); gap: 14px;
-}
-.kpi-card {
-  position: relative; overflow: hidden;
-  background: var(--card-bg);
-  border: 1px solid var(--border);
-  border-radius: var(--radius);
-  padding: 16px 18px;
-  cursor: pointer;
-  transition: box-shadow 0.15s, transform 0.1s, border-color 0.15s;
-}
-.kpi-card::before {
-  content: ''; position: absolute; top: 0; left: 0; right: 0;
-  height: 3px; background: var(--kpi-color, var(--primary));
-}
-.kpi-card.kpi-accent-primary { --kpi-color: var(--primary); }
-.kpi-card.kpi-accent-info    { --kpi-color: var(--info); }
-.kpi-card.kpi-accent-success { --kpi-color: var(--success); }
-.kpi-card.kpi-accent-danger  { --kpi-color: var(--danger); }
-.kpi-card:hover { box-shadow: var(--shadow); transform: translateY(-1px); }
-.kpi-card.active { border-color: var(--kpi-color); }
-.kpi-label { font-size: 11.5px; font-weight: 600; color: var(--text-muted); text-transform: uppercase; letter-spacing: 0.4px; }
-.kpi-value { font-size: 28px; font-weight: 800; color: var(--text); margin: 4px 0 2px; line-height: 1.1; }
-.kpi-sub { font-size: 11px; color: var(--text-muted); }
+/* (.kpi-* styles removed — KPI strip retired in favor of the funnel-primary
+    layout. Funnel section + Recruiter Performance + Sourcing ROI surface the
+    same metrics in their own dashboards.) */
 
 /* ── Pipeline health banner ────────────────────────────── */
 .health-banner {
@@ -323,23 +300,8 @@ html, body {
   from { opacity: 0; transform: translateY(-5px); }
   to   { opacity: 1; transform: translateY(0); }
 }
-.sla-over { color: var(--danger); font-weight: 700; }
-
-/* ── View toggle ───────────────────────────────────────── */
-.view-toggle {
-  display: inline-flex; border: 1px solid var(--border); border-radius: 7px; overflow: hidden;
-}
-.view-btn {
-  background: white; border: none;
-  padding: 6px 10px; font-size: 12px; color: var(--text-secondary);
-  display: inline-flex; align-items: center; gap: 4px;
-  cursor: pointer; transition: background 0.15s, color 0.15s;
-}
-.view-btn .material-icons { font-size: 15px; }
-.view-btn:hover { background: var(--primary-light); color: var(--primary); }
-.view-btn.active { background: var(--primary); color: white; }
-.view-btn + .view-btn { border-left: 1px solid var(--border); }
-.view-btn.active + .view-btn { border-left-color: var(--primary-dark); }
+/* (.sla-over removed with the SLA drilldown panel.) */
+/* (.view-toggle / .view-btn removed — no List/Kanban toggle anymore.) */
 
 /* ── Tables ────────────────────────────────────────────── */
 .table-wrapper { overflow-x: auto; }
@@ -362,10 +324,9 @@ html, body {
 .data-table td { padding: 8px 14px; vertical-align: middle; }
 .data-table.compact td, .data-table.compact th { padding: 6px 10px; font-size: 12px; }
 
-.candidate-row { }
-.clickable-cell { cursor: pointer; }
-.name-primary { font-weight: 600; color: var(--text); }
-.name-secondary { font-size: 11px; color: var(--text-muted); margin-top: 1px; }
+/* (.candidate-row / .clickable-cell / .name-primary / .name-secondary
+    removed — the dense candidates table they styled is gone, replaced by
+    the funnel-row + funnel-candidate-row layout further down.) */
 
 /* ── Inline select ─────────────────────────────────────── */
 .inline-select {
@@ -426,63 +387,18 @@ html, body {
   font-size: 11px; padding: 2px 8px; border-radius: 4px;
 }
 
-/* ── Pagination ────────────────────────────────────────── */
-.pagination-bar {
-  display: flex; align-items: center; justify-content: space-between;
-  padding: 10px 18px; font-size: 12.5px; color: var(--text-secondary);
-  border-top: 1px solid var(--border);
-}
-.page-btn {
-  width: 30px; height: 30px; border-radius: 6px;
-  border: 1px solid var(--border); background: white;
-  color: var(--text-secondary); cursor: pointer; font-size: 13px;
-}
-.page-btn:hover:not(:disabled) { background: var(--primary-light); color: var(--primary); border-color: var(--primary-light); }
-.page-btn:disabled { opacity: 0.4; cursor: not-allowed; }
+/* (.pagination-bar / .page-btn removed — pagination retired with the dense
+    candidates table.) */
 
-/* ── Kanban ────────────────────────────────────────────── */
-.kanban-board {
-  display: flex; gap: 12px; padding: 12px;
-  overflow-x: auto; align-items: flex-start;
-}
-.kanban-column {
-  flex-shrink: 0;
-  min-width: 240px; max-width: 260px;
-  background: #F0F0F8; border-radius: 10px;
-  overflow: hidden;
-}
-.kanban-column-header {
-  padding: 10px 14px;
-  background: white;
-  border-left: 4px solid var(--stage-color, var(--primary));
-  display: flex; align-items: center; justify-content: space-between;
-}
-.kanban-column-title { font-size: 13px; font-weight: 700; }
-.kanban-column-count {
-  background: var(--border); color: var(--text-secondary);
-  font-size: 11px; font-weight: 600;
-  padding: 1px 8px; border-radius: 999px;
-}
-.kanban-cards { padding: 8px; min-height: 100px; }
-.kanban-card {
-  background: white; border: 1px solid var(--border);
-  border-radius: 8px; padding: 10px;
-  margin-bottom: 8px; cursor: grab;
-  box-shadow: 0 1px 3px rgba(0,0,0,0.05);
-  transition: box-shadow 0.15s, transform 0.1s;
-}
-.kanban-card:hover { box-shadow: var(--shadow); transform: translateY(-1px); }
-.kanban-card-head { display: flex; justify-content: space-between; align-items: flex-start; margin-bottom: 6px; }
-.kanban-card-name { font-size: 12.5px; font-weight: 600; }
-.kanban-card-meta { display: flex; gap: 5px; flex-wrap: wrap; align-items: center; }
+/* (.kanban-* / .sortable-ghost removed — no Kanban view anymore. The single
+    style we kept from this block is .recruiter-avatar, hoisted below since
+    it's used by the funnel candidate rows + the recruiter performance table.) */
 .recruiter-avatar {
   width: 22px; height: 22px; border-radius: 50%;
   background: var(--primary-light); color: var(--primary);
   font-size: 9.5px; font-weight: 700;
   display: inline-flex; align-items: center; justify-content: center;
 }
-.kanban-empty { text-align: center; padding: 16px 0; color: var(--text-muted); font-size: 12px; }
-.sortable-ghost { opacity: 0.4; background: var(--primary-light); }
 
 /* ── Job grid ──────────────────────────────────────────── */
 .job-grid {
@@ -791,11 +707,9 @@ html, body {
 
 /* ── Responsive ────────────────────────────────────────── */
 @media (max-width: 1200px) {
-  .kpi-grid { grid-template-columns: repeat(2, 1fr); }
   .analytics-grid { grid-template-columns: 1fr; }
 }
 @media (max-width: 768px) {
-  .kpi-grid { grid-template-columns: 1fr; }
   .filter-group select, .filter-group input { max-width: none; width: 100%; }
   .peek-panel, .settings-panel { width: 100%; }
 }
@@ -865,15 +779,12 @@ html, body {
    rather than sluggish. Anything longer makes a recruiter clicking
    30+ candidates an hour notice the lag.
 */
-.kanban-card,
-.kpi-card,
 .job-card,
+.funnel-stage,
 .toast {
-  /* Replaces the implicit `all` transitions sprinkled above with an
-     explicit named list — same visual outcome, but with a unified
-     ease that matches the peek panel slide-in (cubic-bezier(0.4,0,0.2,1)).
-     `transform` and `opacity` are GPU-composited so they stay smooth
-     even mid-scroll. */
+  /* Unified easing across the surfaces that move on hover/state changes.
+     `transform` and `opacity` are GPU-composited so they stay smooth even
+     mid-scroll. Curve matches the peek panel slide-in for visual cohesion. */
   transition:
     box-shadow 0.18s cubic-bezier(0.4, 0, 0.2, 1),
     transform 0.12s cubic-bezier(0.4, 0, 0.2, 1),
@@ -890,8 +801,7 @@ html, body {
 
 .btn,
 .icon-btn,
-.icon-btn-sm,
-.view-btn {
+.icon-btn-sm {
   /* Bootstrap defaults to ~150ms with stock easing; align to the same
      curve used elsewhere so all interactive surfaces feel like a set. */
   transition:
@@ -912,11 +822,8 @@ html, body {
     background-color 0.15s ease;
 }
 
-/* Sortable's drag-ghost transition is JS-driven; we just align the
-   drop animation timing to match the rest of the app. */
-.sortable-ghost {
-  transition: opacity 0.15s ease;
-}
+/* (Sortable.js dependency was retired with the Kanban view; the drag-ghost
+   transition that lived here is no longer reachable.) */
 
 /* ── CSV Import modal ──────────────────────────────────── */
 .csv-textarea {
