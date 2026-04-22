@@ -600,11 +600,11 @@ document.addEventListener('alpine:init', function () {
       },
 
       resetFilters: function () {
-        var r = presetRange('90d');
+        var r = presetRange('all');
         this.filters = {
-          preset: '90d', startDate: r.start, endDate: r.end,
+          preset: 'all', startDate: r.start, endDate: r.end,
           jobId: '', sourceId: '', motion: '', regionId: '', recruiterId: '',
-          status: 'Active', search: '',
+          status: '', search: '',
         };
         this.applyFilters();
       },
