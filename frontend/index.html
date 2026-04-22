@@ -204,7 +204,7 @@
                 x-model="filters.startDate"
                 @change="onCustomDateChange()"
                 aria-label="From date">
-              <span class="custom-date-sep">\u2013</span>
+              <span class="custom-date-sep">&ndash;</span>
               <input type="date" class="custom-date-input"
                 x-model="filters.endDate"
                 @change="onCustomDateChange()"
@@ -367,7 +367,7 @@
                 x-model="funnelFilters.startDate"
                 @change="onSectionCustomDateChange('funnel')"
                 aria-label="From date">
-              <span class="section-custom-date-sep">\u2013</span>
+              <span class="section-custom-date-sep">&ndash;</span>
               <input type="date" class="section-custom-date-input"
                 x-model="funnelFilters.endDate"
                 @change="onSectionCustomDateChange('funnel')"
@@ -672,7 +672,7 @@
                 x-model="recruiterFilters.hiresStartDate"
                 @change="onSectionCustomDateChange('recruiterHires')"
                 aria-label="Hires from date">
-              <span class="section-custom-date-sep">\u2013</span>
+              <span class="section-custom-date-sep">&ndash;</span>
               <input type="date" class="section-custom-date-input"
                 x-model="recruiterFilters.hiresEndDate"
                 @change="onSectionCustomDateChange('recruiterHires')"
@@ -786,7 +786,7 @@
                 x-model="sourceFilters.startDate"
                 @change="onSectionCustomDateChange('source')"
                 aria-label="From date">
-              <span class="section-custom-date-sep">\u2013</span>
+              <span class="section-custom-date-sep">&ndash;</span>
               <input type="date" class="section-custom-date-input"
                 x-model="sourceFilters.endDate"
                 @change="onSectionCustomDateChange('source')"
@@ -1565,11 +1565,11 @@
     <div class="debug-panel" @click.self="closeDebug()">
       <div class="debug-card">
         <div class="debug-header">
-          <strong class="debug-title">Debug \u00b7 ?debug=1</strong>
+          <strong class="debug-title">Debug &middot; ?debug=1</strong>
           <button class="btn btn-sm btn-outline-secondary"
             :disabled="debugLoading"
             @click="refreshDebug()" x-text="debugLoading ? 'Loading…' : 'Refresh'"></button>
-          <button class="icon-btn-sm" @click="closeDebug()">\u2715</button>
+          <button class="icon-btn-sm" @click="closeDebug()">&times;</button>
         </div>
         <div class="debug-body">
           <template x-if="!debugInfo">
@@ -1591,11 +1591,11 @@
               <div class="debug-section">
                 <div class="debug-section-title">Schema</div>
                 <template x-if="debugInfo.schema.ok">
-                  <div class="debug-ok">\u2713 All sheets validated</div>
+                  <div class="debug-ok">&check; All sheets validated</div>
                 </template>
                 <template x-if="!debugInfo.schema.ok">
                   <div>
-                    <div class="debug-error">\u2717 Schema problems detected:</div>
+                    <div class="debug-error">&cross; Schema problems detected:</div>
                     <ul>
                       <template x-for="(err, idx) in debugInfo.schema.errors" :key="idx">
                         <li x-text="err"></li>
@@ -1613,7 +1613,7 @@
               <div class="debug-section">
                 <div class="debug-section-title">Failure counters (last hour)</div>
                 <template x-if="Object.keys(debugInfo.failureCounters).length === 0">
-                  <div class="debug-ok">\u2713 No recent failures</div>
+                  <div class="debug-ok">&check; No recent failures</div>
                 </template>
                 <template x-if="Object.keys(debugInfo.failureCounters).length > 0">
                   <pre x-text="JSON.stringify(debugInfo.failureCounters, null, 2)"></pre>
@@ -1624,8 +1624,8 @@
                 <div class="debug-section">
                   <div class="debug-section-title">Sample candidate row</div>
                   <div class="debug-muted" style="margin-bottom:4px;">
-                    Raw values from sheet (with cell type \u2014 watch for
-                    Date \u2192 string coercion that breaks lex compares):
+                    Raw values from sheet (with cell type &mdash; watch for
+                    Date &rarr; string coercion that breaks lex compares):
                   </div>
                   <pre x-text="JSON.stringify(debugInfo.sampleCandidate.raw, null, 2)"></pre>
                   <div class="debug-muted" style="margin:6px 0 4px;">After _rowToCandidate:</div>
@@ -1655,7 +1655,7 @@
               </div>
 
               <div class="debug-section">
-                <div class="debug-section-title">localStorage \u00b7 section state</div>
+                <div class="debug-section-title">localStorage &middot; section state</div>
                 <pre x-text="(localStorage.getItem('tpg-ats.section-state.v1') || '\u2014')"></pre>
               </div>
             </div>
