@@ -766,6 +766,13 @@ document.addEventListener('alpine:init', function () {
       resetSectionFilters: function (section) {
         if (section === 'funnel') {
           this.funnelFilters = { jobId: '', sourceId: '', recruiterId: '', preset: '', startDate: '', endDate: '' };
+          // Symmetric inverse of filterFunnelByRecruiter — entering a recruiter
+          // scope auto-expands every stage so the drill-in is one click; leaving
+          // the scope collapses them back so the funnel returns to its compact
+          // baseline. Without this, "Clear scope" would only undo half of what
+          // the recruiter-row click did, leaving the user to manually collapse
+          // each stage to get back to the default view.
+          this.expandedStages = [];
           this._persistSectionState();
         } else if (section === 'recruiter') {
           this.recruiterFilters = { jobId: '', sourceId: '', hiresPreset: '', hiresStartDate: '', hiresEndDate: '' };
