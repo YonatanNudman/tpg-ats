@@ -977,12 +977,16 @@ html, body {
   padding-bottom: 4px;
 }
 
+/* Five-column grid: stage name | count | bar | percent | chevron.
+   Pulling the count into its own column lets the bar be a purely
+   visual track. Tabular-nums on the count + percent gives clean
+   columnar scanning regardless of digit width. */
 .funnel-row {
   display: grid;
-  grid-template-columns: 130px 1fr 50px 24px;
+  grid-template-columns: 130px 36px 1fr 44px 18px;
   align-items: center;
-  gap: 12px;
-  padding: 9px 10px;
+  gap: 14px;
+  padding: 10px 12px;
   cursor: pointer;
   user-select: none;
   border-radius: var(--radius-sm);
@@ -992,30 +996,38 @@ html, body {
   color: var(--text);
   white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
 }
+.funnel-stage-count {
+  font-size: 14px; font-weight: 700;
+  color: var(--text);
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+}
+.funnel-stage-count.zero {
+  color: var(--text-muted);
+  font-weight: 500;
+}
 .funnel-bar-track {
   position: relative;
-  height: 24px;
-  background: #F0F2F8;
-  border-radius: 4px;
+  height: 12px;
+  background: #EEF0F6;
+  border-radius: 999px;
   overflow: hidden;
 }
 .funnel-bar {
   height: 100%;
-  border-radius: 4px;
-  display: flex; align-items: center; justify-content: flex-end;
-  padding: 0 8px;
-  font-size: 11.5px; font-weight: 700;
-  color: white;
-  text-shadow: 0 1px 2px rgba(0,0,0,0.15);
+  border-radius: 999px;
   /* Smooth bar growth when filters change so the funnel feels live. */
   transition: width 0.3s cubic-bezier(0.4,0,0.2,1), background 0.2s ease;
-  min-width: 24px;
 }
-.funnel-bar-count { white-space: nowrap; }
 .funnel-stage-pct {
   font-size: 12px; font-weight: 600;
-  color: var(--text-muted);
+  color: var(--text-secondary);
   text-align: right;
+  font-variant-numeric: tabular-nums;
+}
+.funnel-stage-pct.zero {
+  color: var(--text-muted);
+  font-weight: 500;
 }
 .funnel-chevron {
   color: var(--text-muted);
@@ -1023,7 +1035,10 @@ html, body {
 }
 
 .funnel-stage-candidates {
-  margin: 0 10px 4px 142px;  /* aligns under the bar track */
+  /* Indent so the candidate list nests visually under the bar track,
+     not under the stage name. New 5-column grid:
+     130 (name) + 14 (gap) + 36 (count) + 14 (gap) = 194 from row start. */
+  margin: 0 12px 4px 194px;
   border-left: 2px solid rgba(var(--primary-rgb), 0.25);
   padding: 4px 0 4px 12px;
   display: flex; flex-direction: column; gap: 2px;
@@ -1164,17 +1179,9 @@ html, body {
   z-index: 5;
 }
 
-/* ── Funnel: stronger count badge on the bar ────────────────
-   The previous bar had a 700-weight white count floating at the end
-   with a soft text-shadow. On bars that fill <30% of the track that
-   number was illegible on the gray track behind it. Pull the count
-   into a pill so it's always readable regardless of bar width. */
-.funnel-bar-count {
-  background: rgba(0, 0, 0, 0.18);
-  padding: 1px 7px;
-  border-radius: 999px;
-  font-variant-numeric: tabular-nums;
-}
+/* (.funnel-bar-count removed — count now lives in its own column
+    .funnel-stage-count outside the bar; the bar is purely visual.
+    See the funnel-row grid definition above for the column layout.) */
 .funnel-stage:hover:not(.expanded) .funnel-bar {
   filter: brightness(1.05);
 }
@@ -1236,8 +1243,8 @@ html, body {
     flex: 1; min-width: 0; max-width: none;
   }
   .funnel-row {
-    grid-template-columns: 100px 1fr 40px 20px;
-    gap: 8px;
+    grid-template-columns: 90px 28px 1fr 36px 16px;
+    gap: 10px;
   }
   .funnel-stage-candidates {
     margin-left: 0;

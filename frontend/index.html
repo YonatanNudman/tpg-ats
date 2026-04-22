@@ -344,13 +344,24 @@
                    :class="{ 'expanded': expandedStages.includes(stage.stage_id) }">
                 <div class="funnel-row" @click="toggleFunnelStage(stage.stage_id)">
                   <div class="funnel-stage-name" x-text="stage.stage_name"></div>
+                  <!--
+                    Count moved out of the bar into its own column. Old design
+                    had a dark-pill badge sitting on top of the colored bar
+                    which looked muddy (especially on short/zero bars where the
+                    bar had to fake a min-width just to host the count). Now
+                    the bar is purely visual and the count is its own scannable
+                    number column with tabular-nums for clean column reading.
+                  -->
+                  <div class="funnel-stage-count"
+                       :class="{ zero: stage.candidate_count === 0 }"
+                       x-text="stage.candidate_count"></div>
                   <div class="funnel-bar-track">
                     <div class="funnel-bar"
-                         :style="`width: ${Math.max(funnelBarWidth(stage), stage.candidate_count > 0 ? 6 : 0)}%; background: ${stage.stage_color || 'var(--primary)'};`">
-                      <span class="funnel-bar-count" x-text="stage.candidate_count"></span>
-                    </div>
+                         :style="`width: ${funnelBarWidth(stage)}%; background: ${stage.stage_color || 'var(--primary)'};`"></div>
                   </div>
-                  <div class="funnel-stage-pct" x-text="funnelBarWidth(stage) + '%'"></div>
+                  <div class="funnel-stage-pct"
+                       :class="{ zero: stage.candidate_count === 0 }"
+                       x-text="funnelBarWidth(stage) + '%'"></div>
                   <span class="material-icons funnel-chevron"
                         x-text="expandedStages.includes(stage.stage_id) ? 'expand_less' : 'chevron_right'"></span>
                 </div>
