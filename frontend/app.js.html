@@ -373,12 +373,42 @@ document.addEventListener('alpine:init', function () {
       reloadAll: async function () {
         this.loading = true;
         try {
-          await this.loadSettings();
-          await Promise.all([this.loadCandidates(), this.loadJobs(), this.loadAnalytics()]);
+          // Parallelize all four fetches — none of them depend on local
+          // `settings`, they each call gasCall which talks to the server.
+          // Was: sequential loadSettings then parallel rest. Saves ~one
+          // sheet roundtrip on cold start (~100-300ms).
+          await Promise.all([
+            this.loadSettings(),
+            this.loadCandidates(),
+            this.loadJobs(),
+            this.loadAnalytics(),
+          ]);
           this.$nextTick(function () { this.initSortable(); this.renderCharts(); }.bind(this));
         } finally {
           this.loading = false;
         }
+      },
+
+      /**
+       * Background refetch that does NOT flip `loading`. Used by
+       * manualRefresh (so the user's clicked-on table doesn't disappear
+       * behind a skeleton) and checkSync (so the 15s poll's reload is
+       * invisible to anyone mid-scroll). The only visible feedback is
+       * the spinning topbar icon driven by `syncing`.
+       *
+       * Settings ARE refetched here even though they change rarely,
+       * because the fingerprint diff that triggered checkSync may have
+       * been a settings change (teammate added a stage). Skipping it
+       * would leave the UI rendering stale dropdown options.
+       */
+      silentReload: async function () {
+        await Promise.all([
+          this.loadSettings(),
+          this.loadCandidates(),
+          this.loadJobs(),
+          this.loadAnalytics(),
+        ]);
+        this.$nextTick(function () { this.initSortable(); this.renderCharts(); }.bind(this));
       },
 
       loadSettings: async function () {
@@ -556,15 +586,66 @@ document.addEventListener('alpine:init', function () {
             ghostClass: 'sortable-ghost',
             onEnd: function (evt) {
               var cid = parseInt(evt.item.dataset.candidateId, 10);
-              var toStage = parseInt(evt.to.dataset.stageId, 10);
-              var fromStage = parseInt(evt.from.dataset.stageId, 10);
-              if (toStage !== fromStage) {
-                var c = self.allCandidates.find(function (x) { return x.id === cid; });
-                if (c) self.updateCandidateField(c, 'stage_id', toStage);
-              }
+              var toStageId = parseInt(evt.to.dataset.stageId, 10);
+              var fromStageId = parseInt(evt.from.dataset.stageId, 10);
+              if (toStageId === fromStageId) return;
+              var c = self.allCandidates.find(function (x) { return x.id === cid; });
+              if (!c) return;
+              self.optimisticStageMove(c, fromStageId, toStageId);
             },
           }));
         });
+      },
+
+      /**
+       * Optimistic Kanban stage move.
+       *
+       * Differences vs. the inline-select path (updateCandidateField):
+       *   1. Updates ALL joined fields locally (stage_name, stage_color,
+       *      status when dropping into Hired/Rejected) so the chip and
+       *      column color reflect the move IMMEDIATELY — not after the
+       *      ~500-2000ms server roundtrip + refreshCandidate roundtrip.
+       *   2. Shows the success toast at drop-time, not after the awaits.
+       *      Recruiters drag dozens of cards a day; the perceptual gap
+       *      between "card in new column" and "system says saved" was
+       *      the loudest UX papercut on Kanban.
+       *   3. Full snapshot rollback on error — every field we predicted
+       *      gets reverted, plus an error toast so the user knows the
+       *      move didn't persist on the backend.
+       *
+       * The post-success refreshCandidate still runs in the background
+       * to pick up fields we don't predict (days_in_stage resets to 0,
+       * history rows added).
+       */
+      optimisticStageMove: function (c, fromStageId, toStageId) {
+        var self = this;
+        var toStage = this.settings.stages.find(function (s) { return s.id === toStageId; });
+        if (!toStage) return;
+
+        var prev = {
+          stage_id:    c.stage_id,
+          stage_name:  c.stage_name,
+          stage_color: c.stage_color,
+          status:      c.status,
+        };
+
+        c.stage_id    = toStageId;
+        c.stage_name  = toStage.name;
+        c.stage_color = toStage.color;
+        if (toStage.is_hired)         c.status = 'Hired';
+        else if (toStage.is_rejected) c.status = 'Rejected';
+
+        Alpine.store('app').toastSuccess('Moved to ' + toStage.name);
+
+        gasCall('updateCandidateStage', c.id, toStageId)
+          .then(function () { return self.refreshCandidate(c.id); })
+          .catch(function (e) {
+            c.stage_id    = prev.stage_id;
+            c.stage_name  = prev.stage_name;
+            c.stage_color = prev.stage_color;
+            c.status      = prev.status;
+            Alpine.store('app').toastError('Move failed: ' + e.message);
+          });
       },
 
       // ── Chart rendering ──────────────────────────────────
@@ -683,12 +764,17 @@ document.addEventListener('alpine:init', function () {
         syncTimer = setInterval(function () { self.checkSync(); }, 20000);
       },
 
-      // Manual refresh — wired to the 🔄 button in the topbar
+      // Manual refresh — wired to the 🔄 button in the topbar.
+      // Uses silentReload so the table/Kanban stays visible during refetch
+      // (the spinning icon is the only feedback). Previously this called
+      // reloadAll which set loading=true → the skeleton flashed in for
+      // ~300-800ms, which felt like a regression on a *user-initiated*
+      // refresh where they're already looking at content.
       manualRefresh: async function () {
         if (this.syncing) return;
         this.syncing = true;
         try {
-          await this.reloadAll();
+          await this.silentReload();
           Alpine.store('app').toastSuccess('Refreshed.');
         } catch (e) {
           Alpine.store('app').toastError('Refresh failed: ' + e.message);
@@ -705,8 +791,16 @@ document.addEventListener('alpine:init', function () {
           self.syncing = true;
           var fp = await gasCall('getSyncFingerprint');
           if (lastSyncSig && fp.sig !== lastSyncSig) {
+            // Snapshot scroll BEFORE the silent reload so we can restore
+            // it after Alpine re-renders. Charts re-init can shift layout
+            // by a few px and the table re-render briefly recomputes
+            // heights — without restoring, the user mid-scroll gets
+            // yanked to a slightly different position. Subtle but
+            // perceptible jank that breaks the "live" feel.
+            var scrollY = window.scrollY;
             self.syncStale = true;
-            await self.reloadAll();
+            await self.silentReload();
+            self.$nextTick(function () { window.scrollTo({ top: scrollY }); });
             Alpine.store('app').toastSuccess('Updated with teammate changes.');
             self.syncStale = false;
           }

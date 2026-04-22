@@ -748,4 +748,122 @@ html, body {
   .filter-group select, .filter-group input { max-width: none; width: 100%; }
   .peek-panel, .settings-panel { width: 100%; }
 }
+
+/* ── Skeleton loaders ──────────────────────────────────────
+   Replace the legacy spinner during initial mount. Renders the same
+   approximate geometry the real table will fill, so when the data
+   arrives there's no layout shift — the only change the user sees is
+   the shimmer turning into actual content.
+
+   Designed to NOT show during sync polls / manual refreshes. The
+   `silentReload()` JS path leaves `loading` untouched so the existing
+   table stays visible while data refetches in the background. Only
+   the initial mount in `init()` uses the loading-true path.
+*/
+.skeleton-section {
+  padding: 14px 18px;
+  display: flex; flex-direction: column; gap: 10px;
+}
+
+.skeleton-row {
+  display: flex; align-items: center; gap: 12px;
+  padding: 10px 4px;
+  border-bottom: 1px solid var(--border);
+}
+.skeleton-row:last-child { border-bottom: none; }
+.skeleton-row-body {
+  flex: 1; display: flex; flex-direction: column; gap: 6px; min-width: 0;
+}
+
+.skeleton {
+  background: linear-gradient(
+    90deg,
+    rgba(0,0,0,0.045) 0%,
+    rgba(0,0,0,0.085) 50%,
+    rgba(0,0,0,0.045) 100%
+  );
+  background-size: 200% 100%;
+  animation: skeleton-shimmer 1.4s ease-in-out infinite;
+  border-radius: 4px;
+  /* Honor reduced-motion: still render the placeholder, just stop the
+     pulse. The shape itself communicates "loading" without requiring
+     animation. */
+}
+@media (prefers-reduced-motion: reduce) {
+  .skeleton { animation: none; background: rgba(0,0,0,0.06); }
+}
+
+@keyframes skeleton-shimmer {
+  0%   { background-position: 200% 0; }
+  100% { background-position: -200% 0; }
+}
+
+.skeleton-avatar     { width: 34px; height: 34px; border-radius: 50%; flex-shrink: 0; }
+.skeleton-line       { height: 12px; }
+.skeleton-line-strong{ width: 38%; }
+.skeleton-line-thin  { width: 22%; height: 10px; }
+.skeleton-pill       { width: 80px; height: 22px; border-radius: 999px; flex-shrink: 0; }
+.skeleton-pill-narrow{ width: 48px; }
+
+/* ── Subtle transition smoothing ──────────────────────────
+   Append-only refinements that take existing interactions from
+   "snaps" to "settles". No structural CSS changes — only easing
+   curves and durations on properties already animated implicitly.
+
+   These are intentionally short (120-180ms) so they feel responsive
+   rather than sluggish. Anything longer makes a recruiter clicking
+   30+ candidates an hour notice the lag.
+*/
+.kanban-card,
+.kpi-card,
+.job-card,
+.toast {
+  /* Replaces the implicit `all` transitions sprinkled above with an
+     explicit named list — same visual outcome, but with a unified
+     ease that matches the peek panel slide-in (cubic-bezier(0.4,0,0.2,1)).
+     `transform` and `opacity` are GPU-composited so they stay smooth
+     even mid-scroll. */
+  transition:
+    box-shadow 0.18s cubic-bezier(0.4, 0, 0.2, 1),
+    transform 0.12s cubic-bezier(0.4, 0, 0.2, 1),
+    border-color 0.18s ease,
+    background 0.18s ease;
+}
+
+.data-table tbody tr {
+  /* Existing rule already has `transition: background 0.1s` — soften the
+     hover lift so it doesn't feel jittery when scrolling fast through
+     long candidate lists. */
+  transition: background 0.15s ease;
+}
+
+.btn,
+.icon-btn,
+.icon-btn-sm,
+.view-btn {
+  /* Bootstrap defaults to ~150ms with stock easing; align to the same
+     curve used elsewhere so all interactive surfaces feel like a set. */
+  transition:
+    background-color 0.15s cubic-bezier(0.4, 0, 0.2, 1),
+    border-color 0.15s ease,
+    color 0.15s ease,
+    box-shadow 0.18s ease;
+}
+
+.inline-select,
+.form-control,
+.form-select {
+  /* Make the focus-ring grow rather than pop, which significantly
+     reduces perceived input latency. */
+  transition:
+    border-color 0.15s ease,
+    box-shadow 0.18s cubic-bezier(0.4, 0, 0.2, 1),
+    background-color 0.15s ease;
+}
+
+/* Sortable's drag-ghost transition is JS-driven; we just align the
+   drop animation timing to match the rest of the app. */
+.sortable-ghost {
+  transition: opacity 0.15s ease;
+}
 </style>
