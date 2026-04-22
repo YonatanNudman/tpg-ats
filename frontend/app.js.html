@@ -980,9 +980,41 @@ document.addEventListener('alpine:init', function () {
 
   // ── Peek Panel component ─────────────────────────────────
   Alpine.data('peekComponent', function () {
+    var presenceTimer = null;
     return {
       editStageId: 0, editRecruiterId: '', editSourceId: '', editRegionId: '',
       editMotion: 'Inbound', editKanban: 'Normal', editPostHire: '', editNotes: '',
+      otherViewers: [],   // [{ email, secondsAgo }]
+
+      /**
+       * Deterministic avatar color from an email — used to color the
+       * presence avatars in a stable way. Same email = same color every
+       * time, no server round-trip needed, feels like a consistent identity.
+       */
+      presenceColor: function (email) {
+        if (!email) return '#8A90A2';
+        var hash = 0;
+        for (var i = 0; i < email.length; i++) {
+          hash = ((hash << 5) - hash) + email.charCodeAt(i);
+          hash |= 0;
+        }
+        var palette = [
+          '#594AE2', '#F2831F', '#239ED8', '#3AA76D',
+          '#E14B4B', '#8E5DC9', '#D17907', '#1A8FB3',
+        ];
+        return palette[Math.abs(hash) % palette.length];
+      },
+
+      /** Tick — pings the server we're here, then reads other viewers. */
+      _presenceTick: async function () {
+        var id = this.$store.app.peek.candidateId;
+        if (!id) return;
+        try {
+          await gasCall('touchPresence', id);
+          var viewers = await gasCall('getPresence', id);
+          this.otherViewers = viewers || [];
+        } catch (e) { /* network flake — non-fatal */ }
+      },
 
       init: function () {
         var self = this;
@@ -1009,6 +1041,20 @@ document.addEventListener('alpine:init', function () {
         // Cover the case where candidate is already loaded by mount (e.g. open
         // a second candidate while peek is still mounted from the first one).
         syncFromCandidate(this.$store.app.peek.candidate);
+
+        // Kick off presence tracking — ping every 15s, immediately on open.
+        // When peek unmounts (candidateId goes null), the interval is cleared.
+        var self = this;
+        function startPresence() {
+          if (presenceTimer) clearInterval(presenceTimer);
+          self._presenceTick();
+          presenceTimer = setInterval(function () { self._presenceTick(); }, 15000);
+        }
+        this.$watch('$store.app.peek.candidateId', function (id) {
+          if (id) startPresence();
+          else if (presenceTimer) { clearInterval(presenceTimer); presenceTimer = null; self.otherViewers = []; }
+        });
+        if (this.$store.app.peek.candidateId) startPresence();
       },
 
       peekName: function () {
@@ -1059,10 +1105,64 @@ document.addEventListener('alpine:init', function () {
         }
       },
 
+      /**
+       * Extract @first-name mentions from a block of text.
+       * Lowercased + deduped. We match "@" followed by letters only,
+       * bounded by a word boundary. "@brad," → ["brad"]; "email@x" not matched.
+       */
+      _extractMentions: function (text) {
+        if (!text) return [];
+        var out = {};
+        var re = /(?:^|[^A-Za-z0-9_@.])@([A-Za-z][A-Za-z0-9_-]{0,30})/g;
+        var m;
+        while ((m = re.exec(text)) !== null) out[m[1].toLowerCase()] = true;
+        return Object.keys(out);
+      },
+
+      /**
+       * Resolve extracted @names to the active recruiter list.
+       * Returns only names that have a matching recruiter — used
+       * for the "Mentions: Brad, Alice" hint line under the notes.
+       */
+      resolvedMentions: function () {
+        var names = this._extractMentions(this.editNotes);
+        if (names.length === 0) return [];
+        var recruiters = this.$store.app.settings.recruiters || [];
+        return names
+          .map(function (n) {
+            var match = recruiters.find(function (r) {
+              return r.is_active && r.name && r.name.toLowerCase().split(/\s+/)[0] === n;
+            });
+            return match ? match.name.split(/\s+/)[0] : null;
+          })
+          .filter(Boolean);
+      },
+
       saveNotes: async function () {
         var current = this.$store.app.peek.candidate.notes || '';
         if (this.editNotes === current) return;
+        var previousMentions = this._extractMentions(current);
+        var newMentions = this._extractMentions(this.editNotes);
+        var added = newMentions.filter(function (m) { return previousMentions.indexOf(m) < 0; });
         await this.saveField('notes', this.editNotes);
+
+        // Fire mention notifications for newly-added @names only.
+        // Self-mentions + unresolved names are dropped server-side.
+        if (added.length > 0) {
+          try {
+            var result = await gasCall('notifyMentions', {
+              candidateId: this.$store.app.peek.candidateId,
+              mentions: added,
+              noteExcerpt: this.editNotes.slice(0, 400),
+              webAppUrl: window.location.href.split('?')[0],
+            });
+            if (result && result.sent > 0) {
+              this.$store.app.toastSuccess(
+                'Notified ' + result.sent + ' teammate' + (result.sent === 1 ? '' : 's') + '.'
+              );
+            }
+          } catch (e) { /* mail failures shouldn't block note save */ }
+        }
       },
 
       // Opens the reject modal — actual reject logic lives in the rejectModal

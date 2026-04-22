@@ -609,6 +609,133 @@ function getRecentHires(days = 90): CandidateRow[] {
  * total history rows. Current-period filter is a frontend concern (user
  * might want "this week" vs "last 30 days").
  */
+// ============================================================
+// @mentions in notes — email notification when someone tags a teammate
+// ============================================================
+//
+// Called by the frontend when a candidate's notes are saved and new
+// @mentions were detected. We resolve each @name (case-insensitive first-
+// name match against active recruiters), then send one email per recipient
+// via GmailApp. Each email includes the note snippet and a deep link back
+// to the candidate's peek panel (relies on the ?candidate=ID URL handling
+// we added in the deep-linking work).
+
+interface MentionNotificationInput {
+  candidateId: number;
+  mentions: string[];   // normalized lowercase first names extracted by the client
+  noteExcerpt: string;
+  webAppUrl?: string;   // optional; client passes this so GAS doesn't need to know it
+}
+
+function notifyMentions(input: MentionNotificationInput): { sent: number; skipped: string[] } {
+  if (!input || !input.mentions || input.mentions.length === 0) {
+    return { sent: 0, skipped: [] };
+  }
+  const db = getDB();
+  const candidate = db.getCandidateById(input.candidateId);
+  if (!candidate) return { sent: 0, skipped: ["candidate-not-found"] };
+
+  const fromEmail = getSessionEmail();
+  const recruiters = db.getAllRecruiters().filter(r => r.is_active && r.email);
+
+  const sent: string[] = [];
+  const skipped: string[] = [];
+  for (const name of input.mentions) {
+    const target = recruiters.find(r =>
+      r.name.toLowerCase().split(/\s+/)[0] === String(name).toLowerCase()
+    );
+    if (!target) { skipped.push("no-match:" + name); continue; }
+    if (target.email.toLowerCase() === (fromEmail || "").toLowerCase()) {
+      skipped.push("self-mention:" + name); continue;   // don't email yourself
+    }
+    try {
+      const candName = (candidate.first_name || "") + " " + (candidate.last_name || "");
+      const subject = "You were mentioned in " + candName.trim() + "'s notes";
+      const link = input.webAppUrl
+        ? input.webAppUrl + "?candidate=" + input.candidateId
+        : "";
+      const body =
+        fromEmail + " mentioned you in a note on " + candName.trim() + ":\n\n" +
+        '"' + (input.noteExcerpt || "").trim() + '"\n\n' +
+        (link ? "Open in ATS: " + link + "\n\n" : "") +
+        "— TPG Recruiting ATS";
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      (GmailApp as any).sendEmail(target.email, subject, body);
+      sent.push(target.email);
+    } catch (err: any) {
+      skipped.push("send-failed:" + target.email + ":" + (err.message || ""));
+    }
+  }
+  return { sent: sent.length, skipped };
+}
+
+// ============================================================
+// Real-time presence (who's viewing which candidate right now)
+// ============================================================
+// Keyed in CacheService to avoid sheet writes — every peek panel
+// ping is just a few cache bytes. Expires after 60s of silence so
+// stale viewers clean up automatically even if the client tab dies
+// without sending a "leaving" signal.
+
+const PRESENCE_TTL_SEC = 60;
+const PRESENCE_KEY_PREFIX = "presence:";
+
+/**
+ * Client pings this every ~15s while it has a candidate peek panel open.
+ * Server records {email, timestamp} under a key scoped to the candidate.
+ * We store per-viewer entries (one cache key per viewer) so we can list
+ * them all without reading a single giant value.
+ */
+function touchPresence(candidateId: number): { ok: boolean } {
+  if (typeof CacheService === "undefined") return { ok: false };
+  if (!candidateId) return { ok: false };
+  const email = getSessionEmail() || "unknown";
+  const key = PRESENCE_KEY_PREFIX + candidateId + ":" + email;
+  const value = JSON.stringify({ email, ts: Date.now() });
+  try {
+    CacheService.getScriptCache().put(key, value, PRESENCE_TTL_SEC);
+    // Also maintain an "index" key listing viewer emails for this candidate.
+    // The index itself expires so it can be rebuilt if all viewers are stale.
+    const idxKey = PRESENCE_KEY_PREFIX + candidateId + ":__idx";
+    const existing = CacheService.getScriptCache().get(idxKey);
+    const viewers: string[] = existing ? JSON.parse(existing) : [];
+    if (viewers.indexOf(email) < 0) viewers.push(email);
+    CacheService.getScriptCache().put(idxKey, JSON.stringify(viewers), PRESENCE_TTL_SEC);
+  } catch { /* cache over-quota or some other flake — non-fatal */ }
+  return { ok: true };
+}
+
+/**
+ * Called by the peek panel when it opens, and by its polling tick.
+ * Returns the list of OTHER users (not the caller) currently viewing
+ * the given candidate. Filters out expired entries (defense-in-depth
+ * against the TTL race).
+ */
+function getPresence(candidateId: number): Array<{ email: string; secondsAgo: number }> {
+  if (typeof CacheService === "undefined") return [];
+  if (!candidateId) return [];
+  const myEmail = getSessionEmail() || "unknown";
+  const idxKey = PRESENCE_KEY_PREFIX + candidateId + ":__idx";
+  let viewers: string[] = [];
+  try {
+    const raw = CacheService.getScriptCache().get(idxKey);
+    viewers = raw ? JSON.parse(raw) : [];
+  } catch { return []; }
+
+  const now = Date.now();
+  const out: Array<{ email: string; secondsAgo: number }> = [];
+  for (const v of viewers) {
+    if (v === myEmail) continue;
+    try {
+      const raw = CacheService.getScriptCache().get(PRESENCE_KEY_PREFIX + candidateId + ":" + v);
+      if (!raw) continue;  // expired
+      const rec = JSON.parse(raw);
+      out.push({ email: rec.email, secondsAgo: Math.round((now - rec.ts) / 1000) });
+    } catch { /* skip bad entry */ }
+  }
+  return out;
+}
+
 /**
  * Bulk create candidates in one locked transaction.
  * Accepts an array of CreateCandidateInput — each validated the same way

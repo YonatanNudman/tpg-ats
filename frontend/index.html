@@ -855,6 +855,23 @@
                   <div class="peek-name" x-text="peekName()"></div>
                   <div class="peek-email" x-text="$store.app.peek.candidate.email"></div>
                 </div>
+
+                <!-- Real-time presence: avatars of other viewers right now -->
+                <template x-if="otherViewers.length > 0">
+                  <div class="presence-indicator"
+                    :title="'Also viewing: ' + otherViewers.map(v => v.email).join(', ')">
+                    <template x-for="v in otherViewers.slice(0, 3)" :key="v.email">
+                      <div class="presence-avatar"
+                        :style="'background: ' + presenceColor(v.email) + ';'"
+                        x-text="initials(v.email.split('@')[0])"></div>
+                    </template>
+                    <template x-if="otherViewers.length > 3">
+                      <div class="presence-avatar presence-more"
+                        x-text="'+' + (otherViewers.length - 3)"></div>
+                    </template>
+                  </div>
+                </template>
+
                 <button class="icon-btn-sm" @click="$store.app.closePeek()">✕</button>
               </div>
 
@@ -973,10 +990,24 @@
                   </template>
                 </div>
 
-                <div class="peek-section-title">Notes</div>
+                <div class="peek-section-title">
+                  Notes
+                  <span class="peek-section-hint">
+                    Type <code>@firstname</code> to notify a teammate by email
+                  </span>
+                </div>
                 <textarea class="form-control form-control-sm" rows="3"
                   x-model="editNotes" @blur="saveNotes()"
-                  placeholder="Add notes…"></textarea>
+                  placeholder="Add notes… tip: @brad will email Brad with a link to this candidate"></textarea>
+                <template x-if="resolvedMentions().length > 0">
+                  <div class="mention-hint">
+                    <span class="material-icons mi-inline">alternate_email</span>
+                    Will notify:
+                    <template x-for="n in resolvedMentions()" :key="n">
+                      <span class="mention-chip" x-text="n"></span>
+                    </template>
+                  </div>
+                </template>
 
                 <div class="peek-section-title">Stage History</div>
                 <ul class="history-timeline">
