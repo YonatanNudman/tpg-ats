@@ -166,7 +166,16 @@
 
         <div class="filter-group filter-search">
           <label>Search</label>
-          <input type="text" x-model="filters.search"
+          <!--
+            Debounced model binding so `filteredCandidates` (a computed
+            getter that scans every candidate on every dependency change)
+            doesn't recompute per keystroke. The @input.debounce on
+            applyFilters covered the server-side reload but x-model still
+            wrote synchronously, so typing "janice" was triggering 6
+            client-side re-filters of the whole list. 200ms feels instant
+            to a typist and collapses bursts to a single recompute.
+          -->
+          <input type="text" x-model.debounce.200ms="filters.search"
             @input.debounce.300ms="applyFilters()"
             placeholder="Name, email…">
         </div>
@@ -504,8 +513,29 @@
         </div>
       </template>
 
+      <!--
+        Skeleton loader replaces the spinner during initial load. Renders
+        the same approximate row geometry the real table will fill, so the
+        page doesn't reflow when data arrives. We use 8 placeholder rows
+        as a sensible average that fits above the fold without overflowing.
+        Subsequent reloads (manualRefresh, checkSync) use silentReload()
+        which doesn't flip `loading`, so this template only fires on first
+        mount — there's no skeleton flicker on every sync poll.
+      -->
       <template x-if="loading">
-        <div class="section-loading"><div class="spinner"></div><span>Loading candidates…</span></div>
+        <div class="skeleton-section" aria-busy="true" aria-label="Loading candidates">
+          <template x-for="i in 8" :key="i">
+            <div class="skeleton-row">
+              <div class="skeleton skeleton-avatar"></div>
+              <div class="skeleton-row-body">
+                <div class="skeleton skeleton-line skeleton-line-strong"></div>
+                <div class="skeleton skeleton-line skeleton-line-thin"></div>
+              </div>
+              <div class="skeleton skeleton-pill"></div>
+              <div class="skeleton skeleton-pill skeleton-pill-narrow"></div>
+            </div>
+          </template>
+        </div>
       </template>
     </div>
 
