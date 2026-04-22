@@ -115,38 +115,6 @@ export function computeKpis(
     return exp >= today.getTime() && exp <= sevenDays;
   }).length;
 
-  // ── Previous-period comparison for trend arrows ─────────────────
-  // If the user's period is N days long, run the same KPI calc over
-  // the N days immediately before startDate. Skip if the window is
-  // longer than 2 years or invalid (returns undefined → no arrows shown).
-  let prev: KpiData["prev"] | undefined = undefined;
-  try {
-    const startMs = new Date(filtersNoStatus.startDate).getTime();
-    const endMs   = new Date(filtersNoStatus.endDate).getTime();
-    const spanMs  = endMs - startMs;
-    if (spanMs > 0 && spanMs < 365 * 86_400_000 * 2) {
-      const prevEndMs   = startMs - 86_400_000;
-      const prevStartMs = prevEndMs - spanMs;
-      const prevFilters: DashboardFilters = {
-        ...filtersNoStatus,
-        startDate: new Date(prevStartMs).toISOString().split("T")[0],
-        endDate:   new Date(prevEndMs).toISOString().split("T")[0],
-      };
-      const prevInScope = filterCandidates(candidates, prevFilters);
-      const prevHires = prevInScope.filter(c => c.status === "Hired" && c.date_applied && c.date_last_stage_update);
-      const prevAvgDays = prevHires.length > 0
-        ? prevHires.reduce((s, c) =>
-            s + (new Date(c.date_last_stage_update).getTime() - new Date(c.date_applied).getTime()) / 86_400_000, 0
-          ) / prevHires.length
-        : 0;
-      prev = {
-        activeCandidates: prevInScope.filter(c => c.status === "Active").length,
-        hiresThisPeriod:  prevHires.length,
-        avgDaysToHire:    Math.round(prevAvgDays * 10) / 10,
-      };
-    }
-  } catch { /* swallow — previous-period is nice-to-have */ }
-
   return {
     activeCandidates,
     openPositions,
@@ -156,7 +124,6 @@ export function computeKpis(
     offerAcceptanceRate: Math.round(offerAcceptanceRate * 10) / 10,
     expiredPostings,
     expiringPostings,
-    prev,
   };
 }
 

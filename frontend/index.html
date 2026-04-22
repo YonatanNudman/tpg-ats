@@ -91,20 +91,6 @@
 
     <!-- ── Global Filter Bar ───────────────────────────── -->
     <div class="card filter-card">
-
-      <!-- Saved filter presets (per-browser) — shows when user has any saved -->
-      <template x-if="savedViews.length > 0">
-        <div class="views-bar">
-          <span class="views-label">Views:</span>
-          <template x-for="v in savedViews" :key="v.name">
-            <button class="view-chip" @click="applyView(v)">
-              <span x-text="v.name"></span>
-              <span class="view-chip-delete" @click="deleteView(v, $event)" title="Delete">×</span>
-            </button>
-          </template>
-        </div>
-      </template>
-
       <div class="filter-row">
 
         <div class="filter-group">
@@ -185,15 +171,8 @@
             placeholder="Name, email…">
         </div>
 
-        <div class="filter-actions">
-          <button class="btn btn-sm btn-outline-primary"
-            @click="saveCurrentView()" title="Save current filters as a named view">
-            <span class="material-icons mi-inline">bookmark_add</span>
-            Save view
-          </button>
-          <button class="btn btn-sm btn-outline-secondary"
-            @click="resetFilters()">Reset</button>
-        </div>
+        <button class="btn btn-sm btn-outline-secondary filter-reset"
+          @click="resetFilters()">Reset</button>
       </div>
     </div>
 
@@ -203,11 +182,7 @@
         :class="{ 'active': drill === 'active' }"
         @click="toggleDrill('active')">
         <div class="kpi-label">Active Candidates</div>
-        <div class="kpi-value">
-          <span x-text="kpi.activeCandidates"></span>
-          <span class="trend" :class="trendClass(kpi.activeCandidates, kpi.prev?.activeCandidates)"
-            x-html="trendArrow(kpi.activeCandidates, kpi.prev?.activeCandidates)"></span>
-        </div>
+        <div class="kpi-value" x-text="kpi.activeCandidates"></div>
         <div class="kpi-sub">Click to show list</div>
       </div>
 
@@ -222,19 +197,9 @@
 
       <div class="kpi-card kpi-accent-success">
         <div class="kpi-label">Hires This Period</div>
-        <div class="kpi-value">
-          <span x-text="kpi.hiresThisPeriod"></span>
-          <span class="trend" :class="trendClass(kpi.hiresThisPeriod, kpi.prev?.hiresThisPeriod)"
-            x-html="trendArrow(kpi.hiresThisPeriod, kpi.prev?.hiresThisPeriod)"></span>
-        </div>
+        <div class="kpi-value" x-text="kpi.hiresThisPeriod"></div>
         <div class="kpi-sub">
           Avg <span x-text="kpi.avgDaysToHire"></span> days to hire
-          <template x-if="kpi.prev && kpi.prev.avgDaysToHire > 0">
-            <span class="trend-inline"
-              :class="trendClass(kpi.prev.avgDaysToHire, kpi.avgDaysToHire)"
-              x-html="trendArrow(kpi.prev.avgDaysToHire, kpi.avgDaysToHire, true)"
-              title="Lower is better"></span>
-          </template>
         </div>
       </div>
 
@@ -372,7 +337,38 @@
           <template x-if="filteredCandidates.length === 0">
             <div class="empty-state">
               <div class="empty-state-icon">👥</div>
-              <div class="empty-state-text">No candidates match your filters.</div>
+              <!-- Context-aware CTA: distinguishes "zero data" from "filters too narrow" -->
+              <template x-if="allCandidates.length === 0">
+                <div>
+                  <div class="empty-state-text">
+                    No candidates yet. Add your first one to get started.
+                  </div>
+                  <div class="empty-state-actions">
+                    <button class="btn btn-primary btn-sm"
+                      @click="openModal('addCandidate')">
+                      <span class="material-icons mi-inline">person_add</span> Add Candidate
+                    </button>
+                    <template x-if="jobs.length === 0">
+                      <button class="btn btn-outline-secondary btn-sm"
+                        @click="openModal('addJob')">
+                        <span class="material-icons mi-inline">work</span> Add Job first
+                      </button>
+                    </template>
+                  </div>
+                </div>
+              </template>
+              <template x-if="allCandidates.length > 0">
+                <div>
+                  <div class="empty-state-text">No candidates match your current filters.</div>
+                  <div class="empty-state-hint"
+                    x-text="'Showing ' + allCandidates.length + ' total in the database'"></div>
+                  <div class="empty-state-actions">
+                    <button class="btn btn-outline-primary btn-sm" @click="resetFilters()">
+                      Clear filters
+                    </button>
+                  </div>
+                </div>
+              </template>
             </div>
           </template>
 
@@ -671,7 +667,11 @@
                   </tr>
                 </template>
                 <template x-if="analytics.recruiterPerformance.length === 0">
-                  <tr><td colspan="5" class="empty-state-row">No data yet.</td></tr>
+                  <tr><td colspan="5" class="empty-state-row">
+                    <span x-text="settings.recruiters.length === 0
+                      ? 'No recruiters added yet \u2014 open Settings to add your team.'
+                      : 'No candidates assigned to recruiters in this period.'"></span>
+                  </td></tr>
                 </template>
               </tbody>
             </table>
@@ -690,7 +690,9 @@
                   </tr>
                 </template>
                 <template x-if="analytics.stageVelocity.length === 0">
-                  <tr><td colspan="3" class="empty-state-row">Not enough data yet.</td></tr>
+                  <tr><td colspan="3" class="empty-state-row">
+                    Stage velocity populates after candidates move through stages. Move a few candidates to see it fill in.
+                  </td></tr>
                 </template>
               </tbody>
             </table>
@@ -847,94 +849,13 @@
                     </div>
                   </template>
 
-                </div>
-
-                <!-- Edit LinkedIn / Resume URLs — compact collapse-on-click UI -->
-                <div class="url-editor">
-                  <button type="button" class="url-editor-toggle"
-                    @click="showUrlEditor = !showUrlEditor">
-                    <span class="material-icons mi-inline"
-                      x-text="showUrlEditor ? 'expand_less' : 'edit'"></span>
-                    <span x-text="($store.app.peek.candidate.linkedin_url || $store.app.peek.candidate.resume_url)
-                      ? 'Edit links'
-                      : 'Add LinkedIn or resume URL'"></span>
-                  </button>
-                  <template x-if="showUrlEditor">
-                    <div class="url-editor-fields">
-                      <div class="peek-field">
-                        <div class="peek-field-label">LinkedIn URL</div>
-                        <input type="url" class="form-control form-control-sm"
-                          x-model="editLinkedin"
-                          @blur="saveField('linkedin_url', editLinkedin)"
-                          placeholder="https://linkedin.com/in/...">
-                      </div>
-                      <div class="peek-field">
-                        <div class="peek-field-label">Resume URL (PDF for inline preview, or Drive link)</div>
-                        <input type="url" class="form-control form-control-sm"
-                          x-model="editResume"
-                          @blur="saveField('resume_url', editResume)"
-                          placeholder="https://... .pdf or Google Drive share link">
-                      </div>
+                  <template x-if="$store.app.peek.candidate.linkedin_url">
+                    <div class="peek-field peek-field-wide">
+                      <div class="peek-field-label">LinkedIn</div>
+                      <a :href="$store.app.peek.candidate.linkedin_url" target="_blank" rel="noopener">View Profile ↗</a>
                     </div>
                   </template>
                 </div>
-
-                <!-- ── LinkedIn + Resume preview cards ─────────────────
-                     LinkedIn blocks iframes with X-Frame-Options DENY,
-                     so we render a styled card that opens in a new tab.
-                     Resume URLs ending in .pdf get inline preview via <embed>. -->
-
-                <template x-if="$store.app.peek.candidate.linkedin_url">
-                  <div>
-                    <div class="peek-section-title">LinkedIn</div>
-                    <a class="link-card link-card-linkedin"
-                      :href="$store.app.peek.candidate.linkedin_url"
-                      target="_blank" rel="noopener">
-                      <div class="link-card-icon">in</div>
-                      <div class="link-card-body">
-                        <div class="link-card-title">
-                          <span x-text="peekName()"></span>
-                          <span class="link-card-open material-icons">open_in_new</span>
-                        </div>
-                        <div class="link-card-url"
-                          x-text="$store.app.peek.candidate.linkedin_url"></div>
-                      </div>
-                    </a>
-                  </div>
-                </template>
-
-                <template x-if="$store.app.peek.candidate.resume_url">
-                  <div>
-                    <div class="peek-section-title">Resume</div>
-                    <!-- PDF files: inline preview -->
-                    <template x-if="isPdfUrl($store.app.peek.candidate.resume_url)">
-                      <div class="resume-preview">
-                        <embed :src="$store.app.peek.candidate.resume_url"
-                          type="application/pdf" />
-                        <a :href="$store.app.peek.candidate.resume_url" target="_blank"
-                          rel="noopener" class="resume-preview-open">
-                          Open in new tab ↗
-                        </a>
-                      </div>
-                    </template>
-                    <!-- Non-PDF (Google Doc, etc.): styled card -->
-                    <template x-if="!isPdfUrl($store.app.peek.candidate.resume_url)">
-                      <a class="link-card link-card-resume"
-                        :href="$store.app.peek.candidate.resume_url"
-                        target="_blank" rel="noopener">
-                        <div class="link-card-icon"><span class="material-icons">description</span></div>
-                        <div class="link-card-body">
-                          <div class="link-card-title">
-                            View Resume
-                            <span class="link-card-open material-icons">open_in_new</span>
-                          </div>
-                          <div class="link-card-url"
-                            x-text="$store.app.peek.candidate.resume_url"></div>
-                        </div>
-                      </a>
-                    </template>
-                  </div>
-                </template>
 
                 <div class="peek-section-title">Notes</div>
                 <textarea class="form-control form-control-sm" rows="3"

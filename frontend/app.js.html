@@ -45,39 +45,108 @@ window.stageChipStyle = function (color) {
 window.motionClass = function (m) { return m === 'Outbound' ? 'outbound' : 'inbound'; };
 
 /**
- * Trend comparison helpers for KPI cards.
- *   trendArrow(current, prev)        → "↗ +2" / "↘ -1" / "→ ="  (bigger = better)
- *   trendArrow(current, prev, invert) → inverts color semantics for metrics where
- *                                       lower is better (e.g. avgDaysToHire)
- *   trendClass(current, prev)        → 'trend-up' / 'trend-down' / 'trend-flat'
+ * Format a US phone number as the user types.
+ *   "4155551234"        → "(415) 555-1234"
+ *   "14155551234"       → "+1 (415) 555-1234"
+ *   "+14155551234"      → "+1 (415) 555-1234"
+ *   "415"               → "(415"           (live intermediate state)
+ *   non-US-looking     → passes through with minor cleanup
+ *
+ * Behavior is "permissive but opinionated":
+ * strips bad chars, leaves sensible partial formatting while the user
+ * is still typing, never rejects input. Storage uses the formatted
+ * display string — we don't try to convert to E.164 since recruiters
+ * often paste international numbers that wouldn't round-trip cleanly
+ * without a real library.
  */
-window.trendArrow = function (current, prev) {
-  if (prev == null || isNaN(prev)) return '';
-  var delta = (current || 0) - prev;
-  if (delta > 0)  return '<span class="trend-sym">\u2197</span>&nbsp;+' + delta;
-  if (delta < 0)  return '<span class="trend-sym">\u2198</span>&nbsp;' + delta;
-  return '<span class="trend-sym">\u2192</span>';
-};
-window.trendClass = function (current, prev) {
-  if (prev == null || isNaN(prev)) return 'trend-empty';
-  var delta = (current || 0) - prev;
-  if (delta > 0) return 'trend-up';
-  if (delta < 0) return 'trend-down';
-  return 'trend-flat';
+window.formatPhone = function (raw) {
+  if (!raw) return '';
+  // Keep leading + if present, strip everything else except digits
+  var leadingPlus = String(raw).trim().indexOf('+') === 0;
+  var digits = String(raw).replace(/[^\d]/g, '');
+  if (!digits) return leadingPlus ? '+' : '';
+
+  // US 10-digit: (XXX) XXX-XXXX
+  if (!leadingPlus && digits.length <= 10) {
+    if (digits.length <= 3) return '(' + digits;
+    if (digits.length <= 6) return '(' + digits.slice(0,3) + ') ' + digits.slice(3);
+    return '(' + digits.slice(0,3) + ') ' + digits.slice(3,6) + '-' + digits.slice(6,10);
+  }
+  // US 11-digit (with country code): +1 (XXX) XXX-XXXX
+  if (!leadingPlus && digits.length === 11 && digits[0] === '1') {
+    return '+1 (' + digits.slice(1,4) + ') ' + digits.slice(4,7) + '-' + digits.slice(7,11);
+  }
+  // Explicit +country: "+CC NNNNNN..." (best-effort 1-3 digit country split)
+  if (leadingPlus) {
+    // Simple heuristic: +1 is the common one; otherwise use first 2
+    var cc = (digits[0] === '1') ? 1 : 2;
+    var country = digits.slice(0, cc);
+    var rest = digits.slice(cc);
+    if (rest.length === 0) return '+' + country;
+    if (rest.length <= 3) return '+' + country + ' ' + rest;
+    if (rest.length <= 6) return '+' + country + ' ' + rest.slice(0,3) + '-' + rest.slice(3);
+    if (rest.length <= 10) return '+' + country + ' ' + rest.slice(0,3) + '-' + rest.slice(3,6) + '-' + rest.slice(6);
+    // Longer — just space every 3
+    return '+' + country + ' ' + rest.match(/.{1,3}/g).join(' ');
+  }
+  // Longer-than-11 without a + — just leave it alone
+  return digits;
 };
 
-// Detects if a URL can be inline-previewed as a PDF.
-// Covers .pdf extensions, Google Drive file IDs (rendered via /preview), etc.
-window.isPdfUrl = function (url) {
-  if (!url) return false;
-  var u = String(url).toLowerCase();
-  if (u.endsWith('.pdf')) return true;
-  if (u.indexOf('.pdf?') > -1) return true;
-  // Google Drive share links contain /file/d/ID/view — can be inline-embedded
-  // via /preview. We don't auto-rewrite here (would need Drive API access to
-  // verify it's public); user can paste the /preview URL directly.
-  return false;
-};
+
+// ── History / URL state (deep-linking + browser back button) ─────────
+// GAS Web Apps run inside an iframe where only google.script.history
+// can actually update the parent frame's URL. We wrap it so the rest
+// of the app can keep using a simple pushHistory / popHistory API.
+//
+// Encoding: the whole app state lives in a single "state" object that
+// gets serialized to URL params by google.script.history. We track an
+// internal stack so closing a modal/peek correctly reverts to the
+// previous state rather than navigating off the web app entirely.
+var _historyStack = [];
+function _gasHistory() {
+  return (typeof google !== 'undefined' && google.script && google.script.history) || null;
+}
+function pushHistory(partial) {
+  var h = _gasHistory();
+  if (!h) return;                     // not in GAS iframe (local dev / tests)
+  var newState = Object.assign({}, currentState(), partial || {});
+  _historyStack.push(newState);
+  try { h.push(newState, null, serializeState(newState)); }
+  catch (e) { /* silently non-fatal */ }
+}
+function popHistory() {
+  var h = _gasHistory();
+  if (!h) return;
+  _historyStack.pop();
+  // Replace current entry with the previous state's URL so we don't
+  // accumulate empty frames when the user closes nested overlays.
+  var prev = _historyStack[_historyStack.length - 1] || {};
+  try { h.replace(prev, null, serializeState(prev)); }
+  catch (e) { /* non-fatal */ }
+}
+function currentState() {
+  var store = typeof Alpine !== 'undefined' && Alpine.store ? Alpine.store('app') : null;
+  if (!store) return {};
+  var s = {};
+  if (store.peek && store.peek.candidateId) s.candidate = store.peek.candidateId;
+  if (store.modal && store.modal.open)      s.modal     = store.modal.type;
+  return s;
+}
+function serializeState(state) {
+  var out = {};
+  if (state.candidate) out.candidate = String(state.candidate);
+  if (state.modal)     out.modal     = String(state.modal);
+  return out;
+}
+// Apply URL params on initial load (runs AFTER Alpine store is initialized)
+function applyInitialUrlState(params) {
+  if (!params) return;
+  if (params.candidate) {
+    var id = parseInt(params.candidate, 10);
+    if (!isNaN(id)) Alpine.store('app').openPeek(id, { suppressHistory: true });
+  }
+}
 
 function presetRange(preset) {
   var now = new Date();
@@ -119,10 +188,12 @@ document.addEventListener('alpine:init', function () {
     toastSuccess: function (m) { this.toast(m, 'success'); },
     toastError:   function (m) { this.toast(m, 'error'); },
 
-    // Peek
-    openPeek: async function (id) {
+    // Peek — opt { suppressHistory: true } skips pushing a new history frame
+    // (used when restoring from a URL on initial load, or reacting to popstate)
+    openPeek: async function (id, opt) {
       this.peek.open = true; this.peek.candidateId = id;
       this.peek.candidate = null; this.peek.history = []; this.peek.loading = true;
+      if (!opt || !opt.suppressHistory) pushHistory({ candidate: id });
       try {
         var r = await gasCall('getCandidateDetail', id);
         this.peek.candidate = r.candidate;
@@ -132,14 +203,21 @@ document.addEventListener('alpine:init', function () {
         this.peek.open = false;
       } finally { this.peek.loading = false; }
     },
-    closePeek: function () {
+    closePeek: function (opt) {
       this.peek.open = false; this.peek.candidateId = null;
       this.peek.candidate = null; this.peek.history = [];
+      if (!opt || !opt.suppressHistory) popHistory();
     },
 
     // Modal
-    openModal: function (type, data) { this.modal.type = type; this.modal.data = data || null; this.modal.open = true; },
-    closeModal: function () { this.modal.open = false; this.modal.type = null; this.modal.data = null; },
+    openModal: function (type, data) {
+      this.modal.type = type; this.modal.data = data || null; this.modal.open = true;
+      pushHistory({ modal: type });
+    },
+    closeModal: function (opt) {
+      this.modal.open = false; this.modal.type = null; this.modal.data = null;
+      if (!opt || !opt.suppressHistory) popHistory();
+    },
   });
 
   // ── Main ATS app component ──────────────────────────────────
@@ -252,13 +330,44 @@ document.addEventListener('alpine:init', function () {
           Alpine.store('app').userEmail = this.userEmail;
         } catch (e) { /* non-fatal */ }
 
-        this.loadSavedViews();
         await this.reloadAll();
         this.startSyncPolling();
 
         // Watch view changes to init Sortable for kanban
         this.$watch('view', function (v) { self.$nextTick(function () { self.initSortable(); }); });
         this.$watch('filteredCandidates', function () { self.$nextTick(function () { self.initSortable(); }); });
+
+        // Register browser back/forward handler — closes topmost overlay
+        // rather than navigating off the web app entirely. Pairs with
+        // pushHistory/popHistory on every openPeek/openModal call.
+        var h = _gasHistory();
+        if (h) {
+          h.setChangeHandler(function (e) {
+            var params = (e && e.state) || (e && e.location && e.location.parameter) || {};
+            var target = { candidate: params.candidate || null, modal: params.modal || null };
+            var store = Alpine.store('app');
+            // Close what's open if it doesn't match the new URL
+            if (store.modal.open && String(params.modal || '') !== String(store.modal.type))
+              store.closeModal({ suppressHistory: true });
+            if (store.peek.open && String(params.candidate || '') !== String(store.peek.candidateId))
+              store.closePeek({ suppressHistory: true });
+            // Open what the URL says should be open (if not already)
+            if (target.candidate && !store.peek.open)
+              store.openPeek(parseInt(target.candidate, 10), { suppressHistory: true });
+          });
+        }
+
+        // Apply initial URL params (deep link support)
+        if (h) {
+          try {
+            // google.script.url.getLocation runs asynchronously via callback
+            if (google.script.url && google.script.url.getLocation) {
+              google.script.url.getLocation(function (loc) {
+                applyInitialUrlState(loc && loc.parameter);
+              });
+            }
+          } catch (e) { /* non-fatal */ }
+        }
       },
 
       reloadAll: async function () {
@@ -321,57 +430,6 @@ document.addEventListener('alpine:init', function () {
           startDate: f.startDate,
           endDate: f.endDate,
         };
-      },
-
-      // ── Saved filter views (localStorage, per-browser) ────
-      // Stored under "tpg-ats.views" as an array of { name, filters }.
-      // Keeps the user's top of mind filter combos one click away
-      // without a server round-trip. Cross-device sync is a later
-      // upgrade if needed.
-      savedViews: [],
-
-      loadSavedViews: function () {
-        try {
-          var raw = localStorage.getItem('tpg-ats.views');
-          this.savedViews = raw ? JSON.parse(raw) : [];
-        } catch (e) { this.savedViews = []; }
-      },
-
-      persistSavedViews: function () {
-        try { localStorage.setItem('tpg-ats.views', JSON.stringify(this.savedViews)); }
-        catch (e) { /* quota / private mode — non-fatal */ }
-      },
-
-      saveCurrentView: function () {
-        var name = (prompt('Name this view (e.g. "My BDR pipeline"):') || '').trim();
-        if (!name) return;
-        // Replace if a view with that name already exists
-        this.savedViews = this.savedViews.filter(function (v) { return v.name !== name; });
-        // Clone current filters (minus startDate/endDate if they're preset-derived —
-        // otherwise "Last 30 days" gets frozen to specific dates)
-        var f = JSON.parse(JSON.stringify(this.filters));
-        this.savedViews.push({ name: name, filters: f });
-        this.persistSavedViews();
-        Alpine.store('app').toastSuccess('Saved view "' + name + '".');
-      },
-
-      applyView: function (view) {
-        var f = view.filters || {};
-        // Recompute date window from preset so a "30d" view stays rolling
-        var range = presetRange(f.preset || '90d');
-        this.filters = Object.assign({}, f, {
-          startDate: f.preset === 'custom' ? f.startDate : range.start,
-          endDate:   f.preset === 'custom' ? f.endDate   : range.end,
-        });
-        this.applyFilters();
-        Alpine.store('app').toastSuccess('Applied "' + view.name + '"');
-      },
-
-      deleteView: function (view, event) {
-        if (event) { event.stopPropagation(); }
-        if (!confirm('Delete view "' + view.name + '"?')) return;
-        this.savedViews = this.savedViews.filter(function (v) { return v.name !== view.name; });
-        this.persistSavedViews();
       },
 
       // ── Filter actions ───────────────────────────────────
@@ -667,8 +725,6 @@ document.addEventListener('alpine:init', function () {
     return {
       editStageId: 0, editRecruiterId: '', editSourceId: '', editRegionId: '',
       editMotion: 'Inbound', editKanban: 'Normal', editPostHire: '', editNotes: '',
-      editLinkedin: '', editResume: '',
-      showUrlEditor: false,   // collapsed "Add resume/LinkedIn URL" widget
 
       init: function () {
         var self = this;
@@ -683,8 +739,6 @@ document.addEventListener('alpine:init', function () {
           self.editKanban     = c.kanban_state || 'Normal';
           self.editPostHire   = c.post_hire_status || '';
           self.editNotes      = c.notes || '';
-          self.editLinkedin   = c.linkedin_url || '';
-          self.editResume     = c.resume_url || '';
         }
 
         // Always set up the watcher first — when openPeek() is in flight,
@@ -753,24 +807,14 @@ document.addEventListener('alpine:init', function () {
         await this.saveField('notes', this.editNotes);
       },
 
+      // Opens the reject modal — actual reject logic lives in the rejectModal
+      // component so the UI is a proper form (dropdown + optional note)
+      // instead of a native browser prompt().
       confirmReject: function () {
-        var reasonId = prompt(
-          'Reject ' + this.peekName() + '?\n\n' +
-          'Enter refuse reason ID from Settings:\n\n' +
-          this.$store.app.settings.refuseReasons
-            .filter(function (r) { return r.is_enabled; })
-            .map(function (r) { return r.id + '. ' + r.name; }).join('\n')
-        );
-        if (!reasonId) return;
-        var self = this;
-        var rid = parseInt(reasonId, 10);
-        if (isNaN(rid)) { self.$store.app.toastError('Invalid reason ID.'); return; }
-        gasCall('rejectCandidate', self.$store.app.peek.candidateId, rid).then(function () {
-          self.$store.app.toastSuccess('Candidate rejected.');
-          var root = Alpine.$data(document.querySelector('#app'));
-          if (root) root.reloadAll();
-          self.$store.app.closePeek();
-        }).catch(function (e) { self.$store.app.toastError('Reject failed: ' + e.message); });
+        this.$store.app.openModal('confirmReject', {
+          candidateId: this.$store.app.peek.candidateId,
+          candidateName: this.peekName(),
+        });
       },
 
       confirmDelete: async function () {

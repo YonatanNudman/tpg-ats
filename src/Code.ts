@@ -483,14 +483,12 @@ function getDashboardData(filters: DashboardFilters): DashboardResult {
 // ============================================================
 
 /**
- * Returns a lightweight fingerprint the frontend polls every ~15s.
- * If the fingerprint changes between polls, the client refetches the
- * current view's data. Much cheaper than refetching everything every tick.
- * Fingerprint = max(candidate.id), max(candidate.date_last_stage_update),
- * max(job.id), count(candidates), count(jobs).
+ * Computes the raw fingerprint signature. Settings reads (5 of the 7 sheet
+ * reads here) are now CacheService-backed in SheetDB, so on a warm cache
+ * they cost ~5ms instead of ~5×200ms. Candidates + jobs still require full
+ * reads to detect status/stage/title edits.
  */
-function getSyncFingerprint(): { sig: string; userEmail: string } {
-  const db = getDB();
+function _computeSyncFingerprint(db: SheetDB): string {
   const candidates = db.getAllCandidates();
   const jobs = db.getAllJobs();
 
@@ -539,19 +537,54 @@ function getSyncFingerprint(): { sig: string; userEmail: string } {
     hashList(db.getAllRefuseReasons(), (r: any) => r.is_enabled ? 1 : 0),
   ].join(",");
 
-  return {
-    sig: [
-      candidates.length,
-      activeCount,
-      maxCandidateId,
-      latestStageUpdate,
-      jobs.length,
-      maxJobId,
-      jobHash,
-      settingsSig,
-    ].join("|"),
-    userEmail: getSessionEmail(),
-  };
+  return [
+    candidates.length,
+    activeCount,
+    maxCandidateId,
+    latestStageUpdate,
+    jobs.length,
+    maxJobId,
+    jobHash,
+    settingsSig,
+  ].join("|");
+}
+
+const SYNC_FP_CACHE_KEY     = "tpg.ats.sync.fp.v1";
+const SYNC_FP_CACHE_TTL_SEC = 5;
+
+/**
+ * Returns a lightweight fingerprint the frontend polls every ~15s.
+ * If the fingerprint changes between polls, the client refetches the
+ * current view's data. Much cheaper than refetching everything every tick.
+ *
+ * ── Dogpile cache (5s TTL) ─────────────────────────────────────
+ * With 5 recruiters each polling on a 15s tick, the script services ~20
+ * fingerprint requests/minute. Without coalescing, each one independently
+ * reads 7 sheets. The CacheService entry below is shared across all users —
+ * the first poll in any 5s window pays the read cost; the rest get a near-
+ * instant string lookup. Worst-case staleness for cross-user change
+ * detection is 5s on top of the 15s client poll, vs ~30s already inherent
+ * in the polling model. userEmail is NOT cached (it's per-call from Session).
+ */
+function getSyncFingerprint(): { sig: string; userEmail: string } {
+  const userEmail = getSessionEmail();
+
+  if (typeof CacheService !== "undefined") {
+    try {
+      const cached = CacheService.getScriptCache().get(SYNC_FP_CACHE_KEY);
+      if (cached) return { sig: cached, userEmail };
+    } catch { /* fall through to compute */ }
+  }
+
+  const sig = _computeSyncFingerprint(getDB());
+
+  if (typeof CacheService !== "undefined") {
+    try {
+      CacheService.getScriptCache().put(SYNC_FP_CACHE_KEY, sig, SYNC_FP_CACHE_TTL_SEC);
+    } catch { /* over-quota — non-fatal */ }
+  }
+
+  return { sig, userEmail };
 }
 
 function getRecentHires(days = 90): CandidateRow[] {

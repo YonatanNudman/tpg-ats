@@ -208,14 +208,6 @@ export interface KpiData {
   offerAcceptanceRate: number;
   expiredPostings: number;
   expiringPostings: number;
-  /** Same KPIs from the previous equivalent period, for trend arrows.
-   *  E.g. if filters are "last 30d", this is "31–60d ago".
-   *  Absent if the period is too long to have a comparable previous window. */
-  prev?: {
-    activeCandidates: number;
-    hiresThisPeriod: number;
-    avgDaysToHire: number;
-  };
 }
 
 export interface PipelineSnapshotItem {

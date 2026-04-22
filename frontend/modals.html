@@ -42,7 +42,10 @@
 
               <div class="col-6">
                 <label class="form-label">Phone</label>
-                <input type="tel" class="form-control" x-model="form.phone">
+                <input type="tel" class="form-control"
+                  :value="form.phone"
+                  @input="form.phone = formatPhone($event.target.value)"
+                  placeholder="(415) 555-1234">
               </div>
 
               <!-- Duplicate warning banner ─ shown when an existing candidate
@@ -139,6 +142,50 @@
             <button class="btn btn-outline-secondary" @click="$store.app.closeModal()">Cancel</button>
             <button class="btn btn-primary" :disabled="submitting" @click="submit()"
               x-text="submitting ? 'Adding…' : 'Add Candidate'"></button>
+          </div>
+        </div>
+      </div>
+    </template>
+
+    <!-- ── Reject Candidate ─────────────────────────────── -->
+    <template x-if="$store.app.modal.open && $store.app.modal.type === 'confirmReject'">
+      <div class="modal-overlay" @click.self="$store.app.closeModal()">
+        <div class="modal-dialog" x-data="rejectModal()" x-init="init()">
+          <div class="modal-header">
+            <span class="modal-title">Reject Candidate</span>
+            <button class="icon-btn-sm" @click="$store.app.closeModal()">\u2715</button>
+          </div>
+
+          <div class="modal-body">
+            <p class="modal-lead">
+              Reject <strong x-text="$store.app.modal.data?.candidateName || 'candidate'"></strong>?
+            </p>
+
+            <div class="mb-3">
+              <label class="form-label">Reason *</label>
+              <select class="form-select" x-model="refuseReasonId"
+                :class="{ 'is-invalid': error }">
+                <option value="">— Select a reason —</option>
+                <template x-for="r in $store.app.settings.refuseReasons.filter(x => x.is_enabled)"
+                          :key="r.id">
+                  <option :value="r.id" x-text="r.name"></option>
+                </template>
+              </select>
+              <div class="invalid-feedback" x-show="error" x-text="error"></div>
+            </div>
+
+            <div class="mb-0">
+              <label class="form-label">Note (optional)</label>
+              <textarea class="form-control" rows="2" x-model="note"
+                placeholder="Added to the candidate's notes for context."></textarea>
+            </div>
+          </div>
+
+          <div class="modal-footer">
+            <button class="btn btn-outline-secondary" @click="$store.app.closeModal()">Cancel</button>
+            <button class="btn btn-danger" :disabled="submitting" @click="submit()">
+              <span x-text="submitting ? 'Rejecting\u2026' : 'Reject'"></span>
+            </button>
           </div>
         </div>
       </div>
@@ -245,6 +292,52 @@
 
 <script>
 document.addEventListener('alpine:init', function () {
+
+  Alpine.data('rejectModal', function () {
+    return {
+      refuseReasonId: '',
+      note: '',
+      error: '',
+      submitting: false,
+
+      init: function () {
+        this.refuseReasonId = '';
+        this.note = '';
+        this.error = '';
+      },
+
+      submit: async function () {
+        if (!this.refuseReasonId) {
+          this.error = 'Pick a reason to reject this candidate.';
+          return;
+        }
+        this.error = '';
+        this.submitting = true;
+        var candidateId = this.$store.app.modal.data?.candidateId;
+        var reasonId = parseInt(this.refuseReasonId, 10);
+        try {
+          await gasCall('rejectCandidate', candidateId, reasonId);
+          // If a note was provided, append it to the candidate's notes.
+          if (this.note && this.note.trim()) {
+            try {
+              var detail = await gasCall('getCandidateDetail', candidateId);
+              var existing = (detail.candidate.notes || '').trim();
+              var stamp = '[Rejected ' + new Date().toISOString().split('T')[0] + '] ' + this.note.trim();
+              var combined = existing ? existing + '\n\n' + stamp : stamp;
+              await gasCall('updateCandidate', candidateId, { notes: combined });
+            } catch (e) { /* non-fatal — reject already succeeded */ }
+          }
+          this.$store.app.toastSuccess('Candidate rejected.');
+          this.$store.app.closeModal();
+          this.$store.app.closePeek();
+          var root = Alpine.$data(document.querySelector('#app'));
+          if (root) await root.reloadAll();
+        } catch (e) {
+          this.$store.app.toastError('Reject failed: ' + e.message);
+        } finally { this.submitting = false; }
+      },
+    };
+  });
 
   Alpine.data('addCandidateModal', function () {
     return {

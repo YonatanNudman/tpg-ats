@@ -91,6 +91,22 @@ function now(): string {
 export class SheetDB implements ISheetDB {
   private _ss: GoogleAppsScript.Spreadsheet.Spreadsheet;
 
+  // Per-execution row cache. Keyed by sheet name, holds the raw 2D array
+  // returned by getRange().getValues(). Each GAS request gets a fresh
+  // SheetDB instance (see Code.ts:getDB), so this never leaks across users
+  // or executions. Eliminates the N-reads-per-request explosion in
+  // getDashboardData (~8 sheet reads → 1 per sheet) and getSyncFingerprint
+  // (~7 reads → 2). Invalidated automatically on any write to the same sheet.
+  private _rowCache: Map<string, unknown[][]> = new Map();
+
+  // Cross-execution cache for settings tables (stages, sources, regions,
+  // recruiters, refuse_reasons). They change rarely but are read on every
+  // single request, so a 60s TTL on CacheService eliminates almost all
+  // settings I/O. Invalidated immediately on any replace*() write so a
+  // settings change is visible to other users on the next poll.
+  private static readonly SETTINGS_CACHE_TTL_SEC = 60;
+  private static readonly SETTINGS_CACHE_PREFIX  = "tpg.ats.settings.v1.";
+
   constructor(spreadsheetId?: string) {
     this._ss = spreadsheetId
       ? SpreadsheetApp.openById(spreadsheetId)
@@ -103,18 +119,96 @@ export class SheetDB implements ISheetDB {
     return sheet;
   }
 
-  private _getRows(sheetName: string): unknown[][] {
-    const sheet = this._sheet(sheetName);
-    const lastRow = sheet.getLastRow();
-    if (lastRow < 2) return [];
-    return sheet.getRange(2, 1, lastRow - 1, sheet.getLastColumn()).getValues();
+  // ---------- Cache plumbing ----------
+
+  /** Drop the per-execution cache for a sheet. Call after any write. */
+  private _invalidate(sheetName: string): void {
+    this._rowCache.delete(sheetName);
   }
 
+  /** CacheService key for a settings table. Versioned so a schema change can bump and orphan stale entries. */
+  private _settingsCacheKey(sheetName: string): string {
+    return SheetDB.SETTINGS_CACHE_PREFIX + sheetName;
+  }
+
+  /** Read a settings table from CacheService. Returns null on miss, parse error, or non-GAS env (jest). */
+  private _settingsCacheGet<T>(sheetName: string): T[] | null {
+    // CacheService is GAS-only; tests run in node and would crash on access.
+    if (typeof CacheService === "undefined") return null;
+    try {
+      const raw = CacheService.getScriptCache().get(this._settingsCacheKey(sheetName));
+      return raw ? (JSON.parse(raw) as T[]) : null;
+    } catch {
+      return null;
+    }
+  }
+
+  /** Write a settings table to CacheService. Silent no-op if quota exceeded or non-GAS env. */
+  private _settingsCacheSet<T>(sheetName: string, rows: T[]): void {
+    if (typeof CacheService === "undefined") return;
+    try {
+      CacheService.getScriptCache().put(
+        this._settingsCacheKey(sheetName),
+        JSON.stringify(rows),
+        SheetDB.SETTINGS_CACHE_TTL_SEC
+      );
+    } catch {
+      // Cache full or value too big — non-fatal, next read will hit the sheet.
+    }
+  }
+
+  /** Drop both caches (script-wide CacheService + per-execution rows) for a settings table. */
+  private _settingsCacheInvalidate(sheetName: string): void {
+    this._invalidate(sheetName);
+    if (typeof CacheService === "undefined") return;
+    try {
+      CacheService.getScriptCache().remove(this._settingsCacheKey(sheetName));
+    } catch {
+      /* swallow */
+    }
+  }
+
+  // ---------- Sheet reads (cached) ----------
+
+  private _getRows(sheetName: string): unknown[][] {
+    const cached = this._rowCache.get(sheetName);
+    if (cached !== undefined) return cached;
+    const sheet = this._sheet(sheetName);
+    const lastRow = sheet.getLastRow();
+    if (lastRow < 2) {
+      this._rowCache.set(sheetName, []);
+      return [];
+    }
+    const rows = sheet.getRange(2, 1, lastRow - 1, sheet.getLastColumn()).getValues();
+    this._rowCache.set(sheetName, rows);
+    return rows;
+  }
+
+  /**
+   * Compute next id without paying for a full sheet read when possible.
+   * Path 1: cache hit — scan cached rows, no I/O.
+   * Path 2: cache miss — read only column A (id), 1 narrow range vs. 23-column scan.
+   */
   private _nextId(sheetName: string): number {
-    const rows = this._getRows(sheetName);
-    if (rows.length === 0) return 1;
-    const ids = rows.map(r => parseNum(r[0])).filter(n => n > 0);
-    return ids.length > 0 ? Math.max(...ids) + 1 : 1;
+    const cached = this._rowCache.get(sheetName);
+    if (cached !== undefined) {
+      let max = 0;
+      for (const r of cached) {
+        const id = parseNum(r[0]);
+        if (id > max) max = id;
+      }
+      return max + 1;
+    }
+    const sheet = this._sheet(sheetName);
+    const lastRow = sheet.getLastRow();
+    if (lastRow < 2) return 1;
+    const idCol = sheet.getRange(2, 1, lastRow - 1, 1).getValues();
+    let max = 0;
+    for (const r of idCol) {
+      const id = parseNum(r[0]);
+      if (id > max) max = id;
+    }
+    return max + 1;
   }
 
   private _findRowIndex(sheetName: string, id: number): number {
@@ -140,24 +234,32 @@ export class SheetDB implements ISheetDB {
     const id = this._nextId(SHEET_NAMES.candidates);
     const values = this._candidateToRow({ ...row, id });
     sheet.appendRow(values);
+    this._invalidate(SHEET_NAMES.candidates);
     return { ...row, id };
   }
 
+  /**
+   * Single-read update: previously did one read in _findRowIndex AND another
+   * getRange().getValues() to fetch the existing row, then a setValues write.
+   * Now reuses the row data from the cached _getRows scan — saves one
+   * sheet roundtrip per update (~100-300ms on writes that hit a populated sheet).
+   */
   updateCandidate(id: number, updates: Partial<CandidateRow>): void {
-    const rowIndex = this._findRowIndex(SHEET_NAMES.candidates, id);
-    if (rowIndex < 0) throw new Error(`Candidate ${id} not found`);
-    const sheet = this._sheet(SHEET_NAMES.candidates);
-    const existing = this._rowToCandidate(
-      sheet.getRange(rowIndex, 1, 1, sheet.getLastColumn()).getValues()[0]
-    );
+    const rows = this._getRows(SHEET_NAMES.candidates);
+    const idx = rows.findIndex(r => parseNum(r[0]) === id);
+    if (idx < 0) throw new Error(`Candidate ${id} not found`);
+    const existing = this._rowToCandidate(rows[idx]);
     const merged = { ...existing, ...updates, id };
-    sheet.getRange(rowIndex, 1, 1, 23).setValues([this._candidateToRow(merged)]);
+    const sheet = this._sheet(SHEET_NAMES.candidates);
+    sheet.getRange(idx + 2, 1, 1, 23).setValues([this._candidateToRow(merged)]);
+    this._invalidate(SHEET_NAMES.candidates);
   }
 
   deleteCandidate(id: number): void {
     const rowIndex = this._findRowIndex(SHEET_NAMES.candidates, id);
     if (rowIndex < 0) throw new Error(`Candidate ${id} not found`);
     this._sheet(SHEET_NAMES.candidates).deleteRow(rowIndex);
+    this._invalidate(SHEET_NAMES.candidates);
   }
 
   // -------- Jobs --------
@@ -177,24 +279,26 @@ export class SheetDB implements ISheetDB {
     const id = this._nextId(SHEET_NAMES.jobs);
     const values = this._jobToRow({ ...row, id });
     sheet.appendRow(values);
+    this._invalidate(SHEET_NAMES.jobs);
     return { ...row, id };
   }
 
   updateJob(id: number, updates: Partial<JobRow>): void {
-    const rowIndex = this._findRowIndex(SHEET_NAMES.jobs, id);
-    if (rowIndex < 0) throw new Error(`Job ${id} not found`);
-    const sheet = this._sheet(SHEET_NAMES.jobs);
-    const existing = this._rowToJob(
-      sheet.getRange(rowIndex, 1, 1, sheet.getLastColumn()).getValues()[0]
-    );
+    const rows = this._getRows(SHEET_NAMES.jobs);
+    const idx = rows.findIndex(r => parseNum(r[0]) === id);
+    if (idx < 0) throw new Error(`Job ${id} not found`);
+    const existing = this._rowToJob(rows[idx]);
     const merged = { ...existing, ...updates, id };
-    sheet.getRange(rowIndex, 1, 1, 14).setValues([this._jobToRow(merged)]);
+    const sheet = this._sheet(SHEET_NAMES.jobs);
+    sheet.getRange(idx + 2, 1, 1, 14).setValues([this._jobToRow(merged)]);
+    this._invalidate(SHEET_NAMES.jobs);
   }
 
   deleteJob(id: number): void {
     const rowIndex = this._findRowIndex(SHEET_NAMES.jobs, id);
     if (rowIndex < 0) throw new Error(`Job ${id} not found`);
     this._sheet(SHEET_NAMES.jobs).deleteRow(rowIndex);
+    this._invalidate(SHEET_NAMES.jobs);
   }
 
   // -------- History --------
@@ -207,6 +311,7 @@ export class SheetDB implements ISheetDB {
       row.job_title, row.stage_from_id ?? "", row.stage_from_name, row.stage_to_id,
       row.stage_to_name, row.changed_by, row.days_in_previous_stage,
     ]);
+    this._invalidate(SHEET_NAMES.history);
   }
 
   private _rowToHistory(r: unknown[]): HistoryRow {
@@ -240,8 +345,18 @@ export class SheetDB implements ISheetDB {
 
   // -------- Settings --------
 
+  // ---------- Settings reads (CacheService-backed) ----------
+  // Each getAll* below tries CacheService first (60s TTL, shared across all
+  // users of this script). On miss, reads the sheet and populates the cache.
+  // Settings change rarely but are read on every dashboard load and every
+  // 15s sync poll, so this turns ~5 sheet reads per request into ~5 cache
+  // lookups (~1ms each vs ~100-300ms each). All replace*() writes call
+  // _settingsCacheInvalidate so changes propagate immediately.
+
   getAllStages(): StageRow[] {
-    return this._getRows(SHEET_NAMES.stages).map(r => ({
+    const cached = this._settingsCacheGet<StageRow>(SHEET_NAMES.stages);
+    if (cached) return cached;
+    const rows = this._getRows(SHEET_NAMES.stages).map(r => ({
       id: parseNum(r[STAGE_COLS.id]),
       name: parseStr(r[STAGE_COLS.name]),
       sequence: parseNum(r[STAGE_COLS.sequence]),
@@ -252,41 +367,59 @@ export class SheetDB implements ISheetDB {
       target_hours: parseNumOrNull(r[STAGE_COLS.target_hours]),
       is_enabled: parseBool(r[STAGE_COLS.is_enabled]),
     }));
+    this._settingsCacheSet(SHEET_NAMES.stages, rows);
+    return rows;
   }
 
   getAllSources(): SourceRow[] {
-    return this._getRows(SHEET_NAMES.sources).map(r => ({
+    const cached = this._settingsCacheGet<SourceRow>(SHEET_NAMES.sources);
+    if (cached) return cached;
+    const rows = this._getRows(SHEET_NAMES.sources).map(r => ({
       id: parseNum(r[SOURCE_COLS.id]),
       name: parseStr(r[SOURCE_COLS.name]),
       medium: parseStr(r[SOURCE_COLS.medium]),
       default_motion: (parseStr(r[SOURCE_COLS.default_motion]) || "Inbound") as "Inbound" | "Outbound",
       is_enabled: parseBool(r[SOURCE_COLS.is_enabled]),
     }));
+    this._settingsCacheSet(SHEET_NAMES.sources, rows);
+    return rows;
   }
 
   getAllRegions(): RegionRow[] {
-    return this._getRows(SHEET_NAMES.regions).map(r => ({
+    const cached = this._settingsCacheGet<RegionRow>(SHEET_NAMES.regions);
+    if (cached) return cached;
+    const rows = this._getRows(SHEET_NAMES.regions).map(r => ({
       id: parseNum(r[REGION_COLS.id]),
       name: parseStr(r[REGION_COLS.name]),
       is_enabled: parseBool(r[REGION_COLS.is_enabled]),
     }));
+    this._settingsCacheSet(SHEET_NAMES.regions, rows);
+    return rows;
   }
 
   getAllRecruiters(): RecruiterRow[] {
-    return this._getRows(SHEET_NAMES.recruiters).map(r => ({
+    const cached = this._settingsCacheGet<RecruiterRow>(SHEET_NAMES.recruiters);
+    if (cached) return cached;
+    const rows = this._getRows(SHEET_NAMES.recruiters).map(r => ({
       id: parseNum(r[RECRUITER_COLS.id]),
       name: parseStr(r[RECRUITER_COLS.name]),
       email: parseStr(r[RECRUITER_COLS.email]),
       is_active: parseBool(r[RECRUITER_COLS.is_active]),
     }));
+    this._settingsCacheSet(SHEET_NAMES.recruiters, rows);
+    return rows;
   }
 
   getAllRefuseReasons(): RefuseReasonRow[] {
-    return this._getRows(SHEET_NAMES.refuseReasons).map(r => ({
+    const cached = this._settingsCacheGet<RefuseReasonRow>(SHEET_NAMES.refuseReasons);
+    if (cached) return cached;
+    const rows = this._getRows(SHEET_NAMES.refuseReasons).map(r => ({
       id: parseNum(r[REFUSE_COLS.id]),
       name: parseStr(r[REFUSE_COLS.name]),
       is_enabled: parseBool(r[REFUSE_COLS.is_enabled]),
     }));
+    this._settingsCacheSet(SHEET_NAMES.refuseReasons, rows);
+    return rows;
   }
 
   private _replaceSheet(sheetName: string, header: string[], rows: unknown[][]): void {
@@ -304,24 +437,29 @@ export class SheetDB implements ISheetDB {
     this._replaceSheet(SHEET_NAMES.stages, [], rows.map(r => [
       r.id, r.name, r.sequence, r.color, r.is_hired, r.is_rejected, r.is_offer, r.target_hours ?? "", r.is_enabled,
     ]));
+    this._settingsCacheInvalidate(SHEET_NAMES.stages);
   }
 
   replaceSources(rows: SourceRow[]): void {
     this._replaceSheet(SHEET_NAMES.sources, [], rows.map(r => [
       r.id, r.name, r.medium, r.default_motion, r.is_enabled,
     ]));
+    this._settingsCacheInvalidate(SHEET_NAMES.sources);
   }
 
   replaceRegions(rows: RegionRow[]): void {
     this._replaceSheet(SHEET_NAMES.regions, [], rows.map(r => [r.id, r.name, r.is_enabled]));
+    this._settingsCacheInvalidate(SHEET_NAMES.regions);
   }
 
   replaceRecruiters(rows: RecruiterRow[]): void {
     this._replaceSheet(SHEET_NAMES.recruiters, [], rows.map(r => [r.id, r.name, r.email, r.is_active]));
+    this._settingsCacheInvalidate(SHEET_NAMES.recruiters);
   }
 
   replaceRefuseReasons(rows: RefuseReasonRow[]): void {
     this._replaceSheet(SHEET_NAMES.refuseReasons, [], rows.map(r => [r.id, r.name, r.is_enabled]));
+    this._settingsCacheInvalidate(SHEET_NAMES.refuseReasons);
   }
 
   seedDefaultData(): void {
