@@ -147,7 +147,27 @@
             <option value="6m">Last 6 Months</option>
             <option value="1y">Last Year</option>
             <option value="all">All Time</option>
+            <option value="custom">Custom range\u2026</option>
           </select>
+          <!--
+            Custom date inputs slot in directly under the preset dropdown
+            when the user picks "Custom range…". They share the filter-group
+            so the visual relationship is obvious; the .custom-date-row
+            CSS arranges them side-by-side and full-width in the parent.
+          -->
+          <template x-if="filters.preset === 'custom'">
+            <div class="custom-date-row">
+              <input type="date" class="custom-date-input"
+                x-model="filters.startDate"
+                @change="onCustomDateChange()"
+                aria-label="From date">
+              <span class="custom-date-sep">\u2013</span>
+              <input type="date" class="custom-date-input"
+                x-model="filters.endDate"
+                @change="onCustomDateChange()"
+                aria-label="To date">
+            </div>
+          </template>
         </div>
 
         <div class="filter-group">
@@ -291,7 +311,21 @@
             <option value="6m">Last 6 Months</option>
             <option value="1y">Last Year</option>
             <option value="all">All Time</option>
+            <option value="custom">Custom range\u2026</option>
           </select>
+          <template x-if="funnelFilters.preset === 'custom'">
+            <span class="section-custom-date-row">
+              <input type="date" class="section-custom-date-input"
+                x-model="funnelFilters.startDate"
+                @change="onSectionCustomDateChange('funnel')"
+                aria-label="From date">
+              <span class="section-custom-date-sep">\u2013</span>
+              <input type="date" class="section-custom-date-input"
+                x-model="funnelFilters.endDate"
+                @change="onSectionCustomDateChange('funnel')"
+                aria-label="To date">
+            </span>
+          </template>
           <button class="icon-btn-sm section-filter-reset"
                   @click="resetSectionFilters('funnel')"
                   title="Reset section filters to global defaults">×</button>
@@ -536,7 +570,21 @@
             <option value="6m">Hires: Last 6 Months</option>
             <option value="1y">Hires: Last Year</option>
             <option value="all">Hires: All Time</option>
+            <option value="custom">Hires: Custom range\u2026</option>
           </select>
+          <template x-if="recruiterFilters.hiresPreset === 'custom'">
+            <span class="section-custom-date-row">
+              <input type="date" class="section-custom-date-input"
+                x-model="recruiterFilters.hiresStartDate"
+                @change="onSectionCustomDateChange('recruiterHires')"
+                aria-label="Hires from date">
+              <span class="section-custom-date-sep">\u2013</span>
+              <input type="date" class="section-custom-date-input"
+                x-model="recruiterFilters.hiresEndDate"
+                @change="onSectionCustomDateChange('recruiterHires')"
+                aria-label="Hires to date">
+            </span>
+          </template>
           <button class="icon-btn-sm section-filter-reset"
                   @click="resetSectionFilters('recruiter')"
                   title="Reset section filters to global defaults">×</button>
@@ -629,7 +677,21 @@
             <option value="6m">Last 6 Months</option>
             <option value="1y">Last Year</option>
             <option value="all">All Time</option>
+            <option value="custom">Custom range\u2026</option>
           </select>
+          <template x-if="sourceFilters.preset === 'custom'">
+            <span class="section-custom-date-row">
+              <input type="date" class="section-custom-date-input"
+                x-model="sourceFilters.startDate"
+                @change="onSectionCustomDateChange('source')"
+                aria-label="From date">
+              <span class="section-custom-date-sep">\u2013</span>
+              <input type="date" class="section-custom-date-input"
+                x-model="sourceFilters.endDate"
+                @change="onSectionCustomDateChange('source')"
+                aria-label="To date">
+            </span>
+          </template>
           <button class="icon-btn-sm section-filter-reset"
                   @click="resetSectionFilters('source')"
                   title="Reset section filters to global defaults">×</button>

@@ -934,6 +934,70 @@ html, body {
 }
 .section-filter-reset:hover { color: var(--danger); background: rgba(225,75,75,0.08); }
 
+/* ── Custom date inputs (period preset = "Custom range…") ────
+   Two input[type=date]s connected by an en-dash separator.
+
+   The `.custom-date-row` variant goes inside the global filter bar's
+   .filter-group (which is column-oriented), so it sits as a sub-row
+   directly beneath the Period dropdown. The `.section-custom-date-row`
+   variant is inline in the section header's filter row, so it shares
+   the row with the preset select and the reset × button. */
+.custom-date-row {
+  display: flex;
+  gap: 6px;
+  align-items: center;
+  margin-top: 4px;
+}
+.custom-date-input {
+  flex: 1 1 0;
+  min-width: 0;
+  font-size: 12.5px;
+  padding: 5px 7px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: white;
+  color: var(--text);
+}
+.custom-date-input:focus {
+  outline: none;
+  border-color: var(--primary);
+  box-shadow: 0 0 0 3px rgba(var(--primary-rgb), 0.18);
+}
+.custom-date-sep {
+  color: var(--text-muted);
+  font-size: 12px;
+  user-select: none;
+}
+
+.section-custom-date-row {
+  display: inline-flex;
+  gap: 4px;
+  align-items: center;
+}
+.section-custom-date-input {
+  font-size: 12px;
+  padding: 3px 6px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: white;
+  color: var(--text);
+  /* Date inputs in Chromium reserve space for a calendar widget that
+     adds ~24px even with no value. Keep the field compact enough to
+     fit alongside the preset select on the same row at our default
+     section header width. */
+  width: 130px;
+}
+.section-custom-date-input:focus {
+  outline: none;
+  border-color: var(--primary);
+  box-shadow: 0 0 0 3px rgba(var(--primary-rgb), 0.18);
+}
+.section-custom-date-sep {
+  color: var(--text-muted);
+  font-size: 12px;
+  user-select: none;
+}
+
 /* ── Pipeline Funnel section ─────────────────────────────────── */
 .funnel-card .card-header {
   flex-wrap: wrap;

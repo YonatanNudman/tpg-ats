@@ -368,6 +368,14 @@ function presetRange(preset) {
   return { start: start, end: end };
 }
 
+// Sentinel preset value that means "the user wants to type their own
+// dates" — picked up by every preset dropdown in the app. We DO NOT
+// overwrite startDate/endDate when this is selected; the custom date
+// inputs become the source of truth instead. Centralized so the
+// dropdown options and the conditional reveal both reference the
+// same string.
+var CUSTOM_PRESET = 'custom';
+
 // ── Alpine setup ────────────────────────────────────────────
 document.addEventListener('alpine:init', function () {
 
@@ -799,24 +807,80 @@ document.addEventListener('alpine:init', function () {
       },
 
       // Per-section "Period" preset → date range translation.
+      // For preset === 'custom' we leave startDate/endDate alone (the
+      // inline date inputs in the UI become the source of truth) but
+      // pre-populate them from the most-recent meaningful range so the
+      // user starts with sensible numbers to tweak instead of empty
+      // fields that would resolve to "All time" until they pick.
       onSectionPresetChange: function (section) {
         var preset, range;
         if (section === 'funnel') {
           preset = this.funnelFilters.preset;
-          range  = preset ? presetRange(preset) : { start: '', end: '' };
-          this.funnelFilters.startDate = range.start;
-          this.funnelFilters.endDate   = range.end;
+          if (preset === 'custom') {
+            if (!this.funnelFilters.startDate || !this.funnelFilters.endDate) {
+              range = presetRange('30d');
+              this.funnelFilters.startDate = this.funnelFilters.startDate || range.start;
+              this.funnelFilters.endDate   = this.funnelFilters.endDate   || range.end;
+            }
+          } else {
+            range = preset ? presetRange(preset) : { start: '', end: '' };
+            this.funnelFilters.startDate = range.start;
+            this.funnelFilters.endDate   = range.end;
+          }
         } else if (section === 'recruiterHires') {
           preset = this.recruiterFilters.hiresPreset;
-          range  = preset ? presetRange(preset) : { start: '', end: '' };
-          this.recruiterFilters.hiresStartDate = range.start;
-          this.recruiterFilters.hiresEndDate   = range.end;
+          if (preset === 'custom') {
+            if (!this.recruiterFilters.hiresStartDate || !this.recruiterFilters.hiresEndDate) {
+              range = presetRange('30d');
+              this.recruiterFilters.hiresStartDate = this.recruiterFilters.hiresStartDate || range.start;
+              this.recruiterFilters.hiresEndDate   = this.recruiterFilters.hiresEndDate   || range.end;
+            }
+          } else {
+            range = preset ? presetRange(preset) : { start: '', end: '' };
+            this.recruiterFilters.hiresStartDate = range.start;
+            this.recruiterFilters.hiresEndDate   = range.end;
+          }
         } else if (section === 'source') {
           preset = this.sourceFilters.preset;
-          range  = preset ? presetRange(preset) : { start: '', end: '' };
-          this.sourceFilters.startDate = range.start;
-          this.sourceFilters.endDate   = range.end;
+          if (preset === 'custom') {
+            if (!this.sourceFilters.startDate || !this.sourceFilters.endDate) {
+              range = presetRange('30d');
+              this.sourceFilters.startDate = this.sourceFilters.startDate || range.start;
+              this.sourceFilters.endDate   = this.sourceFilters.endDate   || range.end;
+            }
+          } else {
+            range = preset ? presetRange(preset) : { start: '', end: '' };
+            this.sourceFilters.startDate = range.start;
+            this.sourceFilters.endDate   = range.end;
+          }
         }
+      },
+
+      // Custom date input change handlers. Triggered by either the
+      // "from" or "to" date input directly so the filter applies as
+      // soon as the user picks a date — no "Apply" button to hunt for.
+      // Defensive: if both dates are present and start > end, swap
+      // them so we don't silently produce an empty result set the
+      // user can't explain.
+      onSectionCustomDateChange: function (section) {
+        var f, sKey, eKey;
+        if (section === 'funnel') {
+          f = this.funnelFilters; sKey = 'startDate'; eKey = 'endDate';
+        } else if (section === 'recruiterHires') {
+          f = this.recruiterFilters; sKey = 'hiresStartDate'; eKey = 'hiresEndDate';
+        } else if (section === 'source') {
+          f = this.sourceFilters; sKey = 'startDate'; eKey = 'endDate';
+        } else {
+          return;
+        }
+        if (f[sKey] && f[eKey] && f[sKey] > f[eKey]) {
+          var tmp = f[sKey]; f[sKey] = f[eKey]; f[eKey] = tmp;
+        }
+        this._persistSectionState();
+        if (section === 'recruiterHires') this.reloadRecruiterPerf();
+        else if (section === 'source')    this.reloadSourceEffectiveness();
+        // Funnel is client-side derived from allCandidates so no refetch
+        // needed — the reactive getter picks up the new dates automatically.
       },
 
       resetSectionFilters: function (section) {
@@ -1061,9 +1125,33 @@ document.addEventListener('alpine:init', function () {
 
       // ── Filter actions ───────────────────────────────────
       onPresetChange: function () {
+        if (this.filters.preset === 'custom') {
+          // Pre-seed the custom inputs with the previous range (or
+          // last 30 days if there isn't one) so the user has something
+          // to tweak rather than empty fields.
+          if (!this.filters.startDate || !this.filters.endDate) {
+            var seed = presetRange('30d');
+            this.filters.startDate = this.filters.startDate || seed.start;
+            this.filters.endDate   = this.filters.endDate   || seed.end;
+          }
+          this.applyFilters();
+          return;
+        }
         var r = presetRange(this.filters.preset);
         this.filters.startDate = r.start;
         this.filters.endDate = r.end;
+        this.applyFilters();
+      },
+
+      // Triggered when either of the global custom date inputs change.
+      // Same swap-if-inverted defense as the section variant.
+      onCustomDateChange: function () {
+        if (this.filters.startDate && this.filters.endDate &&
+            this.filters.startDate > this.filters.endDate) {
+          var tmp = this.filters.startDate;
+          this.filters.startDate = this.filters.endDate;
+          this.filters.endDate = tmp;
+        }
         this.applyFilters();
       },
 
