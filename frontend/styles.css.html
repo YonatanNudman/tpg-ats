@@ -54,12 +54,9 @@ html, body {
 }
 
 .topbar-brand { display: flex; align-items: center; gap: 10px; }
-.brand-mark {
-  width: 32px; height: 32px; border-radius: 8px;
-  background: var(--primary);
-  color: white; font-weight: 800; font-size: 15px;
-  display: flex; align-items: center; justify-content: center;
-}
+/* (.brand-mark removed — the orange "T" square badge was retired
+   per user feedback. Class kept here as a no-op style block in case
+   any external embed references it; safe to delete in the next sweep.) */
 .brand-title { font-weight: 700; font-size: 14px; line-height: 1.1; }
 .brand-sub { font-size: 11px; color: var(--text-muted); }
 .topbar-spacer { flex: 1; }
