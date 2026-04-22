@@ -993,6 +993,13 @@ document.addEventListener('alpine:init', function () {
           status:      g.status   || null,
           startDate:   section.startDate || g.startDate,
           endDate:     section.endDate   || g.endDate,
+          // Search is global-only (no per-section override) since the
+          // funnel/recruiter/source rows don't carry their own search
+          // boxes. Propagated through the merge so _funnelMatch can
+          // honor it — without this, typing in the topbar search
+          // updates "Export (N)" but the visible funnel doesn't filter,
+          // which reads as "search didn't work".
+          search:      g.search   || null,
         };
       },
 
@@ -1147,6 +1154,17 @@ document.addEventListener('alpine:init', function () {
           if (c.recruiter_id != null && c.recruiter_id !== '') return false;
         } else if (f.recruiterId) {
           if (c.recruiter_id != f.recruiterId) return false;
+        }
+        // Topbar search box \u2014 substring match against name + email.
+        // Same semantic as the export-count `filteredCandidates` so
+        // the two surfaces always agree on which candidates a search
+        // selects. Mismatch was the bug: typing in search updated the
+        // export count but the visible funnel stayed unchanged, which
+        // read as "search didn't work".
+        if (f.search) {
+          var q = String(f.search).toLowerCase();
+          var hay = ((c.first_name || '') + ' ' + (c.last_name || '') + ' ' + (c.email || '')).toLowerCase();
+          if (hay.indexOf(q) === -1) return false;
         }
         // Timestamp-based date comparison so a Sheets-returned Date object
         // (stringified by the backend's parseStr fallback) doesn't break
