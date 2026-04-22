@@ -142,6 +142,7 @@
         <div class="filter-group">
           <label>Period</label>
           <select x-model="filters.preset" @change="onPresetChange()">
+            <option value="7d">Last 7 Days</option>
             <option value="30d">Last 30 Days</option>
             <option value="90d">Last 90 Days</option>
             <option value="6m">Last 6 Months</option>
@@ -306,6 +307,7 @@
           <select class="section-filter" x-model="funnelFilters.preset"
                   @change="onSectionPresetChange('funnel')">
             <option value="">Period (global)</option>
+            <option value="7d">Last 7 Days</option>
             <option value="30d">Last 30 Days</option>
             <option value="90d">Last 90 Days</option>
             <option value="6m">Last 6 Months</option>
@@ -604,6 +606,7 @@
                   @change="onSectionPresetChange('recruiterHires'); reloadRecruiterPerf()"
                   title="Date window for the Hires column only">
             <option value="">Hires period (global)</option>
+            <option value="7d">Hires: Last 7 Days</option>
             <option value="30d">Hires: Last 30 Days</option>
             <option value="90d">Hires: Last 90 Days</option>
             <option value="6m">Hires: Last 6 Months</option>
@@ -711,6 +714,7 @@
           <select class="section-filter" x-model="sourceFilters.preset"
                   @change="onSectionPresetChange('source'); reloadSourceEffectiveness()">
             <option value="">Period (global)</option>
+            <option value="7d">Last 7 Days</option>
             <option value="30d">Last 30 Days</option>
             <option value="90d">Last 90 Days</option>
             <option value="6m">Last 6 Months</option>

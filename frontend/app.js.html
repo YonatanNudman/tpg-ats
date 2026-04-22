@@ -383,6 +383,7 @@ function presetRange(preset) {
   var end = now.toISOString().split('T')[0];
   var start;
   switch (preset) {
+    case '7d':   start = new Date(now - 7 * 86400000).toISOString().split('T')[0]; break;
     case '30d':  start = new Date(now - 30 * 86400000).toISOString().split('T')[0]; break;
     case '6m':   start = new Date(now.getFullYear(), now.getMonth() - 6, now.getDate()).toISOString().split('T')[0]; break;
     case '1y':   start = new Date(now.getFullYear() - 1, now.getMonth(), now.getDate()).toISOString().split('T')[0]; break;
