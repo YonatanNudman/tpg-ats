@@ -27,12 +27,29 @@ import type {
 
 // ---------- Filters ----------
 
+/**
+ * Calendar-date comparator. Both filter inputs ("YYYY-MM-DD" strings) and
+ * candidate values (which may arrive as full ISO timestamps when Sheets
+ * auto-coerces a date cell to a JS Date in a non-UTC locale) are reduced
+ * to their `YYYY-MM-DD` prefix before comparison. Avoids the "candidate
+ * applied today at midnight Eastern (= 4am UTC) is excluded from a
+ * Last-90-Days filter whose endDate parses as midnight UTC" bug.
+ *
+ * Trade-off: assumes candidates and recruiters share the spreadsheet's
+ * timezone (US-based for TPG). A candidate whose date_applied falls on
+ * a different calendar date in another timezone would still slot into
+ * the wrong bucket, but that's not a current concern for this team.
+ */
+function dateOnly(s: string | undefined | null): string {
+  return String(s || "").slice(0, 10);
+}
+
 export function filterCandidates(
   candidates: CandidateRow[],
   filters: DashboardFilters
 ): CandidateRow[] {
-  const start = filters.startDate ? new Date(filters.startDate).getTime() : 0;
-  const end = filters.endDate ? new Date(filters.endDate).getTime() : Infinity;
+  const start = dateOnly(filters.startDate);
+  const end = dateOnly(filters.endDate);
 
   return candidates.filter(c => {
     if (filters.jobId && c.job_id !== filters.jobId) return false;
@@ -41,8 +58,9 @@ export function filterCandidates(
     if (filters.regionId && c.region_id !== filters.regionId) return false;
     if (filters.motion && c.motion !== filters.motion) return false;
     if (filters.status && c.status !== filters.status) return false;
-    const applied = c.date_applied ? new Date(c.date_applied).getTime() : 0;
-    if (applied < start || applied > end) return false;
+    const applied = dateOnly(c.date_applied);
+    if (start && applied && applied < start) return false;
+    if (end   && applied && applied > end)   return false;
     return true;
   });
 }

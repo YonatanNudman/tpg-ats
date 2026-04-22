@@ -245,13 +245,24 @@ function getCandidates(filters: CandidateFilters): CandidateRow[] {
     );
   }
 
+  // Calendar-date comparison (slice to YYYY-MM-DD on both sides) so a
+  // candidate whose date_applied was stored at midnight in a non-UTC
+  // locale (Sheets coerces date cells to native Date in the spreadsheet's
+  // timezone) doesn't get filtered out of a same-day endDate window.
+  // See dateOnly() in Analytics.ts for the full rationale.
   if (filters.startDate) {
-    const start = new Date(filters.startDate).getTime();
-    all = all.filter(c => c.date_applied && new Date(c.date_applied).getTime() >= start);
+    const start = String(filters.startDate).slice(0, 10);
+    all = all.filter(c => {
+      const d = String(c.date_applied || "").slice(0, 10);
+      return !d || d >= start;
+    });
   }
   if (filters.endDate) {
-    const end = new Date(filters.endDate).getTime();
-    all = all.filter(c => c.date_applied && new Date(c.date_applied).getTime() <= end);
+    const end = String(filters.endDate).slice(0, 10);
+    all = all.filter(c => {
+      const d = String(c.date_applied || "").slice(0, 10);
+      return !d || d <= end;
+    });
   }
 
   return joinCandidates(all, db);

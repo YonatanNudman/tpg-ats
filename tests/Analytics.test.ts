@@ -154,6 +154,42 @@ describe("filterCandidates", () => {
     expect(result).toHaveLength(1);
     expect(result[0].id).toBe(1);
   });
+
+  // Regression: a candidate stored as midnight Eastern (parseStr emits
+  // "2026-04-22T04:00:00.000Z" because Sheets coerces the cell to a JS
+  // Date in the spreadsheet's locale) was being EXCLUDED from a Last-90d
+  // filter because timestamp comparison treated 4am UTC as "after" the
+  // endDate's midnight UTC. Calendar-date comparison fixes it.
+  it("includes candidates whose date_applied has a non-midnight-UTC time component on the endDate boundary", () => {
+    const candidates = [
+      // Same calendar date as endDate, but stored at midnight Eastern
+      // (= 04:00 UTC) which made the old timestamp compare reject it.
+      makeCandidate({ id: 1, date_applied: "2026-04-22T04:00:00.000Z" }),
+      // Same calendar date, midnight UTC — old code accepted this one.
+      makeCandidate({ id: 2, date_applied: "2026-04-22" }),
+    ];
+    const result = filterCandidates(candidates, {
+      ...wideFilters,
+      startDate: "2026-01-22",
+      endDate:   "2026-04-22",
+    });
+    expect(result.map(c => c.id).sort()).toEqual([1, 2]);
+  });
+
+  it("excludes candidates whose date_applied calendar date is outside the window", () => {
+    const candidates = [
+      makeCandidate({ id: 1, date_applied: "2026-01-21T23:00:00.000Z" }), // day before
+      makeCandidate({ id: 2, date_applied: "2026-04-23T00:00:00.000Z" }), // day after
+      makeCandidate({ id: 3, date_applied: "2026-02-15" }),               // in window
+    ];
+    const result = filterCandidates(candidates, {
+      ...wideFilters,
+      startDate: "2026-01-22",
+      endDate:   "2026-04-22",
+    });
+    expect(result).toHaveLength(1);
+    expect(result[0].id).toBe(3);
+  });
 });
 
 // ============================================================

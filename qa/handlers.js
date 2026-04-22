@@ -72,13 +72,22 @@ function makeHandlers(db) {
       );
     }
 
+    // Calendar-date compare (mirrors src/Code.ts:getCandidates). Avoids the
+    // "candidate stored at midnight Eastern is excluded from a same-day
+    // endDate window" bug.
     if (filters.startDate) {
-      const start = new Date(filters.startDate).getTime();
-      all = all.filter(c => c.date_applied && new Date(c.date_applied).getTime() >= start);
+      const start = String(filters.startDate).slice(0, 10);
+      all = all.filter(c => {
+        const d = String(c.date_applied || "").slice(0, 10);
+        return !d || d >= start;
+      });
     }
     if (filters.endDate) {
-      const end = new Date(filters.endDate).getTime();
-      all = all.filter(c => c.date_applied && new Date(c.date_applied).getTime() <= end);
+      const end = String(filters.endDate).slice(0, 10);
+      all = all.filter(c => {
+        const d = String(c.date_applied || "").slice(0, 10);
+        return !d || d <= end;
+      });
     }
 
     return joinCandidates(all, db);
