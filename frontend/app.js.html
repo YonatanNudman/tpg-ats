@@ -1831,28 +1831,41 @@ document.addEventListener('alpine:init', function () {
         var self = this;
         if (document.hidden) return;         // skip if tab inactive
         if (Alpine.store('app').peek.open) return; // don't disrupt active editing
+        // The background fingerprint check itself is INTENTIONALLY silent
+        // \u2014 do NOT toggle `syncing` here. Earlier behavior was "every 20s
+        // the icon spins + 'Live' \u2192 'Syncing\u2026' flickers + the indicator
+        // color shifts" for what was almost always a no-op (cheap server
+        // hash check, no data movement). Recruiters described it as
+        // visually annoying and it actively distracted from focus reading.
+        // Now: poll silently, and only show visual feedback when there's
+        // an actual data reload to communicate.
         try {
-          self.syncing = true;
           var fp = await gasCall('getSyncFingerprint');
           if (lastSyncSig && fp.sig !== lastSyncSig) {
-            // Snapshot scroll BEFORE the silent reload so we can restore
-            // it after Alpine re-renders. Charts re-init can shift layout
-            // by a few px and the table re-render briefly recomputes
-            // heights — without restoring, the user mid-scroll gets
-            // yanked to a slightly different position. Subtle but
-            // perceptible jank that breaks the "live" feel.
-            var scrollY = window.scrollY;
-            self.syncStale = true;
-            await self.silentReload();
-            self.$nextTick(function () { window.scrollTo({ top: scrollY }); });
-            Alpine.store('app').toastSuccess('Updated with teammate changes.');
-            self.syncStale = false;
+            // Detected a real change \u2014 NOW the spinner + status flip is
+            // earned because we're actually reloading data. Wrapped in
+            // the same try/finally as before so a mid-reload throw
+            // doesn't leave the icon spinning forever.
+            try {
+              self.syncing = true;
+              // Snapshot scroll BEFORE the silent reload so we can restore
+              // it after Alpine re-renders. Charts re-init can shift layout
+              // by a few px and the table re-render briefly recomputes
+              // heights \u2014 without restoring, the user mid-scroll gets
+              // yanked to a slightly different position.
+              var scrollY = window.scrollY;
+              self.syncStale = true;
+              await self.silentReload();
+              self.$nextTick(function () { window.scrollTo({ top: scrollY }); });
+              Alpine.store('app').toastSuccess('Updated with teammate changes.');
+            } finally {
+              self.syncing = false;
+              self.syncStale = false;
+            }
           }
           lastSyncSig = fp.sig;
         } catch (e) {
-          /* network blip — ignore */
-        } finally {
-          self.syncing = false;
+          /* network blip \u2014 ignore */
         }
       },
     };
