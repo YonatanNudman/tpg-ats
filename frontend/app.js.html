@@ -791,6 +791,18 @@ document.addEventListener('alpine:init', function () {
         // they don't go through reload* — watch them too.
         this.$watch('funnelFilters', function () { self._persistSectionState(); }, { deep: true });
 
+        // Esc key clears any active bulk selection — common shortcut for
+        // "abandon what I just started" that recruiters expect to work.
+        // Scoped to selection so we don't fight other Esc handlers (e.g.,
+        // peek panel close uses its own).
+        document.addEventListener('keydown', function (e) {
+          if (e.key === 'Escape' && self.selectedIds.length > 0
+              && !Alpine.store('app').peek.open
+              && !Alpine.store('app').modal.open) {
+            self.clearSelection();
+          }
+        });
+
         // Register browser back/forward handler — closes topmost overlay
         // rather than navigating off the web app entirely. Pairs with
         // pushHistory/popHistory on every openPeek/openModal call.
@@ -1132,10 +1144,12 @@ document.addEventListener('alpine:init', function () {
       },
 
       funnelBarWidth: function (stage) {
-        var counts = this.pipelineFunnelData.map(function (s) { return s.candidate_count; });
-        var max = Math.max.apply(null, counts);
-        if (max <= 0) return 0;
-        return Math.round((stage.candidate_count / max) * 100);
+        // % of total active pipeline (each stage's count / sum of all stage counts).
+        // This makes the right-side label a meaningful "share of pipeline" metric
+        // and keeps the bar visually proportional to that share.
+        var total = this.funnelTotalActive();
+        if (total <= 0) return 0;
+        return Math.round((stage.candidate_count / total) * 100);
       },
 
       toggleFunnelStage: function (stageId) {
@@ -2049,6 +2063,22 @@ document.addEventListener('alpine:init', function () {
         var id = this.$store.app.peek.candidateId;
         var root = Alpine.$data(document.querySelector('#app'));
         if (!root) return;
+
+        // Hard confirm before destructive action. Janice flagged that the
+        // Reject and Delete buttons were too similar; the buttons themselves
+        // now have icons + clarifying labels, but Delete also gets a final
+        // confirm so muscle-memory-clicking can't nuke a record. The 5s
+        // undo toast that follows is a second safety net.
+        var ok = window.confirm(
+          'Permanently delete ' + name + '?\n\n' +
+          'This removes the candidate from every view in the app. Their stage ' +
+          'history stays on the history sheet for audit, but they will not appear ' +
+          'in the funnel, exports, or recruiter performance again.\n\n' +
+          'If you just want to mark them as not-a-fit, use REJECT instead — that ' +
+          'keeps the record visible for reporting.\n\n' +
+          'Click OK to continue with the permanent delete (you will have 5 seconds to undo).'
+        );
+        if (!ok) return;
 
         // Capture the candidate object + its position in the list so Undo can restore
         var idx = root.allCandidates.findIndex(function (c) { return c.id === id; });

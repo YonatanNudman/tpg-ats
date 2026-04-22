@@ -590,7 +590,33 @@ html, body {
 .peek-footer {
   padding: 12px 20px;
   border-top: 1px solid var(--border);
-  display: flex; gap: 8px; justify-content: flex-end;
+  display: flex;
+  gap: 16px;             /* extra spacing so the two destructive
+                            actions don't read as a button group */
+  justify-content: flex-end;
+  align-items: center;
+}
+/* Reject = primary destructive (this is the everyday outcome). Outline-
+   danger keeps it visually loud but not the loudest thing on the panel. */
+.peek-reject-btn {
+  font-weight: 600;
+}
+/* Delete = secondary destructive. Visually muted (gray) so muscle-
+   memory clicking lands on Reject by default. The hover state goes
+   red so the consequence is unambiguous when the user actually
+   reaches for it. The ring of icon + label + tooltip + confirm
+   dialog gives four clarification surfaces total. */
+.peek-delete-btn {
+  background: transparent;
+  border: 1px solid var(--text-muted);
+  color: var(--text-muted);
+  font-weight: 500;
+  transition: background 0.15s ease, color 0.15s ease, border-color 0.15s ease;
+}
+.peek-delete-btn:hover {
+  background: var(--danger, #d32f2f);
+  border-color: var(--danger, #d32f2f);
+  color: white;
 }
 
 /* ── History timeline ──────────────────────────────────── */
@@ -785,13 +811,83 @@ html, body {
   margin: 0 0 18px; font-size: 14px; color: var(--text);
 }
 
-/* ── Responsive ────────────────────────────────────────── */
-@media (max-width: 1200px) {
-  .analytics-grid { grid-template-columns: 1fr; }
+/* ── Responsive ──────────────────────────────────────────
+   Janice's 2026/04/22 testing surfaced screen-fit issues on common
+   laptop widths (~1024px and below). Not a full mobile redesign \u2014
+   the explicit ask was "optimize for smaller screen WHEN NECESSARY",
+   not phone-friendly. So these breakpoints loosen layout that
+   currently overflows or wraps awkwardly, no major restructuring. */
+
+/* ≤1280: typical 13" laptop. Analytics two-up still fits but the
+   peek panel takes too much horizontal space relative to the funnel. */
+@media (max-width: 1280px) {
+  .peek-panel { width: 440px; }
+  .filter-row { gap: 10px; row-gap: 12px; }
 }
+
+/* ≤1024: small laptop / large tablet landscape. Major layout
+   adjustments to keep things readable. */
+@media (max-width: 1024px) {
+  .topbar { padding: 0 12px; }
+  .topbar-link-btn { display: none; }   /* "Add Job" text link \u2014 Add Candidate stays primary */
+  .section-nav { padding: 6px 12px; gap: 4px; }
+  .section-nav-chip { padding: 4px 8px; font-size: 12px; }
+  /* Filters: 4 columns instead of trying to cram everything in one row */
+  .filter-group { min-width: 140px; flex: 1 1 calc(25% - 10px); }
+  .filter-group.filter-search { flex: 1 1 100%; }
+  /* Section dashboard cards: full width, stack everything */
+  .funnel-card .card-header,
+  .recruiter-perf-card .card-header,
+  .source-roi-card .card-header { flex-direction: column; align-items: stretch; }
+  .funnel-card .card-header .section-filters,
+  .recruiter-perf-card .card-header .section-filters,
+  .source-roi-card .card-header .section-filters {
+    flex-wrap: wrap;
+    margin-top: 8px;
+  }
+  .section-filter { flex: 1 1 calc(50% - 4px); max-width: none; }
+  /* Peek panel: take more of the screen since it's now competing for less */
+  .peek-panel { width: 480px; max-width: calc(100vw - 40px); }
+  .analytics-grid { grid-template-columns: 1fr; }
+  /* Bulk action bar: shrink min-width so the leading × stays in-bounds */
+  .bulk-action-bar { min-width: 0; max-width: calc(100vw - 24px); }
+}
+
+/* ≤768: tablet portrait / phone landscape. Stack peek to full width,
+   compact further. (The user said no full mobile redesign, but at this
+   size the page is functionally unusable without these.) */
 @media (max-width: 768px) {
+  .filter-group { flex: 1 1 100%; }
   .filter-group select, .filter-group input { max-width: none; width: 100%; }
-  .peek-panel, .settings-panel { width: 100%; }
+  .peek-panel, .settings-panel { width: 100%; max-width: 100%; }
+  .funnel-row {
+    grid-template-columns: 1fr auto;
+    grid-template-areas:
+      "name count"
+      "bar  pct";
+    row-gap: 4px;
+  }
+  .funnel-stage-name  { grid-area: name; }
+  .funnel-stage-count { grid-area: count; }
+  .funnel-bar-track   { grid-area: bar; }
+  .funnel-stage-pct   { grid-area: pct; }
+  .funnel-chevron     { display: none; }
+  /* Job cards: single column */
+  .job-grid { grid-template-columns: 1fr; }
+  /* Bulk action bar: bottom-pinned, full-width, two-column action grid */
+  .bulk-action-bar {
+    bottom: 8px;
+    width: calc(100vw - 16px);
+    flex-wrap: wrap;
+    padding: 10px 12px;
+    gap: 10px;
+  }
+  .bulk-actions {
+    width: 100%;
+    flex-wrap: wrap;
+  }
+  .bulk-action-select { flex: 1 1 calc(50% - 4px); min-width: 0; }
+  .bulk-actions .btn { flex: 1 1 calc(50% - 4px); }
 }
 
 /* ── Skeleton loaders ──────────────────────────────────────
@@ -1247,6 +1343,29 @@ html, body {
   from { transform: translate(-50%, 20px); opacity: 0; }
   to   { transform: translate(-50%, 0);    opacity: 1; }
 }
+/* Leading × dismiss button. Big tap target so cancellation is the
+   first interactive element in the bar — abandoning a misstart should
+   be reachable in one click without having to read the action labels.
+   Pairs with the Esc keyboard shortcut and the explicit "Cancel
+   selection" button on the right. */
+.bulk-cancel-x {
+  background: transparent;
+  border: none;
+  width: 28px; height: 28px;
+  border-radius: 6px;
+  font-size: 20px;
+  line-height: 1;
+  color: var(--text-muted);
+  cursor: pointer;
+  flex-shrink: 0;
+  transition: background 0.15s ease, color 0.15s ease;
+}
+.bulk-cancel-x:hover {
+  background: rgba(0, 0, 0, 0.06);
+  color: var(--text);
+}
+.bulk-cancel-x:disabled { opacity: 0.5; cursor: not-allowed; }
+
 .bulk-count {
   font-size: 13px;
   font-weight: 600;
