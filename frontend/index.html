@@ -579,18 +579,38 @@
       <div class="card inline-drill">
         <div class="card-header">
           <span class="card-title">Candidates needing attention</span>
+          <!--
+            Bulk-select header pair: 'Select all' on the left mirrors the
+            funnel-stage pattern, X on the right closes the drill-down.
+            Selecting candidates here populates the same selectedIds
+            array the funnel uses, so the existing bottom-of-screen
+            bulk action bar (Move to / Assign / Reject / Cancel)
+            handles them with no new wiring.
+          -->
+          <label class="stale-bulk-label" @click.stop>
+            <input type="checkbox"
+              :checked="staleAllSelected()"
+              @change="toggleStaleSelectAll()">
+            <span x-text="staleAllSelected() ? 'Deselect all' : 'Select all'"></span>
+          </label>
           <button class="icon-btn-sm" @click="drill = null">✕</button>
         </div>
         <table class="data-table">
           <thead>
             <tr>
+              <th class="stale-check-col"></th>
               <th>Candidate</th><th>Stage</th><th>Job</th><th>Recruiter</th>
               <th>Days in stage</th><th>Severity</th>
             </tr>
           </thead>
           <tbody>
             <template x-for="s in staleCandidates" :key="s.candidate_id">
-              <tr @click="openPeek(s.candidate_id)">
+              <tr @click="openPeek(s.candidate_id)"
+                :class="{ 'stale-row-selected': isSelected(s.candidate_id) }">
+                <td class="stale-check-col" @click.stop>
+                  <input type="checkbox" :checked="isSelected(s.candidate_id)"
+                    @change="toggleSelected(s.candidate_id)">
+                </td>
                 <td x-text="s.candidate_name"></td>
                 <td>
                   <span class="stage-chip" :style="stageChipStyle(s.stage_color)"

@@ -1336,6 +1336,27 @@ document.addEventListener('alpine:init', function () {
           ids.forEach(function (id) { if (!have[id]) this.selectedIds.push(id); }.bind(this));
         }
       },
+      // Mirrors the per-stage helpers above but scoped to the
+      // staleCandidates drill-down ("Candidates needing attention").
+      // Same selectedIds array, so candidates picked here flow through
+      // to the existing bottom-of-screen bulk action bar with no
+      // additional wiring.
+      staleAllSelected: function () {
+        if (!this.staleCandidates || this.staleCandidates.length === 0) return false;
+        var self = this;
+        return this.staleCandidates.every(function (s) { return self.isSelected(s.candidate_id); });
+      },
+      toggleStaleSelectAll: function () {
+        var ids = (this.staleCandidates || []).map(function (s) { return s.candidate_id; });
+        if (this.staleAllSelected()) {
+          this.selectedIds = this.selectedIds.filter(function (id) { return ids.indexOf(id) < 0; });
+        } else {
+          var have = {};
+          this.selectedIds.forEach(function (id) { have[id] = true; });
+          var self = this;
+          ids.forEach(function (id) { if (!have[id]) self.selectedIds.push(id); });
+        }
+      },
       clearSelection: function () { this.selectedIds = []; },
 
       // ── Bulk actions (call backend, show summary toast) ─────────

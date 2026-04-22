@@ -401,6 +401,45 @@ html, body {
   from { opacity: 0; transform: translateY(-5px); }
   to   { opacity: 1; transform: translateY(0); }
 }
+
+/* Bulk-select affordances on the "Candidates needing attention"
+   drill-down. Same selectedIds plumbing as the funnel-row
+   checkboxes, so picking rows here populates the bottom-of-screen
+   bulk action bar with no separate state. */
+.stale-bulk-label {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  font-size: 12px;
+  font-weight: 500;
+  color: var(--text-muted);
+  cursor: pointer;
+  user-select: none;
+  margin-left: auto;       /* push to the right edge before the X close */
+  margin-right: 8px;
+}
+.stale-bulk-label input[type=checkbox] { margin: 0; cursor: pointer; }
+
+.stale-check-col {
+  width: 36px;
+  text-align: center;
+  padding-right: 0;
+}
+.stale-check-col input[type=checkbox] {
+  margin: 0;
+  cursor: pointer;
+  width: 14px; height: 14px;
+}
+/* Selected-row treatment matches the funnel-row pattern so users
+   recognize "this is staged for the bulk action bar" no matter
+   which surface they selected from. */
+.stale-row-selected {
+  background: rgba(var(--primary-rgb, 89, 74, 226), 0.08);
+  box-shadow: inset 3px 0 0 var(--primary, #594AE2);
+}
+.stale-row-selected:hover {
+  background: rgba(var(--primary-rgb, 89, 74, 226), 0.12);
+}
 /* (.sla-over removed with the SLA drilldown panel.) */
 /* (.view-toggle / .view-btn removed — no List/Kanban toggle anymore.) */
 
