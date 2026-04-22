@@ -93,6 +93,15 @@ function parseBool(val: unknown): boolean {
  * full `"YYYY-MM-DDTHH:mm:ss.sssZ"`. Both formats sort correctly via
  * string comparison.
  */
+// Matches "Wed Apr 22 2026 00:00:00 GMT-0400 (Eastern Daylight Time)" — the
+// JS Date.prototype.toString() format. Used by parseStr's defensive backstop
+// to re-emit such values as ISO. Intentionally narrow so we don't mangle
+// arbitrary text fields that happen to start with day-name abbreviations.
+//
+// Declared ABOVE parseStr (not below) so the bundled order keeps the regex
+// definitionally available before parseStr can possibly be called.
+const DATE_TOSTRING_RE = /^(Mon|Tue|Wed|Thu|Fri|Sat|Sun) \w{3} \d{1,2} \d{4} \d{2}:\d{2}:\d{2} GMT[+-]\d{4}/;
+
 export function parseStr(val: unknown): string {
   if (val == null) return "";
   // Duck-type Date detection. The naive `val instanceof Date` check is
@@ -132,7 +141,21 @@ export function parseStr(val: unknown): string {
       // Pathological Date (timestamp out of range, etc.) — fall through.
     }
   }
-  return String(val);
+  // Defensive backstop: live diag (v29) showed that even with duck-typing,
+  // some date cells arrive at parseStr already coerced to a String in JS
+  // Date.toString() format ("Wed Apr 22 2026 00:00:00 GMT-0400 (Eastern
+  // Daylight Time)") — most likely Apps Script V8 stringifying Date cells
+  // before they reach the row mapper, or google.script.run serialization
+  // doing it across the iframe boundary. Either way the value never had
+  // a chance to hit our duck-type branch above. If a string both LOOKS
+  // like a Date.toString and parses cleanly to a real timestamp, re-emit
+  // it as ISO so downstream filters can slice(0,10) and compare correctly.
+  const s = String(val);
+  if (DATE_TOSTRING_RE.test(s)) {
+    const ts = Date.parse(s);
+    if (!isNaN(ts)) return new Date(ts).toISOString();
+  }
+  return s;
 }
 
 function today(): string {

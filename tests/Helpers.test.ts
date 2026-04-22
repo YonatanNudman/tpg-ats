@@ -128,6 +128,30 @@ describe("parseStr", () => {
     } as unknown as Date;
     expect(parseStr(bad)).toBe("broken");
   });
+
+  it("regression: defensive backstop re-emits JS Date.toString strings as ISO", () => {
+    // Production diagnostic (v29) caught date cells arriving at parseStr
+    // already coerced to strings in toString format — the duck-type and
+    // instanceof branches both correctly fall through, so we need the
+    // defensive backstop to re-parse and emit ISO. Without this, every
+    // calendar-date filter would still see "Wed Apr 22..." instead of
+    // a YYYY-MM-DD prefix.
+    const tostring = "Wed Apr 22 2026 00:00:00 GMT-0400 (Eastern Daylight Time)";
+    const out = parseStr(tostring);
+    expect(out).toMatch(/^2026-04-22T/);
+    // First 10 chars must compare correctly to a "YYYY-MM-DD" filter input.
+    expect(out.slice(0, 10)).toBe("2026-04-22");
+  });
+
+  it("regression: backstop is narrow — non-Date strings starting with day names are unchanged", () => {
+    // The DATE_TOSTRING_RE is intentionally narrow so we don't mangle
+    // arbitrary text fields. "Sunday gathering" would match a sloppy
+    // "starts with day name" check; the regex requires the full Date
+    // toString shape (3-letter day, 3-letter month, year, time, GMT offset).
+    expect(parseStr("Sunday gathering")).toBe("Sunday gathering");
+    expect(parseStr("Mon notes:")).toBe("Mon notes:");
+    expect(parseStr("Wed Apr 22")).toBe("Wed Apr 22");   // partial — no time
+  });
 });
 
 // ============================================================
