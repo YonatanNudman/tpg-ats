@@ -1049,6 +1049,87 @@ html, body {
   text-align: right;
 }
 
+/* ── Inline funnel actions (Move ›) ──────────────────────────
+   Tiny utility button that sits inside the funnel candidate row meta
+   cluster. Designed to be reachable in the same hover pass as the
+   row click affordance — opacity-fade on the row itself surfaces it
+   so we don't visually crowd a calm baseline. */
+.btn-xs {
+  font-size: 11px;
+  padding: 2px 8px;
+  line-height: 1.4;
+  border-radius: 4px;
+}
+.funnel-cand-advance {
+  opacity: 0;
+  transition: opacity 0.15s ease;
+  white-space: nowrap;
+}
+.funnel-candidate-row:hover .funnel-cand-advance {
+  opacity: 1;
+}
+/* Touch / keyboard users never trigger :hover — keep the button
+   accessible by leaving it visible whenever the row is focused. */
+.funnel-candidate-row:focus-within .funnel-cand-advance,
+.funnel-cand-advance:focus {
+  opacity: 1;
+}
+
+/* ── Quick-fill input pair (Add Job → Location with [Remote] chip) ─── */
+.input-with-quick {
+  display: flex;
+  gap: 6px;
+  align-items: stretch;
+}
+.input-with-quick > input {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+.input-with-quick > button {
+  flex: 0 0 auto;
+}
+
+/* ── Job card title clickable affordance ────────────────────
+   The title block on a job card is now a redundant edit affordance
+   (in addition to the explicit Edit button) since people instinctively
+   click the thing they want to change. Cursor + hover color make
+   that intent legible without a heavyweight button treatment. */
+.job-card-title-block {
+  cursor: pointer;
+  border-radius: 4px;
+  padding: 2px 4px;
+  margin: -2px -4px;
+  transition: background 0.12s ease;
+}
+.job-card-title-block:hover {
+  background: rgba(var(--primary-rgb), 0.06);
+}
+.job-meta-sub {
+  font-size: 11.5px;
+  color: var(--text-muted);
+  margin-left: 4px;
+}
+
+/* ── Peek panel: notes save bar ─────────────────────────────
+   Sits directly under the notes textarea. Status text on the left
+   ("Unsaved changes" / "Saved · 5s ago"), explicit Save button on
+   the right. Matches the Linear / Notion pattern people already
+   recognize, and removes the "did it actually save?" friction
+   recruiters reported. */
+.peek-notes-actions {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 12px;
+  margin-top: 6px;
+}
+.peek-notes-hint {
+  font-size: 11.5px;
+  color: var(--text-muted);
+  font-style: italic;
+  min-height: 16px;
+}
+
 /* ── Recruiter Performance table polish ─────────────────────── */
 .recruiter-perf-table tbody tr.clickable {
   cursor: pointer;

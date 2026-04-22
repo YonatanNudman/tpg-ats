@@ -37,7 +37,7 @@ function makeMockDB(jobs: JobRow[] = [], candidates: CandidateRow[] = [], overri
 function makeJob(overrides: Partial<JobRow> = {}): JobRow {
   return {
     id: 1, title: "Sales Rep", department: "Sales", location: "Remote",
-    region_id: null, status: "Open", head_count: 1, recruiter_id: null,
+    region_id: null, status: "Open", head_count: 1, filled: 0, recruiter_id: null,
     salary_range: "", posted_date: "2026-01-01", closes_date: "", posting_expires: "",
     notes: "", created_at: "2026-01-01T00:00:00Z",
     ...overrides,
@@ -182,7 +182,7 @@ describe("appendJob", () => {
     const db = makeMockDB();
     const input = {
       title: "BDR", department: "Sales", location: "Remote",
-      region_id: null, status: "Open" as const, head_count: 2,
+      region_id: null, status: "Open" as const, head_count: 2, filled: 0,
       recruiter_id: null, salary_range: "$50k", posted_date: "2026-01-01",
       closes_date: "", posting_expires: "", notes: "", created_at: "2026-01-01T00:00:00Z",
     };

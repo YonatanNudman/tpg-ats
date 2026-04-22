@@ -286,7 +286,7 @@ describe("joinCandidate", () => {
     { id: 1, name: "Applied", sequence: 100, color: "#1976d2", is_hired: false, is_rejected: false, is_offer: false, target_hours: null, is_enabled: true },
   ];
   const jobs: JobRow[] = [
-    { id: 1, title: "Sales Rep", department: "Sales", location: "Remote", region_id: null, status: "Open", head_count: 1, recruiter_id: null, salary_range: "", posted_date: "", closes_date: "", posting_expires: "", notes: "", created_at: "" },
+    { id: 1, title: "Sales Rep", department: "Sales", location: "Remote", region_id: null, status: "Open", head_count: 1, filled: 0, recruiter_id: null, salary_range: "", posted_date: "", closes_date: "", posting_expires: "", notes: "", created_at: "" },
   ];
   const recruiters: RecruiterRow[] = [
     { id: 10, name: "Alice Smith", email: "alice@t.com", is_active: true },

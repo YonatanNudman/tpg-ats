@@ -264,6 +264,7 @@ function makeHandlers(db) {
       region_id:       data.region_id != null ? data.region_id : null,
       status:          data.status,
       head_count:      data.head_count,
+      filled:          data.filled != null ? data.filled : 0,
       recruiter_id:    data.recruiter_id != null ? data.recruiter_id : null,
       salary_range:    data.salary_range || '',
       posted_date:     data.posted_date  || todayStr(),

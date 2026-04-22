@@ -130,10 +130,14 @@ async function dismissDialog(page, action /* 'accept' | 'dismiss' */, text) {
   await page.waitForSelector('.modal-dialog .modal-title:has-text("Add Job Opening")');
   await page.locator('.modal-dialog input[x-model="form.title"]').fill('Sales Development Rep');
   await page.locator('.modal-dialog input[x-model="form.department"]').fill('Sales');
+  // Location pre-fills with "Remote" — clear first to test the typed path.
   await page.locator('.modal-dialog input[x-model="form.location"]').fill('Remote');
-  await page.locator('.modal-dialog select[x-model="form.region_id"]').selectOption({ label: 'US - East' });
+  // Region defaults reduced to US + International on 2026/04/22 per the design call.
+  await page.locator('.modal-dialog select[x-model="form.region_id"]').selectOption({ label: 'US' });
   await page.locator('.modal-dialog input[x-model\\.number="form.head_count"]').fill('3');
-  await page.locator('.modal-dialog input[x-model="form.salary_range"]').fill('$60k–$80k');
+  // Structured salary range (min + max number inputs) replaces freeform text input.
+  await page.locator('.modal-dialog input[x-model\\.number="form.salary_min"]').fill('60000');
+  await page.locator('.modal-dialog input[x-model\\.number="form.salary_max"]').fill('80000');
   // Set posting_expires 14 days out so we can verify "expiring soon" warning later
   const future = new Date(Date.now() + 14 * 86_400_000).toISOString().slice(0, 10);
   await page.locator('.modal-dialog input[x-model="form.posting_expires"]').fill(future);
@@ -205,7 +209,7 @@ async function dismissDialog(page, action /* 'accept' | 'dismiss' */, text) {
   await page.locator('.modal-dialog input[type="tel"]').fill('+1-555-0100');
   await page.locator('.modal-dialog select[x-model="form.job_id"]').selectOption({ label: 'Sales Development Rep' });
   await page.locator('.modal-dialog select[x-model="form.source_id"]').selectOption({ label: 'LinkedIn' });
-  await page.locator('.modal-dialog select[x-model="form.region_id"]').selectOption({ label: 'US - East' });
+  await page.locator('.modal-dialog select[x-model="form.region_id"]').selectOption({ label: 'US' });
   await page.locator('.modal-dialog input[x-model="form.linkedin_url"]').fill('https://linkedin.com/in/riley');
   await page.locator('.modal-dialog .modal-footer button:has-text("Add Candidate")').click();
   await settle(page, 600);
@@ -224,9 +228,9 @@ async function dismissDialog(page, action /* 'accept' | 'dismiss' */, text) {
 
   // Add a couple more candidates so KPIs/analytics have signal
   for (const c of [
-    { fn: 'Morgan',  ln: 'Lee',     email: 'morgan@example.com',  source: 'Indeed',   region: 'US - West'    },
-    { fn: 'Sam',     ln: 'Patel',   email: 'sam@example.com',     source: 'Referral', region: 'US - Central' },
-    { fn: 'Quinn',   ln: 'Smith',   email: 'quinn@example.com',   source: 'Outbound', region: 'Remote'       },
+    { fn: 'Morgan',  ln: 'Lee',     email: 'morgan@example.com',  source: 'Indeed',   region: 'US'            },
+    { fn: 'Sam',     ln: 'Patel',   email: 'sam@example.com',     source: 'Referral', region: 'US'            },
+    { fn: 'Quinn',   ln: 'Smith',   email: 'quinn@example.com',   source: 'Outbound', region: 'International' },
   ]) {
     await page.locator('.topbar button:has-text("Add Candidate")').click();
     await page.waitForSelector('.modal-dialog .modal-title:has-text("Add Candidate")');

@@ -60,6 +60,7 @@ function makeJob(overrides: Partial<JobRow> = {}): JobRow {
     region_id: null,
     status: "Open",
     head_count: 1,
+    filled: 0,
     recruiter_id: null,
     salary_range: "",
     posted_date: "2026-01-01",

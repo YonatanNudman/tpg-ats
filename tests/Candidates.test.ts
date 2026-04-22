@@ -225,8 +225,9 @@ describe("default seed data", () => {
     expect(DEFAULT_SOURCES).toHaveLength(5);
   });
 
-  it("has 5 default regions", () => {
-    expect(DEFAULT_REGIONS).toHaveLength(5);
+  it("seeds the two-bucket region default (US + International) — narrowed in the 2026/04/22 design pass to match how recruiters actually think about region", () => {
+    expect(DEFAULT_REGIONS).toHaveLength(2);
+    expect(DEFAULT_REGIONS.map(r => r.name).sort()).toEqual(["International", "US"]);
   });
 
   it("has 7 default refuse reasons", () => {

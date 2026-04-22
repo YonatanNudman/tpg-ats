@@ -54,6 +54,11 @@ export interface JobRow {
   posting_expires: string;
   notes: string;
   created_at: string;
+  // Number of head_count slots already filled. Tracked separately from
+  // head_count so closing a partially-filled requisition (e.g. 1 of 3
+  // hired, role descoped) doesn't lose the historical context that the
+  // role originally needed three. `head_count - filled` = open slots.
+  filled: number;
   // Joined
   recruiter_name?: string;
   region_name?: string;
@@ -145,9 +150,11 @@ export interface CreateCandidateInput {
   email: string;
   phone: string;
   job_id: number;
+  recruiter_id?: number | null;
   source_id?: number | null;
   region_id?: number | null;
   motion?: "Inbound" | "Outbound";
+  linkedin_url?: string;
   notes?: string;
 }
 
@@ -174,6 +181,7 @@ export interface CreateJobInput {
   region_id?: number | null;
   status: "Open" | "On Hold" | "Closed";
   head_count: number;
+  filled?: number;
   recruiter_id?: number | null;
   salary_range?: string;
   posted_date?: string;

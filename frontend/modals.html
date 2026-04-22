@@ -88,7 +88,8 @@
 
               <div class="col-12">
                 <label class="form-label">Job Opening *</label>
-                <select class="form-select" x-model="form.job_id" :class="{ 'is-invalid': errors.job_id }">
+                <select class="form-select" x-model="form.job_id" @change="onJobChange()"
+                  :class="{ 'is-invalid': errors.job_id }">
                   <option value="">— Select job —</option>
                   <template x-for="j in openJobs" :key="j.id">
                     <option :value="j.id" x-text="j.title"></option>
@@ -97,7 +98,18 @@
                 <div class="invalid-feedback" x-text="errors.job_id"></div>
               </div>
 
-              <div class="col-4">
+              <div class="col-6">
+                <label class="form-label">Recruiter</label>
+                <select class="form-select" x-model="form.recruiter_id">
+                  <option value="">— Auto-assign from job —</option>
+                  <template x-for="r in $store.app.settings.recruiters.filter(x => x.is_active)" :key="r.id">
+                    <option :value="r.id" x-text="r.name"></option>
+                  </template>
+                </select>
+                <div class="form-text">Leave on auto-assign to inherit the job's recruiter.</div>
+              </div>
+
+              <div class="col-6">
                 <label class="form-label">Source</label>
                 <select class="form-select" x-model="form.source_id" @change="onSourceChange()">
                   <option value="">— None —</option>
@@ -107,7 +119,7 @@
                 </select>
               </div>
 
-              <div class="col-4">
+              <div class="col-6">
                 <label class="form-label">Motion</label>
                 <select class="form-select" x-model="form.motion">
                   <option>Inbound</option>
@@ -115,7 +127,7 @@
                 </select>
               </div>
 
-              <div class="col-4">
+              <div class="col-6">
                 <label class="form-label">Region</label>
                 <select class="form-select" x-model="form.region_id">
                   <option value="">— None —</option>
@@ -371,10 +383,17 @@
 
               <div class="col-6">
                 <label class="form-label">Location</label>
-                <input type="text" class="form-control" x-model="form.location">
+                <div class="input-with-quick">
+                  <input type="text" class="form-control" x-model="form.location"
+                    placeholder="Remote, Dallas, NYC, …">
+                  <button type="button" class="btn btn-sm btn-outline-secondary"
+                    @click="form.location = 'Remote'"
+                    :disabled="form.location === 'Remote'"
+                    title="Set location to Remote">Remote</button>
+                </div>
               </div>
 
-              <div class="col-4">
+              <div class="col-6">
                 <label class="form-label">Region</label>
                 <select class="form-select" x-model="form.region_id">
                   <option value="">— None —</option>
@@ -384,12 +403,7 @@
                 </select>
               </div>
 
-              <div class="col-4">
-                <label class="form-label">Head Count</label>
-                <input type="number" class="form-control" x-model.number="form.head_count" min="1">
-              </div>
-
-              <div class="col-4">
+              <div class="col-6">
                 <label class="form-label">Recruiter</label>
                 <select class="form-select" x-model="form.recruiter_id">
                   <option value="">— Unassigned —</option>
@@ -399,17 +413,54 @@
                 </select>
               </div>
 
-              <div class="col-4">
-                <label class="form-label">Salary Range</label>
-                <input type="text" class="form-control" x-model="form.salary_range" placeholder="e.g. $60k–$80k">
+              <!-- Head Count + Filled, paired so the relationship is visually obvious.
+                   `filled` exists separately from `head_count` so closing a partially-
+                   filled requisition (e.g. 1 of 3 hired, role descoped) doesn't lose
+                   the historical context that the role originally needed three. -->
+              <div class="col-3">
+                <label class="form-label">Head Count</label>
+                <input type="number" class="form-control" x-model.number="form.head_count" min="1">
+                <div class="form-text">Total positions to fill.</div>
               </div>
 
-              <div class="col-4">
+              <div class="col-3">
+                <label class="form-label">Filled</label>
+                <input type="number" class="form-control" x-model.number="form.filled"
+                  min="0" :max="form.head_count">
+                <div class="form-text">Hired so far.</div>
+              </div>
+
+              <!-- Structured salary range. Stored on the sheet as a single
+                   "min-max" string but the UI is two clean number inputs so
+                   nobody has to wonder whether to type "$60k", "60,000",
+                   or "60-80". The display format on job cards is uniform
+                   regardless of how the recruiter typed it. -->
+              <div class="col-6">
+                <label class="form-label">Salary Range</label>
+                <div class="row g-2">
+                  <div class="col-6">
+                    <div class="input-group input-group-sm">
+                      <span class="input-group-text">Min $</span>
+                      <input type="number" class="form-control" x-model.number="form.salary_min"
+                        min="0" step="1000" placeholder="60000">
+                    </div>
+                  </div>
+                  <div class="col-6">
+                    <div class="input-group input-group-sm">
+                      <span class="input-group-text">Max $</span>
+                      <input type="number" class="form-control" x-model.number="form.salary_max"
+                        min="0" step="1000" placeholder="80000">
+                    </div>
+                  </div>
+                </div>
+              </div>
+
+              <div class="col-6">
                 <label class="form-label">Posted</label>
                 <input type="date" class="form-control" x-model="form.posted_date">
               </div>
 
-              <div class="col-4">
+              <div class="col-6">
                 <label class="form-label">Expires</label>
                 <input type="date" class="form-control" x-model="form.posting_expires">
               </div>
@@ -684,13 +735,26 @@ document.addEventListener('alpine:init', function () {
       forceCreate: false,      // user explicitly chose "Add anyway" after seeing dupes
       form: {
         first_name: '', last_name: '', email: '', phone: '',
-        job_id: '', source_id: '', region_id: '',
+        job_id: '', recruiter_id: '', source_id: '', region_id: '',
         motion: 'Inbound', linkedin_url: '', notes: '',
       },
 
       init: async function () {
         try { this.openJobs = await gasCall('getJobOpenings', 'Open'); }
         catch (e) { this.$store.app.toastError('Could not load jobs.'); }
+      },
+
+      // Auto-fill recruiter from the chosen job when the user hasn't
+      // explicitly picked one. Mirrors the backend behavior people
+      // expect — "if I just pick a job, the candidate goes to that
+      // job's owner" — without forcing a manual second click. If the
+      // user does pick a recruiter, we never overwrite their choice.
+      onJobChange: function () {
+        if (this.form.recruiter_id) return;
+        if (!this.form.job_id) return;
+        var jobId = parseInt(this.form.job_id, 10);
+        var j = this.openJobs.find(function (x) { return x.id === jobId; });
+        if (j && j.recruiter_id) this.form.recruiter_id = String(j.recruiter_id);
       },
 
       onSourceChange: function () {
@@ -745,6 +809,7 @@ document.addEventListener('alpine:init', function () {
             email: this.form.email.trim(),
             phone: this.form.phone || '',
             job_id: parseInt(this.form.job_id, 10),
+            recruiter_id: this.form.recruiter_id ? parseInt(this.form.recruiter_id, 10) : null,
             source_id: this.form.source_id ? parseInt(this.form.source_id, 10) : null,
             region_id: this.form.region_id ? parseInt(this.form.region_id, 10) : null,
             motion: this.form.motion,
@@ -768,20 +833,33 @@ document.addEventListener('alpine:init', function () {
     return {
       submitting: false, errors: {},
       form: {
-        title: '', department: '', location: '', region_id: '',
-        status: 'Open', head_count: 1, recruiter_id: '',
-        salary_range: '', posted_date: new Date().toISOString().split('T')[0],
+        // 'Remote' is the most common first-pass value per the 2026/04/22
+        // design call with Janice — pre-populating saves recruiters the
+        // typing while still letting them overwrite for in-office roles.
+        title: '', department: '', location: 'Remote', region_id: '',
+        status: 'Open', head_count: 1, filled: 0, recruiter_id: '',
+        salary_min: '', salary_max: '',
+        posted_date: new Date().toISOString().split('T')[0],
         closes_date: '', posting_expires: '', notes: '',
       },
 
       init: function () {
         if (this.$store.app.modal.type === 'editJob' && this.$store.app.modal.data && this.$store.app.modal.data.job) {
           var j = this.$store.app.modal.data.job;
+          // Parse the historical freeform `salary_range` string into the
+          // structured min/max inputs the new UI renders. Anything that
+          // doesn't parse cleanly leaves both blank — the recruiter can
+          // re-enter it without us guessing wrong.
+          var salary = window.parseSalary ? window.parseSalary(j.salary_range || '') : { min: null, max: null };
           this.form = {
-            title: j.title || '', department: j.department || '', location: j.location || '',
+            title: j.title || '', department: j.department || '',
+            location: j.location || '',
             region_id: j.region_id || '', status: j.status || 'Open',
-            head_count: j.head_count || 1, recruiter_id: j.recruiter_id || '',
-            salary_range: j.salary_range || '', posted_date: j.posted_date || '',
+            head_count: j.head_count || 1, filled: j.filled || 0,
+            recruiter_id: j.recruiter_id || '',
+            salary_min: salary.min != null ? salary.min : '',
+            salary_max: salary.max != null ? salary.max : '',
+            posted_date: j.posted_date || '',
             closes_date: j.closes_date || '', posting_expires: j.posting_expires || '',
             notes: j.notes || '',
           };
@@ -791,14 +869,30 @@ document.addEventListener('alpine:init', function () {
       validate: function () {
         var e = {};
         if (!this.form.title.trim()) e.title = 'Title required.';
+        if (this.form.filled > this.form.head_count) {
+          e.filled = 'Filled cannot exceed head count.';
+        }
+        if (this.form.salary_min !== '' && this.form.salary_max !== '' &&
+            Number(this.form.salary_min) > Number(this.form.salary_max)) {
+          e.salary = 'Salary min must be \u2264 max.';
+        }
         this.errors = e;
         return Object.keys(e).length === 0;
       },
 
       submit: async function () {
-        if (!this.validate()) return;
+        if (!this.validate()) {
+          // Surface the first error as a toast so the user notices even
+          // if the inline validation message scrolled off-screen.
+          var firstErr = Object.values(this.errors)[0];
+          if (firstErr) this.$store.app.toastError(firstErr);
+          return;
+        }
         this.submitting = true;
         try {
+          var salaryStorage = window.formatSalaryStorage
+            ? window.formatSalaryStorage(this.form.salary_min, this.form.salary_max)
+            : '';
           var payload = {
             title: this.form.title.trim(),
             department: this.form.department || '',
@@ -806,8 +900,9 @@ document.addEventListener('alpine:init', function () {
             region_id: this.form.region_id ? parseInt(this.form.region_id, 10) : null,
             status: this.form.status,
             head_count: parseInt(this.form.head_count, 10) || 1,
+            filled: Math.max(0, parseInt(this.form.filled, 10) || 0),
             recruiter_id: this.form.recruiter_id ? parseInt(this.form.recruiter_id, 10) : null,
-            salary_range: this.form.salary_range || '',
+            salary_range: salaryStorage,
             posted_date: this.form.posted_date || '',
             closes_date: this.form.closes_date || '',
             posting_expires: this.form.posting_expires || '',

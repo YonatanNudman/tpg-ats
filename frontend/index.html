@@ -367,8 +367,17 @@
                 </div>
                 <template x-if="expandedStages.includes(stage.stage_id)">
                   <div class="funnel-stage-candidates">
+                    <!--
+                      One-click "Move →" advance directly on the row, plus
+                      the whole row remains clickable to open the peek panel
+                      for full editing. This was the #1 friction Janice hit
+                      on the 2026/04/22 design call ("How do I move someone
+                      to the next stage?") — now the common case is a single
+                      click without ever opening the side panel.
+                    -->
                     <template x-for="c in funnelCandidatesForStage(stage.stage_id)" :key="c.id">
-                      <div class="funnel-candidate-row" @click="openPeek(c.id)">
+                      <div class="funnel-candidate-row" @click="openPeek(c.id)"
+                        :title="'Click to open ' + c.first_name + ' ' + c.last_name">
                         <div class="funnel-cand-name" x-text="c.first_name + ' ' + c.last_name"></div>
                         <div class="funnel-cand-job" x-text="c.job_title || '—'"></div>
                         <div class="funnel-cand-meta">
@@ -379,6 +388,13 @@
                           <span class="motion-chip" :class="motionClass(c.motion)"
                                 x-text="c.motion"></span>
                           <span class="days-badge" x-text="(c.days_in_stage || 0) + 'd'"></span>
+                          <template x-if="canAdvance(c)">
+                            <button class="btn btn-xs btn-outline-primary funnel-cand-advance"
+                              @click.stop="advanceCandidateInline(c)"
+                              :title="'Move to ' + (nextStageName(c) || 'next stage')">
+                              Move ›
+                            </button>
+                          </template>
                         </div>
                         <span class="material-icons funnel-cand-arrow">chevron_right</span>
                       </div>
@@ -694,7 +710,8 @@
           <template x-for="j in jobs" :key="j.id">
             <div class="job-card">
               <div class="job-card-head">
-                <div>
+                <div class="job-card-title-block" @click="openModal('editJob', { job: j })"
+                  title="Click to edit this job">
                   <div class="job-card-title" x-text="j.title"></div>
                   <div class="job-card-dept" x-text="[j.department, j.location].filter(Boolean).join(' · ')"></div>
                 </div>
@@ -709,9 +726,26 @@
               </div>
 
               <div class="job-card-body">
+                <!--
+                  Headcount line shows fill ratio when partially filled so a
+                  recruiter can see "1 of 3 hired" at a glance without opening
+                  the job. The (filled) field was added per the 2026/04/22
+                  product call so closing a partial requisition keeps the
+                  history (originally needed 3, descoped after 1 hire).
+                -->
                 <div class="job-meta">
                   <span class="material-icons mi-inline">group</span>
-                  <span x-text="j.head_count + ' position' + (j.head_count === 1 ? '' : 's')"></span>
+                  <template x-if="(j.filled || 0) > 0">
+                    <span>
+                      <strong x-text="j.filled"></strong> of
+                      <span x-text="j.head_count"></span> filled
+                      <span class="job-meta-sub"
+                        x-text="'(' + Math.max(0, j.head_count - (j.filled || 0)) + ' open)'"></span>
+                    </span>
+                  </template>
+                  <template x-if="!(j.filled || 0)">
+                    <span x-text="j.head_count + ' position' + (j.head_count === 1 ? '' : 's')"></span>
+                  </template>
                 </div>
 
                 <!-- Inline RECRUITER dropdown -->
@@ -729,7 +763,7 @@
                 <template x-if="j.salary_range">
                   <div class="job-meta">
                     <span class="material-icons mi-inline">payments</span>
-                    <span x-text="j.salary_range"></span>
+                    <span x-text="formatSalaryDisplay(j.salary_range)"></span>
                   </div>
                 </template>
 
@@ -744,12 +778,21 @@
                 </template>
               </div>
 
+              <!--
+                Edit promoted to a primary-style button (was outline-secondary
+                and visually got lost) per the 2026/04/22 design call where
+                Janice asked "How do I edit a job?" before noticing it. The
+                title is also clickable as a redundant affordance so the
+                most natural "click the thing I want to edit" interaction
+                works without scanning for buttons.
+              -->
               <div class="job-card-actions">
-                <button class="btn btn-sm btn-outline-primary" @click="filters.jobId = j.id; applyFilters(); scrollTop()">
-                  View Pipeline
+                <button class="btn btn-sm btn-primary" @click="openModal('editJob', { job: j })">
+                  <span class="material-icons mi-inline">edit</span>
+                  Edit job
                 </button>
-                <button class="btn btn-sm btn-outline-secondary" @click="openModal('editJob', { job: j })">
-                  Edit
+                <button class="btn btn-sm btn-outline-primary" @click="filters.jobId = j.id; applyFilters(); scrollTop()">
+                  View pipeline
                 </button>
                 <button class="btn btn-sm btn-outline-danger" @click="deleteJob(j)">Delete</button>
               </div>
@@ -963,7 +1006,13 @@
                       <option :value="s.id" x-text="s.name"></option>
                     </template>
                   </select>
-                  <button class="btn btn-sm btn-outline-primary" @click="advanceStage()">Advance ›</button>
+                  <!-- Promoted to primary so the most-common action (advance one stage) is
+                       visually obvious. Per Janice's 2026/04/22 design call, this was the
+                       step she had to be verbally walked through. -->
+                  <button class="btn btn-sm btn-primary" @click="advanceStage()"
+                    title="Move to the next stage">
+                    Advance ›
+                  </button>
                 </div>
 
                 <div class="peek-section-title">Details</div>
@@ -1072,6 +1121,21 @@
                 <textarea class="form-control form-control-sm" rows="3"
                   x-model="editNotes" @blur="saveNotes()"
                   placeholder="Add notes…"></textarea>
+                <!--
+                  Explicit Save button on notes per the 2026/04/22 design
+                  call where Janice asked for one ("intuitively people like
+                  a save button"). Notes also auto-save on blur, but the
+                  visible button + saved-state hint removes the "did it
+                  actually save?" friction. notesDirty drives both the
+                  enabled state and the helper text.
+                -->
+                <div class="peek-notes-actions">
+                  <span class="peek-notes-hint" x-text="notesStatusText()"></span>
+                  <button class="btn btn-sm btn-primary"
+                    @click="saveNotes(); $refs && $refs.notesBtn && $refs.notesBtn.blur && $refs.notesBtn.blur()"
+                    :disabled="!isNotesDirty()"
+                    x-ref="notesBtn">Save notes</button>
+                </div>
 
                 <div class="peek-section-title">Stage History</div>
                 <ul class="history-timeline">

@@ -242,6 +242,62 @@ window.formatPhone = function (raw) {
   return digits;
 };
 
+// ── Salary range parsing & formatting ────────────────────────────────
+// Storage format on the sheet is a single freeform string (`salary_range`)
+// to keep the schema stable, but the UI exposes two structured number
+// inputs (min, max). These helpers convert between the two so the
+// existing data keeps reading cleanly while new entries get a clean
+// canonical format ("60000-80000") under the hood.
+//
+// parseSalary tolerates anything humans might have typed historically:
+//   "$60k–$80k", "60,000-80,000", "$60-$80k", "60k+", "80000",
+//   "$60,000 – $80,000", and so on.
+window.parseSalary = function (str) {
+  if (!str) return { min: null, max: null };
+  var s = String(str).trim();
+  // Pull every run of digits, optionally followed by 'k' or 'K'. This
+  // discards $, commas, dashes, en-dashes, em-dashes, "USD", "+", etc.
+  var matches = s.match(/(\d[\d,]*)\s*([kK])?/g) || [];
+  var nums = matches.map(function (m) {
+    var n = parseInt(String(m).replace(/[^\d]/g, ''), 10);
+    if (isNaN(n)) return null;
+    // "60k" → 60000; bare "60" assumed to also mean 60000 if it's
+    // less than 1000 (recruiters routinely type compensation in
+    // thousands without the k suffix).
+    if (/[kK]/.test(m)) return n * 1000;
+    if (n < 1000) return n * 1000;
+    return n;
+  }).filter(function (n) { return n != null && n > 0; });
+
+  if (nums.length === 0) return { min: null, max: null };
+  if (nums.length === 1) return { min: nums[0], max: null };
+  return { min: Math.min(nums[0], nums[1]), max: Math.max(nums[0], nums[1]) };
+};
+
+// Canonical storage form. Min-only saves as "60000"; both saves as
+// "60000-80000". Empty/null produces "" so the column stays clean.
+window.formatSalaryStorage = function (min, max) {
+  var hasMin = min != null && min !== '' && !isNaN(min);
+  var hasMax = max != null && max !== '' && !isNaN(max);
+  if (!hasMin && !hasMax) return '';
+  if (hasMin && hasMax) return String(min) + '-' + String(max);
+  if (hasMin)            return String(min);
+  return String(max);
+};
+
+// Display form for the job card / details panel. "$60K – $80K" reads
+// fastest in dense lists; falls back to the raw storage string when
+// it doesn't parse cleanly so legacy freeform entries still render.
+window.formatSalaryDisplay = function (str) {
+  if (!str) return '';
+  var p = window.parseSalary(str);
+  if (p.min == null && p.max == null) return String(str);
+  function k(n) { return '$' + Math.round(n / 1000) + 'K'; }
+  if (p.min != null && p.max != null) return k(p.min) + ' \u2013 ' + k(p.max);
+  if (p.min != null)                   return k(p.min) + '+';
+  return 'up to ' + k(p.max);
+};
+
 
 // ── History / URL state (deep-linking + browser back button) ─────────
 // GAS Web Apps run inside an iframe where only google.script.history
@@ -896,6 +952,59 @@ document.addEventListener('alpine:init', function () {
           .sort(function (a, b) { return (a.last_name || '').localeCompare(b.last_name || ''); });
       },
 
+      // ── Inline funnel actions ─────────────────────────────
+      // The Move › button on each funnel candidate row needs to know
+      // (a) whether there IS a next stage and (b) what to label it.
+      // Both helpers walk the active stage list (enabled, non-rejected,
+      // sorted by sequence) so they automatically pick up Settings
+      // changes without a redeploy.
+      _activeStages: function () {
+        return (this.settings.stages || [])
+          .filter(function (s) { return s.is_enabled && !s.is_rejected; })
+          .sort(function (a, b) { return a.sequence - b.sequence; });
+      },
+      canAdvance: function (c) {
+        if (!c || c.status !== 'Active') return false;
+        var stages = this._activeStages();
+        var idx = stages.findIndex(function (s) { return s.id === c.stage_id; });
+        return idx >= 0 && idx < stages.length - 1;
+      },
+      nextStageName: function (c) {
+        if (!c) return '';
+        var stages = this._activeStages();
+        var idx = stages.findIndex(function (s) { return s.id === c.stage_id; });
+        if (idx < 0 || idx >= stages.length - 1) return '';
+        return stages[idx + 1].name;
+      },
+      // One-click stage advance from the funnel row, no peek panel
+      // required. Uses the same backend conflict check as peek-panel
+      // saves (passes c.date_last_stage_update as the optimistic
+      // version stamp), so two recruiters racing on the same candidate
+      // still get the Reload toast instead of silently overwriting
+      // each other.
+      advanceCandidateInline: async function (c) {
+        if (!this.canAdvance(c)) return;
+        var stages = this._activeStages();
+        var idx = stages.findIndex(function (s) { return s.id === c.stage_id; });
+        var nextStage = stages[idx + 1];
+        try {
+          await gasCall('updateCandidateStage', c.id, nextStage.id, c.date_last_stage_update);
+          await this.refreshCandidate(c.id);
+          this.toastSuccess(c.first_name + ' \u2192 ' + nextStage.name);
+        } catch (e) {
+          var msg = (e && e.message) || String(e);
+          if (msg.indexOf('CONFLICT: ') === 0) {
+            var self = this;
+            this.toastError('Conflict \u2014 someone else updated ' + c.first_name + '.', {
+              actionLabel: 'Reload', duration: 8000,
+              onAction: function () { self.refreshCandidate(c.id); },
+            });
+          } else {
+            this.toastError('Could not advance: ' + msg);
+          }
+        }
+      },
+
       // ── Cross-section linking ─────────────────────────────
       // Click a recruiter row in the perf table → scope the funnel
       // section above to that recruiter so the user sees only that
@@ -1300,7 +1409,28 @@ document.addEventListener('alpine:init', function () {
     return {
       editStageId: 0, editRecruiterId: '', editSourceId: '', editRegionId: '',
       editMotion: 'Inbound', editKanban: 'Normal', editPostHire: '', editNotes: '',
+      lastSavedAt: 0,                       // ms epoch — drives the "Saved · just now" hint
       otherViewers: [],   // [{ email, secondsAgo }]
+
+      // Notes-section helpers — drive the explicit Save button & status
+      // hint added per Janice's 2026/04/22 ask. The button only enables
+      // when there's something to save (dirty), and the hint flips
+      // between "Unsaved changes" and "Saved · just now / Xs ago" so
+      // the user always knows what state their typing is in.
+      isNotesDirty: function () {
+        var c = this.$store.app.peek.candidate;
+        if (!c) return false;
+        return (this.editNotes || '') !== (c.notes || '');
+      },
+      notesStatusText: function () {
+        if (this.isNotesDirty()) return 'Unsaved changes';
+        if (!this.lastSavedAt)    return '';
+        var secs = Math.round((Date.now() - this.lastSavedAt) / 1000);
+        if (secs < 5)   return 'Saved \u00b7 just now';
+        if (secs < 60)  return 'Saved \u00b7 ' + secs + 's ago';
+        if (secs < 3600) return 'Saved \u00b7 ' + Math.floor(secs / 60) + 'm ago';
+        return 'Saved';
+      },
 
       /**
        * Deterministic avatar color from an email — used to color the
@@ -1391,6 +1521,7 @@ document.addEventListener('alpine:init', function () {
           this.$store.app.peek.history = r.history;
           var root = Alpine.$data(document.querySelector('#app'));
           if (root && root.refreshCandidate) await root.refreshCandidate(id);
+          this.lastSavedAt = Date.now();
           this.$store.app.toastSuccess('Stage updated.');
         } catch (e) {
           this._handleSaveError(e, 'Stage update failed: ', id);
@@ -1445,6 +1576,7 @@ document.addEventListener('alpine:init', function () {
           this.$store.app.peek.candidate = r.candidate;
           var root = Alpine.$data(document.querySelector('#app'));
           if (root && root.refreshCandidate) await root.refreshCandidate(id);
+          this.lastSavedAt = Date.now();
           this.$store.app.toastSuccess('Saved.');
         } catch (e) {
           this._handleSaveError(e, 'Save failed: ', id);

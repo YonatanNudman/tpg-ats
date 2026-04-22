@@ -32,6 +32,7 @@ const JOB_COLS = {
   id: 0, title: 1, department: 2, location: 3, region_id: 4,
   status: 5, head_count: 6, recruiter_id: 7, salary_range: 8,
   posted_date: 9, closes_date: 10, posting_expires: 11, notes: 12, created_at: 13,
+  filled: 14,
 };
 
 const HISTORY_COLS = {
@@ -257,12 +258,30 @@ export class SheetDB implements ISheetDB {
         errors.push(`Sheet '${name}' is missing (expected ${columns.length} columns: ${columns.join(", ")})`);
         continue;
       }
+      // Trailing-column auto-migration: when the app schema adds a new
+      // column at the end (e.g. `filled` on jobs), existing sheets are
+      // narrower than `columns.length`. Rather than erroring out and
+      // forcing the user to manually edit the sheet, we append the
+      // missing header(s) in place. Reads then return undefined for the
+      // new column on existing rows, which parseNum/parseStr already
+      // handle as the correct empty default.
+      //
+      // We DO NOT touch sheets where lastCol > columns.length — those
+      // extra columns might be user-added trackers that we shouldn't
+      // overwrite, and reading is unaffected by them.
       const lastCol = s.getLastColumn();
       if (lastCol < columns.length) {
-        errors.push(
-          `Sheet '${name}' has only ${lastCol} columns, expected at least ${columns.length}. ` +
-          `Required columns in order: ${columns.join(", ")}`
-        );
+        try {
+          const missing = columns.slice(lastCol);
+          s.getRange(1, lastCol + 1, 1, missing.length).setValues([missing]);
+        } catch (e: unknown) {
+          const msg = e instanceof Error ? e.message : String(e);
+          errors.push(
+            `Sheet '${name}' has only ${lastCol} columns, expected ${columns.length}, ` +
+            `and auto-migration failed: ${msg}. ` +
+            `Manually add columns: ${columns.slice(lastCol).join(", ")}`
+          );
+        }
       }
     }
     return { ok: errors.length === 0, errors };
@@ -687,6 +706,10 @@ export class SheetDB implements ISheetDB {
       posting_expires: parseStr(r[JOB_COLS.posting_expires]),
       notes: parseStr(r[JOB_COLS.notes]),
       created_at: parseStr(r[JOB_COLS.created_at]),
+      // `filled` was added after the initial schema. parseNum returns 0 for
+      // undefined cells so existing rows that pre-date the column read
+      // cleanly as 0 (no slots filled yet, which is the correct default).
+      filled: parseNum(r[JOB_COLS.filled]),
     };
   }
 
@@ -695,6 +718,7 @@ export class SheetDB implements ISheetDB {
       j.id, j.title, j.department, j.location, j.region_id ?? "",
       j.status, j.head_count, j.recruiter_id ?? "", j.salary_range,
       j.posted_date, j.closes_date, j.posting_expires, j.notes, j.created_at,
+      j.filled ?? 0,
     ];
   }
 }
@@ -721,12 +745,16 @@ export const DEFAULT_SOURCES: SourceRow[] = [
   { id: 5, name: "Other",     medium: "Website",  default_motion: "Inbound",  is_enabled: true },
 ];
 
+// Per the 2026/04/22 design conversation with Janice: the team only thinks
+// in two region buckets (US vs International). Specific cities/states like
+// "Dallas" go in the per-job `location` field, and "Remote" is a location
+// value, not a region. Keeping defaults narrow avoids the friction of
+// scrolling past five irrelevant options on every Add Job. Existing sheets
+// keep whatever the user has manually configured — these defaults only
+// apply on first-time seed.
 export const DEFAULT_REGIONS: RegionRow[] = [
-  { id: 1, name: "US - East",      is_enabled: true },
-  { id: 2, name: "US - West",      is_enabled: true },
-  { id: 3, name: "US - Central",   is_enabled: true },
-  { id: 4, name: "International",  is_enabled: true },
-  { id: 5, name: "Remote",         is_enabled: true },
+  { id: 1, name: "US",             is_enabled: true },
+  { id: 2, name: "International",  is_enabled: true },
 ];
 
 export const DEFAULT_REFUSE_REASONS: RefuseReasonRow[] = [
