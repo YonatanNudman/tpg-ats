@@ -1068,22 +1068,10 @@
 
                 <div class="peek-section-title">
                   Notes
-                  <span class="peek-section-hint">
-                    Type <code>@firstname</code> to notify a teammate by email
-                  </span>
                 </div>
                 <textarea class="form-control form-control-sm" rows="3"
                   x-model="editNotes" @blur="saveNotes()"
-                  placeholder="Add notes… tip: @brad will email Brad with a link to this candidate"></textarea>
-                <template x-if="resolvedMentions().length > 0">
-                  <div class="mention-hint">
-                    <span class="material-icons mi-inline">alternate_email</span>
-                    Will notify:
-                    <template x-for="n in resolvedMentions()" :key="n">
-                      <span class="mention-chip" x-text="n"></span>
-                    </template>
-                  </div>
-                </template>
+                  placeholder="Add notes…"></textarea>
 
                 <div class="peek-section-title">Stage History</div>
                 <ul class="history-timeline">

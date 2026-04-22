@@ -770,66 +770,6 @@ function getRecentHires(days = 90): CandidateRow[] {
  * might want "this week" vs "last 30 days").
  */
 // ============================================================
-// @mentions in notes — email notification when someone tags a teammate
-// ============================================================
-//
-// Called by the frontend when a candidate's notes are saved and new
-// @mentions were detected. We resolve each @name (case-insensitive first-
-// name match against active recruiters), then send one email per recipient
-// via GmailApp. Each email includes the note snippet and a deep link back
-// to the candidate's peek panel (relies on the ?candidate=ID URL handling
-// we added in the deep-linking work).
-
-interface MentionNotificationInput {
-  candidateId: number;
-  mentions: string[];   // normalized lowercase first names extracted by the client
-  noteExcerpt: string;
-  webAppUrl?: string;   // optional; client passes this so GAS doesn't need to know it
-}
-
-function notifyMentions(input: MentionNotificationInput): { sent: number; skipped: string[] } {
-  if (!input || !input.mentions || input.mentions.length === 0) {
-    return { sent: 0, skipped: [] };
-  }
-  const db = getDB();
-  const candidate = db.getCandidateById(input.candidateId);
-  if (!candidate) return { sent: 0, skipped: ["candidate-not-found"] };
-
-  const fromEmail = getSessionEmail();
-  const recruiters = db.getAllRecruiters().filter(r => r.is_active && r.email);
-
-  const sent: string[] = [];
-  const skipped: string[] = [];
-  for (const name of input.mentions) {
-    const target = recruiters.find(r =>
-      r.name.toLowerCase().split(/\s+/)[0] === String(name).toLowerCase()
-    );
-    if (!target) { skipped.push("no-match:" + name); continue; }
-    if (target.email.toLowerCase() === (fromEmail || "").toLowerCase()) {
-      skipped.push("self-mention:" + name); continue;   // don't email yourself
-    }
-    try {
-      const candName = (candidate.first_name || "") + " " + (candidate.last_name || "");
-      const subject = "You were mentioned in " + candName.trim() + "'s notes";
-      const link = input.webAppUrl
-        ? input.webAppUrl + "?candidate=" + input.candidateId
-        : "";
-      const body =
-        fromEmail + " mentioned you in a note on " + candName.trim() + ":\n\n" +
-        '"' + (input.noteExcerpt || "").trim() + '"\n\n' +
-        (link ? "Open in ATS: " + link + "\n\n" : "") +
-        "— TPG Recruiting ATS";
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      (GmailApp as any).sendEmail(target.email, subject, body);
-      sent.push(target.email);
-    } catch (err: any) {
-      skipped.push("send-failed:" + target.email + ":" + (err.message || ""));
-    }
-  }
-  return { sent: sent.length, skipped };
-}
-
-// ============================================================
 // Real-time presence (who's viewing which candidate right now)
 // ============================================================
 // Keyed in CacheService to avoid sheet writes — every peek panel

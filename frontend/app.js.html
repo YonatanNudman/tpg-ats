@@ -1451,64 +1451,10 @@ document.addEventListener('alpine:init', function () {
         }
       },
 
-      /**
-       * Extract @first-name mentions from a block of text.
-       * Lowercased + deduped. We match "@" followed by letters only,
-       * bounded by a word boundary. "@brad," → ["brad"]; "email@x" not matched.
-       */
-      _extractMentions: function (text) {
-        if (!text) return [];
-        var out = {};
-        var re = /(?:^|[^A-Za-z0-9_@.])@([A-Za-z][A-Za-z0-9_-]{0,30})/g;
-        var m;
-        while ((m = re.exec(text)) !== null) out[m[1].toLowerCase()] = true;
-        return Object.keys(out);
-      },
-
-      /**
-       * Resolve extracted @names to the active recruiter list.
-       * Returns only names that have a matching recruiter — used
-       * for the "Mentions: Brad, Alice" hint line under the notes.
-       */
-      resolvedMentions: function () {
-        var names = this._extractMentions(this.editNotes);
-        if (names.length === 0) return [];
-        var recruiters = this.$store.app.settings.recruiters || [];
-        return names
-          .map(function (n) {
-            var match = recruiters.find(function (r) {
-              return r.is_active && r.name && r.name.toLowerCase().split(/\s+/)[0] === n;
-            });
-            return match ? match.name.split(/\s+/)[0] : null;
-          })
-          .filter(Boolean);
-      },
-
       saveNotes: async function () {
         var current = this.$store.app.peek.candidate.notes || '';
         if (this.editNotes === current) return;
-        var previousMentions = this._extractMentions(current);
-        var newMentions = this._extractMentions(this.editNotes);
-        var added = newMentions.filter(function (m) { return previousMentions.indexOf(m) < 0; });
         await this.saveField('notes', this.editNotes);
-
-        // Fire mention notifications for newly-added @names only.
-        // Self-mentions + unresolved names are dropped server-side.
-        if (added.length > 0) {
-          try {
-            var result = await gasCall('notifyMentions', {
-              candidateId: this.$store.app.peek.candidateId,
-              mentions: added,
-              noteExcerpt: this.editNotes.slice(0, 400),
-              webAppUrl: window.location.href.split('?')[0],
-            });
-            if (result && result.sent > 0) {
-              this.$store.app.toastSuccess(
-                'Notified ' + result.sent + ' teammate' + (result.sent === 1 ? '' : 's') + '.'
-              );
-            }
-          } catch (e) { /* mail failures shouldn't block note save */ }
-        }
       },
 
       // Opens the reject modal — actual reject logic lives in the rejectModal

@@ -154,6 +154,62 @@ describe("parseStr", () => {
   });
 });
 
+describe("assignIds", () => {
+  // Local import to avoid touching the parseStr-focused describe block above.
+  // eslint-disable-next-line @typescript-eslint/no-var-requires
+  const { assignIds } = require("../src/SheetDB");
+
+  it("preserves rows that already have a positive id", () => {
+    const out = assignIds([
+      { id: 1, name: "a" },
+      { id: 2, name: "b" },
+      { id: 3, name: "c" },
+    ]);
+    expect(out.map((r: { id: number }) => r.id)).toEqual([1, 2, 3]);
+  });
+
+  it("auto-assigns new sequential ids starting from max+1 for id<=0 rows", () => {
+    // Regression for the 'all new recruiters save with id=0' bug.
+    // Mixed input: existing recruiter (id=1) + two new ones (id=0).
+    // The two new ones should get fresh consecutive ids, not collide.
+    const out = assignIds([
+      { id: 1, name: "existing" },
+      { id: 0, name: "new-a" },
+      { id: 0, name: "new-b" },
+    ]);
+    expect(out.map((r: { id: number }) => r.id)).toEqual([1, 2, 3]);
+  });
+
+  it("respects existing ids that have gaps — fills above max, doesn't reuse missing ids", () => {
+    // If a row was ever deleted (e.g. id=2), we DON'T want the next added
+    // row to take id=2 — that risks colliding with FK references in
+    // candidates / history that may still point to a soft-deleted row.
+    // Always grow above the current max.
+    const out = assignIds([
+      { id: 1, name: "a" },
+      { id: 5, name: "c" },   // gap at 2, 3, 4
+      { id: 0, name: "new" },
+    ]);
+    expect(out.find((r: { id: number; name: string }) => r.name === "new")?.id).toBe(6);
+  });
+
+  it("starts numbering from 1 when given an empty list of existing rows", () => {
+    const out = assignIds([
+      { id: 0, name: "first" },
+      { id: 0, name: "second" },
+    ]);
+    expect(out.map((r: { id: number }) => r.id)).toEqual([1, 2]);
+  });
+
+  it("treats negative ids the same as zero (also assigned)", () => {
+    const out = assignIds([
+      { id: 1, name: "ok" },
+      { id: -1, name: "weird" },   // shouldn't happen but guard anyway
+    ]);
+    expect(out.find((r: { id: number; name: string }) => r.name === "weird")?.id).toBe(2);
+  });
+});
+
 // ============================================================
 // daysBetween
 // ============================================================

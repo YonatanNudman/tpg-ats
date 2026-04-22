@@ -102,6 +102,25 @@ function parseBool(val: unknown): boolean {
 // definitionally available before parseStr can possibly be called.
 const DATE_TOSTRING_RE = /^(Mon|Tue|Wed|Thu|Fri|Sat|Sun) \w{3} \d{1,2} \d{4} \d{2}:\d{2}:\d{2} GMT[+-]\d{4}/;
 
+/**
+ * Auto-assign sequential IDs to any rows where id is missing or <=0,
+ * starting one above the largest existing positive ID. Used by every
+ * `replace*` settings method so the Settings UI's "+ Add row" path
+ * (which initializes new rows with id=0) doesn't collide them all
+ * onto the same sentinel value.
+ *
+ * Without this, every newly-added recruiter / stage / source / region /
+ * refuse_reason gets saved with id=0 and the second one onwards becomes
+ * indistinguishable from the first. That breaks every downstream lookup
+ * that joins by id (computeRecruiterPerformance, candidate.recruiter_id
+ * resolution, etc.) and was the root cause of the "I can't see the
+ * recruiters" report — both seeded recruiters had ended up at id=0.
+ */
+export function assignIds<T extends { id: number }>(rows: T[]): T[] {
+  let nextId = rows.reduce((m, r) => (r.id > m ? r.id : m), 0) + 1;
+  return rows.map(r => (r.id > 0 ? r : { ...r, id: nextId++ }));
+}
+
 export function parseStr(val: unknown): string {
   if (val == null) return "";
   // Duck-type Date detection. The naive `val instanceof Date` check is
@@ -564,31 +583,36 @@ export class SheetDB implements ISheetDB {
   }
 
   replaceStages(rows: StageRow[]): void {
-    this._replaceSheet(SHEET_NAMES.stages, [], rows.map(r => [
+    const assigned = assignIds(rows);
+    this._replaceSheet(SHEET_NAMES.stages, [], assigned.map(r => [
       r.id, r.name, r.sequence, r.color, r.is_hired, r.is_rejected, r.is_offer, r.target_hours ?? "", r.is_enabled,
     ]));
     this._settingsCacheInvalidate(SHEET_NAMES.stages);
   }
 
   replaceSources(rows: SourceRow[]): void {
-    this._replaceSheet(SHEET_NAMES.sources, [], rows.map(r => [
+    const assigned = assignIds(rows);
+    this._replaceSheet(SHEET_NAMES.sources, [], assigned.map(r => [
       r.id, r.name, r.medium, r.default_motion, r.is_enabled,
     ]));
     this._settingsCacheInvalidate(SHEET_NAMES.sources);
   }
 
   replaceRegions(rows: RegionRow[]): void {
-    this._replaceSheet(SHEET_NAMES.regions, [], rows.map(r => [r.id, r.name, r.is_enabled]));
+    const assigned = assignIds(rows);
+    this._replaceSheet(SHEET_NAMES.regions, [], assigned.map(r => [r.id, r.name, r.is_enabled]));
     this._settingsCacheInvalidate(SHEET_NAMES.regions);
   }
 
   replaceRecruiters(rows: RecruiterRow[]): void {
-    this._replaceSheet(SHEET_NAMES.recruiters, [], rows.map(r => [r.id, r.name, r.email, r.is_active]));
+    const assigned = assignIds(rows);
+    this._replaceSheet(SHEET_NAMES.recruiters, [], assigned.map(r => [r.id, r.name, r.email, r.is_active]));
     this._settingsCacheInvalidate(SHEET_NAMES.recruiters);
   }
 
   replaceRefuseReasons(rows: RefuseReasonRow[]): void {
-    this._replaceSheet(SHEET_NAMES.refuseReasons, [], rows.map(r => [r.id, r.name, r.is_enabled]));
+    const assigned = assignIds(rows);
+    this._replaceSheet(SHEET_NAMES.refuseReasons, [], assigned.map(r => [r.id, r.name, r.is_enabled]));
     this._settingsCacheInvalidate(SHEET_NAMES.refuseReasons);
   }
 
