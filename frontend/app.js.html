@@ -1410,6 +1410,8 @@ document.addEventListener('alpine:init', function () {
       editStageId: 0, editRecruiterId: '', editSourceId: '', editRegionId: '',
       editMotion: 'Inbound', editKanban: 'Normal', editPostHire: '', editNotes: '',
       lastSavedAt: 0,                       // ms epoch — drives the "Saved · just now" hint
+      notesSaving: false,                   // inflight guard — prevents the @blur + @click double-save
+      notesJustSaved: false,                // 1.5s flash after successful save (button: "✓ Saved!")
       otherViewers: [],   // [{ email, secondsAgo }]
 
       // Notes-section helpers — drive the explicit Save button & status
@@ -1423,13 +1425,20 @@ document.addEventListener('alpine:init', function () {
         return (this.editNotes || '') !== (c.notes || '');
       },
       notesStatusText: function () {
+        if (this.notesSaving)    return 'Saving\u2026';
         if (this.isNotesDirty()) return 'Unsaved changes';
-        if (!this.lastSavedAt)    return '';
+        if (!this.lastSavedAt)   return '';
         var secs = Math.round((Date.now() - this.lastSavedAt) / 1000);
-        if (secs < 5)   return 'Saved \u00b7 just now';
-        if (secs < 60)  return 'Saved \u00b7 ' + secs + 's ago';
+        if (secs < 5)    return 'Saved \u00b7 just now';
+        if (secs < 60)   return 'Saved \u00b7 ' + secs + 's ago';
         if (secs < 3600) return 'Saved \u00b7 ' + Math.floor(secs / 60) + 'm ago';
         return 'Saved';
+      },
+      notesStatusClass: function () {
+        if (this.notesSaving)    return 'peek-notes-hint-saving';
+        if (this.isNotesDirty()) return 'peek-notes-hint-dirty';
+        if (this.lastSavedAt)    return 'peek-notes-hint-saved';
+        return '';
       },
 
       /**
@@ -1584,9 +1593,32 @@ document.addEventListener('alpine:init', function () {
       },
 
       saveNotes: async function () {
+        // Inflight guard. The notes textarea fires @blur="saveNotes()"
+        // and the explicit Save button fires @click="saveNotes()" — when
+        // the user clicks Save while the textarea is focused, blur fires
+        // FIRST, the save executes, the button instantly disables (since
+        // notes are no longer dirty), and the click never registers as
+        // "I clicked Save". Net effect: the user sees a tiny toast and
+        // can't tell if their click did anything. The flag below makes
+        // the second invocation a no-op so a single deliberate click
+        // doesn't fire the request twice or get visually swallowed.
+        if (this.notesSaving) return;
         var current = this.$store.app.peek.candidate.notes || '';
         if (this.editNotes === current) return;
-        await this.saveField('notes', this.editNotes);
+
+        this.notesSaving = true;
+        try {
+          await this.saveField('notes', this.editNotes);
+          // 1.5s "✓ Saved!" flash on the Save button so the confirmation
+          // is unmistakable even when the toast is missed (off-screen,
+          // tabbed away, etc.). Reset on a timer so the button reverts
+          // to its calm "Save notes" / disabled-when-clean baseline.
+          var self = this;
+          this.notesJustSaved = true;
+          setTimeout(function () { self.notesJustSaved = false; }, 1500);
+        } finally {
+          this.notesSaving = false;
+        }
       },
 
       // Opens the reject modal — actual reject logic lives in the rejectModal

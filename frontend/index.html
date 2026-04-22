@@ -1119,22 +1119,48 @@
                   Notes
                 </div>
                 <textarea class="form-control form-control-sm" rows="3"
-                  x-model="editNotes" @blur="saveNotes()"
+                  x-model="editNotes"
+                  @blur="saveNotes()"
                   placeholder="Add notes…"></textarea>
                 <!--
                   Explicit Save button on notes per the 2026/04/22 design
                   call where Janice asked for one ("intuitively people like
-                  a save button"). Notes also auto-save on blur, but the
-                  visible button + saved-state hint removes the "did it
-                  actually save?" friction. notesDirty drives both the
-                  enabled state and the helper text.
+                  a save button").
+
+                  Three visual states surface the result so the click is
+                  unmistakable:
+                    1) "Save notes" — primary blue, enabled when dirty
+                    2) "Saving…"    — disabled mid-flight
+                    3) "✓ Saved!"   — green flash + scale pulse for 1.5s
+
+                  Status hint on the left color-codes the same state:
+                    "Unsaved changes" (warning orange) →
+                    "Saving…" (muted) →
+                    "Saved · just now" (success green).
+
+                  Notes also auto-save on textarea blur as a safety net so
+                  nothing gets lost if the user closes the panel without
+                  hitting Save. The inflight `notesSaving` guard prevents
+                  the blur and the explicit click from racing into a
+                  double save when the user clicks the button directly.
                 -->
                 <div class="peek-notes-actions">
-                  <span class="peek-notes-hint" x-text="notesStatusText()"></span>
-                  <button class="btn btn-sm btn-primary"
-                    @click="saveNotes(); $refs && $refs.notesBtn && $refs.notesBtn.blur && $refs.notesBtn.blur()"
-                    :disabled="!isNotesDirty()"
-                    x-ref="notesBtn">Save notes</button>
+                  <span class="peek-notes-hint" :class="notesStatusClass()"
+                    x-text="notesStatusText()"></span>
+                  <button type="button" class="btn btn-primary peek-notes-save"
+                    :class="{ 'peek-notes-save-flash': notesJustSaved }"
+                    :disabled="(!isNotesDirty() && !notesJustSaved) || notesSaving"
+                    @click="saveNotes()">
+                    <template x-if="notesJustSaved">
+                      <span><span class="material-icons mi-inline">check_circle</span> Saved!</span>
+                    </template>
+                    <template x-if="!notesJustSaved && notesSaving">
+                      <span>Saving&hellip;</span>
+                    </template>
+                    <template x-if="!notesJustSaved && !notesSaving">
+                      <span>Save notes</span>
+                    </template>
+                  </button>
                 </div>
 
                 <div class="peek-section-title">Stage History</div>
