@@ -59,11 +59,83 @@ import type {
 // ============================================================
 
 function doGet(_e: GoogleAppsScript.Events.DoGet): GoogleAppsScript.HTML.HtmlOutput {
+  // Schema sanity check before serving HTML. Catches the "someone renamed
+  // a sheet in the UI" / "someone deleted a column" class of failure with
+  // a clear human-readable error page instead of letting the app load and
+  // crash later inside a random handler with an opaque undefined-object
+  // error. Cheap (just looks up sheets + reads getLastColumn per sheet).
+  try {
+    const validation = getDB().validateSchema();
+    if (!validation.ok) {
+      return _renderSchemaErrorPage(validation.errors);
+    }
+  } catch (err) {
+    // Validator itself threw — usually means the spreadsheet ID is
+    // wrong, the script doesn't have permission, or Sheets API is down.
+    // Still surface something helpful instead of a 500.
+    const msg = (err as Error)?.message || String(err);
+    return _renderSchemaErrorPage([`Could not access spreadsheet: ${msg}`]);
+  }
+
   ensureDefaultData();
   return HtmlService.createTemplateFromFile("frontend/index")
     .evaluate()
     .setTitle("TPG Recruiting ATS")
     .addMetaTag("viewport", "width=device-width, initial-scale=1")
+    .setXFrameOptionsMode(HtmlService.XFrameOptionsMode.ALLOWALL);
+}
+
+/**
+ * Friendly error page for schema validation failures. Inline HTML so we
+ * don't depend on the frontend templates rendering correctly to surface
+ * what's wrong with them. Keeps the message blunt and actionable —
+ * tells the user (typically a TPG admin) exactly which sheet/columns
+ * are missing and links to the source spreadsheet.
+ */
+function _renderSchemaErrorPage(errors: string[]): GoogleAppsScript.HTML.HtmlOutput {
+  const items = errors.map(e => `<li>${e.replace(/</g, "&lt;").replace(/>/g, "&gt;")}</li>`).join("");
+  const sheetUrl = `https://docs.google.com/spreadsheets/d/${SPREADSHEET_ID}/edit`;
+  const html = `
+    <!DOCTYPE html>
+    <html>
+      <head>
+        <meta charset="UTF-8">
+        <title>TPG ATS — Setup needed</title>
+        <style>
+          body { font: 15px/1.5 system-ui, -apple-system, sans-serif; color: #1a1a2e;
+                 max-width: 720px; margin: 60px auto; padding: 0 24px; }
+          h1   { color: #E14B4B; font-size: 22px; margin-bottom: 6px; }
+          .lead{ color: #5b6178; margin-bottom: 24px; }
+          ul   { background: #fff5f5; border-left: 4px solid #E14B4B;
+                 padding: 12px 16px 12px 36px; border-radius: 4px; }
+          li   { margin: 4px 0; }
+          a    { color: #F2831F; font-weight: 600; }
+          .footer { margin-top: 28px; font-size: 13px; color: #8a90a2; }
+        </style>
+      </head>
+      <body>
+        <h1>TPG ATS can't start — spreadsheet schema mismatch</h1>
+        <p class="lead">
+          The web app refuses to load because the backing spreadsheet is
+          missing one or more sheets/columns the app expects.
+        </p>
+        <ul>${items}</ul>
+        <p>
+          Open the
+          <a href="${sheetUrl}" target="_blank" rel="noopener">backing spreadsheet</a>
+          and either restore the missing structure or recreate the
+          mentioned sheet with the listed columns in order.
+        </p>
+        <p class="footer">
+          Why this page instead of the app: the app would crash with
+          opaque errors halfway through loading. Failing here lets you
+          fix the schema and retry without guessing.
+        </p>
+      </body>
+    </html>
+  `;
+  return HtmlService.createHtmlOutput(html)
+    .setTitle("TPG ATS — Setup needed")
     .setXFrameOptionsMode(HtmlService.XFrameOptionsMode.ALLOWALL);
 }
 
@@ -917,6 +989,104 @@ function logClientError(payload: ClientErrorPayload): { ok: boolean } {
     // Never throw — this would loop the unhandledrejection handler.
   }
   return { ok: true };
+}
+
+// ============================================================
+// Weekly Sheets snapshot to Drive
+// ============================================================
+//
+// Sheets has built-in version history but no scheduled snapshots — if a
+// recruiter accidentally clears a column, restoring requires hunting
+// through the version-history dialog. This function copies the entire
+// backing spreadsheet to a date-stamped file in a "TPG ATS Backups"
+// folder so we always have a known-good restore point.
+//
+// Driven by a time-based trigger (set up once via installSnapshotTrigger
+// below). Saturdays around 2am gives us a quiet-window snapshot.
+//
+// Idempotent: if today's snapshot already exists, skip. Trims to the
+// most recent N snapshots so the folder doesn't grow forever.
+
+const BACKUP_FOLDER_NAME = "TPG ATS Backups";
+const BACKUP_KEEP_COUNT  = 12;   // ~3 months of weekly snapshots
+
+function snapshotSpreadsheetToDrive(): { ok: boolean; message: string } {
+  if (typeof DriveApp === "undefined" || typeof SpreadsheetApp === "undefined") {
+    return { ok: false, message: "DriveApp/SpreadsheetApp unavailable (non-GAS env)" };
+  }
+  try {
+    const folder = _findOrCreateFolder(BACKUP_FOLDER_NAME);
+    const today  = new Date().toISOString().split("T")[0];   // YYYY-MM-DD
+    const name   = `TPG ATS Backup ${today}`;
+
+    // Idempotency — skip if today's snapshot already exists.
+    const existing = folder.getFilesByName(name);
+    if (existing.hasNext()) {
+      return { ok: true, message: `Snapshot ${name} already exists; skipped` };
+    }
+
+    const original = DriveApp.getFileById(SPREADSHEET_ID);
+    original.makeCopy(name, folder);
+
+    _trimOldBackups(folder, BACKUP_KEEP_COUNT);
+    return { ok: true, message: `Created ${name}` };
+  } catch (err) {
+    const msg = (err as Error)?.message || String(err);
+    console.error("[snapshotSpreadsheetToDrive]", msg);
+    return { ok: false, message: msg };
+  }
+}
+
+function _findOrCreateFolder(name: string): GoogleAppsScript.Drive.Folder {
+  const it = DriveApp.getFoldersByName(name);
+  if (it.hasNext()) return it.next();
+  return DriveApp.createFolder(name);
+}
+
+function _trimOldBackups(folder: GoogleAppsScript.Drive.Folder, keep: number): void {
+  // Sort by name desc — names are date-stamped so this is chronological.
+  const files: Array<{ id: string; name: string }> = [];
+  const it = folder.getFiles();
+  while (it.hasNext()) {
+    const f = it.next();
+    if (f.getName().indexOf("TPG ATS Backup") === 0) {
+      files.push({ id: f.getId(), name: f.getName() });
+    }
+  }
+  files.sort((a, b) => b.name.localeCompare(a.name));   // newest first
+  for (let i = keep; i < files.length; i++) {
+    try { DriveApp.getFileById(files[i].id).setTrashed(true); }
+    catch (_e) { /* swallow — best effort cleanup */ }
+  }
+}
+
+/**
+ * One-time setup — run from the Apps Script editor (Run → installSnapshotTrigger)
+ * to wire up the weekly trigger. Idempotent: removes any prior snapshot
+ * trigger before adding the new one so re-running can't double-schedule.
+ */
+function installSnapshotTrigger(): { ok: boolean; message: string } {
+  if (typeof ScriptApp === "undefined") {
+    return { ok: false, message: "ScriptApp unavailable (non-GAS env)" };
+  }
+  try {
+    const triggers = ScriptApp.getProjectTriggers();
+    let removed = 0;
+    for (const t of triggers) {
+      if (t.getHandlerFunction() === "snapshotSpreadsheetToDrive") {
+        ScriptApp.deleteTrigger(t);
+        removed++;
+      }
+    }
+    ScriptApp.newTrigger("snapshotSpreadsheetToDrive")
+      .timeBased()
+      .onWeekDay(ScriptApp.WeekDay.SATURDAY)
+      .atHour(2)
+      .create();
+    return { ok: true, message: `Installed weekly Saturday 2am trigger (removed ${removed} prior).` };
+  } catch (err) {
+    return { ok: false, message: (err as Error)?.message || String(err) };
+  }
 }
 
 function getRecentActivity(limit = 50): import("./types").HistoryRow[] {

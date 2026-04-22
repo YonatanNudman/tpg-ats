@@ -148,6 +148,56 @@ export class SheetDB implements ISheetDB {
     return sheet;
   }
 
+  /**
+   * Schema sanity check — verifies that every sheet the app reads from
+   * exists and that the header row is wide enough to contain every column
+   * we index by position. Designed to run on doGet so a misconfigured
+   * spreadsheet (sheet renamed in the UI, columns reordered, etc.) fails
+   * at the door with a clear list of issues instead of crashing later
+   * inside some random handler with an opaque "undefined is not an object".
+   *
+   * Header values are NOT compared by name — recruiters may rename a
+   * column header to something more familiar without breaking us, as
+   * long as the column count is intact and the data shape is preserved.
+   * If we ever need name-based validation, the SHEET_SCHEMA constant
+   * below already lists every expected name; switch to comparing
+   * `firstRow[i]` against `expected[i]` to opt in.
+   */
+  validateSchema(): { ok: boolean; errors: string[] } {
+    const errors: string[] = [];
+    const SHEET_SCHEMA: Array<{ sheet: string; columns: string[] }> = [
+      { sheet: SHEET_NAMES.candidates,    columns: Object.keys(CANDIDATE_COLS) },
+      { sheet: SHEET_NAMES.jobs,          columns: Object.keys(JOB_COLS) },
+      { sheet: SHEET_NAMES.history,       columns: Object.keys(HISTORY_COLS) },
+      { sheet: SHEET_NAMES.stages,        columns: Object.keys(STAGE_COLS) },
+      { sheet: SHEET_NAMES.sources,       columns: Object.keys(SOURCE_COLS) },
+      { sheet: SHEET_NAMES.regions,       columns: Object.keys(REGION_COLS) },
+      { sheet: SHEET_NAMES.recruiters,    columns: Object.keys(RECRUITER_COLS) },
+      { sheet: SHEET_NAMES.refuseReasons, columns: Object.keys(REFUSE_COLS) },
+    ];
+    for (const { sheet: name, columns } of SHEET_SCHEMA) {
+      let s: GoogleAppsScript.Spreadsheet.Sheet | null = null;
+      try {
+        s = this._ss.getSheetByName(name);
+      } catch {
+        errors.push(`Sheet '${name}' lookup threw — spreadsheet may be inaccessible`);
+        continue;
+      }
+      if (!s) {
+        errors.push(`Sheet '${name}' is missing (expected ${columns.length} columns: ${columns.join(", ")})`);
+        continue;
+      }
+      const lastCol = s.getLastColumn();
+      if (lastCol < columns.length) {
+        errors.push(
+          `Sheet '${name}' has only ${lastCol} columns, expected at least ${columns.length}. ` +
+          `Required columns in order: ${columns.join(", ")}`
+        );
+      }
+    }
+    return { ok: errors.length === 0, errors };
+  }
+
   // ---------- Cache plumbing ----------
 
   /** Drop the per-execution cache for a sheet. Call after any write. */

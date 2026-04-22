@@ -10,7 +10,8 @@
     "qa:server": "node qa/build-bundle.js && node qa/server.js",
     "qa": "node qa/build-bundle.js && node qa/qa.spec.mjs",
     "build": "clasp push",
-    "deploy": "clasp deploy"
+    "deploy": "clasp deploy",
+    "smoke": "node scripts/smoke.js"
   },
   "devDependencies": {
     "@types/express": "^5.0.6",
