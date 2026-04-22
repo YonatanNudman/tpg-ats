@@ -419,7 +419,15 @@ export class SheetDB implements ISheetDB {
     const existing = this._rowToCandidate(rows[idx]);
     const merged = { ...existing, ...updates, id };
     const sheet = this._sheet(SHEET_NAMES.candidates);
-    sheet.getRange(idx + 2, 1, 1, 23).setValues([this._candidateToRow(merged)]);
+    // Column count derived from the actual serialized row length, NOT
+    // hardcoded. Hardcoding bit us when `filled` was added to JOB_COLS
+    // in v36 and the parallel updateJob still wrote a 14-column range
+    // against a 15-element row \u2014 GAS threw "number of columns in the
+    // data does not match the number of columns in the range" and the
+    // inline status dropdown silently reverted. Same fix applied to
+    // updateJob below.
+    const row = this._candidateToRow(merged);
+    sheet.getRange(idx + 2, 1, 1, row.length).setValues([row]);
     this._invalidate(SHEET_NAMES.candidates);
   }
 
@@ -458,7 +466,14 @@ export class SheetDB implements ISheetDB {
     const existing = this._rowToJob(rows[idx]);
     const merged = { ...existing, ...updates, id };
     const sheet = this._sheet(SHEET_NAMES.jobs);
-    sheet.getRange(idx + 2, 1, 1, 14).setValues([this._jobToRow(merged)]);
+    // Range width derived from the row length (15 with `filled` since
+    // v36, was 14 before). Hardcoding 14 here was the bug that made
+    // the inline job status dropdown silently revert: setValues threw
+    // "data column count does not match range column count", which
+    // propagated as the cryptic GAS error and the optimistic
+    // updateJobField rolled back the local mutation.
+    const row = this._jobToRow(merged);
+    sheet.getRange(idx + 2, 1, 1, row.length).setValues([row]);
     this._invalidate(SHEET_NAMES.jobs);
   }
 
