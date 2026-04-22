@@ -206,6 +206,34 @@ html, body {
   box-shadow: 0 0 0 3px rgba(var(--primary-rgb),0.18);
 }
 .filter-reset { align-self: flex-end; margin-left: auto; }
+.filter-actions {
+  margin-left: auto; display: flex; gap: 8px; align-self: flex-end;
+}
+
+/* ── Saved views bar ──────────────────────────────────── */
+.views-bar {
+  display: flex; align-items: center; gap: 8px; flex-wrap: wrap;
+  padding: 10px 16px;
+  border-bottom: 1px solid var(--border);
+  background: #FAFBFE;
+}
+.views-label {
+  font-size: 10.5px; font-weight: 700; color: var(--text-muted);
+  text-transform: uppercase; letter-spacing: 0.5px;
+}
+.view-chip {
+  display: inline-flex; align-items: center; gap: 4px;
+  padding: 4px 8px 4px 10px; border-radius: 999px;
+  background: white; border: 1px solid var(--border);
+  font-size: 12px; color: var(--text); cursor: pointer;
+  transition: border-color 0.15s, background 0.15s, color 0.15s;
+}
+.view-chip:hover { border-color: var(--primary); color: var(--primary-dark); }
+.view-chip-delete {
+  color: var(--text-muted); font-size: 14px; line-height: 1;
+  padding: 0 2px; border-radius: 3px;
+}
+.view-chip-delete:hover { color: var(--danger); background: rgba(225,75,75,0.08); }
 
 /* ── KPI strip ─────────────────────────────────────────── */
 .kpi-grid {
@@ -303,6 +331,82 @@ html, body {
 }
 .severity-stale     { background: rgba(242,149,48,0.18);  color: #8F5000; }
 .severity-abandoned { background: rgba(225,75,75,0.18);   color: #8B0000; }
+
+/* ── Link cards (LinkedIn / Resume in peek panel) ───────── */
+.link-card {
+  display: flex; align-items: center; gap: 12px;
+  padding: 10px 12px;
+  background: #F8F9FC;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  text-decoration: none; color: inherit;
+  transition: background 0.15s, border-color 0.15s;
+  margin-bottom: 4px;
+}
+.link-card:hover {
+  background: white;
+  border-color: var(--primary);
+  text-decoration: none;
+}
+.link-card-icon {
+  width: 36px; height: 36px; border-radius: 8px;
+  display: flex; align-items: center; justify-content: center;
+  font-weight: 800; font-size: 13px; color: white;
+  flex-shrink: 0;
+}
+.link-card-linkedin .link-card-icon { background: #0A66C2; }  /* LinkedIn blue */
+.link-card-resume .link-card-icon   { background: var(--primary); }
+.link-card-resume .link-card-icon .material-icons { font-size: 18px; }
+.link-card-body { flex: 1; min-width: 0; }
+.link-card-title {
+  font-weight: 700; font-size: 13.5px;
+  display: flex; align-items: center; gap: 4px;
+}
+.link-card-open {
+  font-size: 14px !important; opacity: 0.5;
+}
+.link-card-url {
+  font-size: 11px; color: var(--text-muted);
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+  margin-top: 2px;
+}
+
+/* URL editor toggle (add/edit LinkedIn/resume from peek) */
+.url-editor { margin-top: 8px; }
+.url-editor-toggle {
+  background: none; border: none; padding: 0; margin: 0;
+  color: var(--text-secondary); cursor: pointer;
+  font-size: 12px; display: inline-flex; align-items: center; gap: 3px;
+}
+.url-editor-toggle:hover { color: var(--primary); }
+.url-editor-fields {
+  margin-top: 8px; padding: 10px; border: 1px dashed var(--border);
+  border-radius: 8px; display: flex; flex-direction: column; gap: 8px;
+}
+
+/* Inline PDF preview */
+.resume-preview {
+  position: relative;
+  border: 1px solid var(--border);
+  border-radius: 8px; overflow: hidden;
+  background: #FAFAFA;
+}
+.resume-preview embed {
+  display: block;
+  width: 100%; height: 420px;
+  border: none;
+}
+.resume-preview-open {
+  position: absolute; top: 8px; right: 8px;
+  background: white; border: 1px solid var(--border);
+  padding: 4px 10px; border-radius: 6px;
+  font-size: 11.5px; text-decoration: none;
+  color: var(--text); box-shadow: var(--shadow-sm);
+}
+.resume-preview-open:hover {
+  background: var(--primary-light); color: var(--primary-dark);
+  text-decoration: none;
+}
 
 /* ── Inline drill ───────────────────────────────────────── */
 .inline-drill { animation: slideDown 0.2s ease; }

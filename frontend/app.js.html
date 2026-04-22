@@ -66,6 +66,19 @@ window.trendClass = function (current, prev) {
   return 'trend-flat';
 };
 
+// Detects if a URL can be inline-previewed as a PDF.
+// Covers .pdf extensions, Google Drive file IDs (rendered via /preview), etc.
+window.isPdfUrl = function (url) {
+  if (!url) return false;
+  var u = String(url).toLowerCase();
+  if (u.endsWith('.pdf')) return true;
+  if (u.indexOf('.pdf?') > -1) return true;
+  // Google Drive share links contain /file/d/ID/view — can be inline-embedded
+  // via /preview. We don't auto-rewrite here (would need Drive API access to
+  // verify it's public); user can paste the /preview URL directly.
+  return false;
+};
+
 function presetRange(preset) {
   var now = new Date();
   var end = now.toISOString().split('T')[0];
@@ -239,6 +252,7 @@ document.addEventListener('alpine:init', function () {
           Alpine.store('app').userEmail = this.userEmail;
         } catch (e) { /* non-fatal */ }
 
+        this.loadSavedViews();
         await this.reloadAll();
         this.startSyncPolling();
 
@@ -307,6 +321,57 @@ document.addEventListener('alpine:init', function () {
           startDate: f.startDate,
           endDate: f.endDate,
         };
+      },
+
+      // ── Saved filter views (localStorage, per-browser) ────
+      // Stored under "tpg-ats.views" as an array of { name, filters }.
+      // Keeps the user's top of mind filter combos one click away
+      // without a server round-trip. Cross-device sync is a later
+      // upgrade if needed.
+      savedViews: [],
+
+      loadSavedViews: function () {
+        try {
+          var raw = localStorage.getItem('tpg-ats.views');
+          this.savedViews = raw ? JSON.parse(raw) : [];
+        } catch (e) { this.savedViews = []; }
+      },
+
+      persistSavedViews: function () {
+        try { localStorage.setItem('tpg-ats.views', JSON.stringify(this.savedViews)); }
+        catch (e) { /* quota / private mode — non-fatal */ }
+      },
+
+      saveCurrentView: function () {
+        var name = (prompt('Name this view (e.g. "My BDR pipeline"):') || '').trim();
+        if (!name) return;
+        // Replace if a view with that name already exists
+        this.savedViews = this.savedViews.filter(function (v) { return v.name !== name; });
+        // Clone current filters (minus startDate/endDate if they're preset-derived —
+        // otherwise "Last 30 days" gets frozen to specific dates)
+        var f = JSON.parse(JSON.stringify(this.filters));
+        this.savedViews.push({ name: name, filters: f });
+        this.persistSavedViews();
+        Alpine.store('app').toastSuccess('Saved view "' + name + '".');
+      },
+
+      applyView: function (view) {
+        var f = view.filters || {};
+        // Recompute date window from preset so a "30d" view stays rolling
+        var range = presetRange(f.preset || '90d');
+        this.filters = Object.assign({}, f, {
+          startDate: f.preset === 'custom' ? f.startDate : range.start,
+          endDate:   f.preset === 'custom' ? f.endDate   : range.end,
+        });
+        this.applyFilters();
+        Alpine.store('app').toastSuccess('Applied "' + view.name + '"');
+      },
+
+      deleteView: function (view, event) {
+        if (event) { event.stopPropagation(); }
+        if (!confirm('Delete view "' + view.name + '"?')) return;
+        this.savedViews = this.savedViews.filter(function (v) { return v.name !== view.name; });
+        this.persistSavedViews();
       },
 
       // ── Filter actions ───────────────────────────────────
@@ -602,6 +667,8 @@ document.addEventListener('alpine:init', function () {
     return {
       editStageId: 0, editRecruiterId: '', editSourceId: '', editRegionId: '',
       editMotion: 'Inbound', editKanban: 'Normal', editPostHire: '', editNotes: '',
+      editLinkedin: '', editResume: '',
+      showUrlEditor: false,   // collapsed "Add resume/LinkedIn URL" widget
 
       init: function () {
         var self = this;
@@ -616,6 +683,8 @@ document.addEventListener('alpine:init', function () {
           self.editKanban     = c.kanban_state || 'Normal';
           self.editPostHire   = c.post_hire_status || '';
           self.editNotes      = c.notes || '';
+          self.editLinkedin   = c.linkedin_url || '';
+          self.editResume     = c.resume_url || '';
         }
 
         // Always set up the watcher first — when openPeek() is in flight,
