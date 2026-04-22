@@ -4,10 +4,10 @@
   "total": 36,
   "checks": [
     {
-      "name": "Initial load shows topbar with brand and user",
+      "name": "Initial load shows topbar with brand and subtitle",
       "passed": true,
-      "details": "brand=\"TPG Recruiting ATS\" user=\"qa-user@tpg.local\"",
-      "screenshot": "01-initial-load-shows-topbar-with-brand-and-user.png"
+      "details": "brand=\"TPG Recruiting ATS\" subtitle=\"The Pipeline Group\"",
+      "screenshot": "01-initial-load-shows-topbar-with-brand-and-subtitle.png"
     },
     {
       "name": "Initial KPI strip renders all four cards",
@@ -18,7 +18,7 @@
     {
       "name": "Empty state: no candidates yet",
       "passed": true,
-      "details": "No candidates match your filters.",
+      "details": "No candidates yet. Add your first one to get started.",
       "screenshot": "03-empty-state-no-candidates-yet.png"
     },
     {
@@ -150,7 +150,7 @@
     {
       "name": "Delete-job guard prevents deleting SDR (has candidates)",
       "passed": true,
-      "details": "SDR still present (delete correctly rejected); current jobs: Account Executive (Test Delete), Sales Development Rep",
+      "details": "SDR still present (delete correctly rolled back); current jobs: Account Executive (Test Delete), Sales Development Rep",
       "screenshot": "25-delete-job-guard-prevents-deleting-sdr-has-candidates-.png"
     },
     {

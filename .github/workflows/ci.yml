@@ -1,10 +1,26 @@
 name: CI
 
+# Scope:
+#  - Pushes and PRs targeting main only (feature branches are too noisy
+#    on a solo-dev project — run locally; open a PR when you want CI).
+#  - paths-ignore skips runs for pure doc / README / gitignore changes.
+#  - workflow_dispatch lets you trigger a run manually from the Actions tab.
 on:
   push:
-    branches: ["**"]
+    branches: [main]
+    paths-ignore:
+      - '**.md'
+      - '.gitignore'
+      - 'DEPLOY.md'
   pull_request:
+    branches: [main]
   workflow_dispatch: {}
+
+# Cancel in-progress runs for the same branch when a new commit arrives.
+# Saves minutes + reduces duplicate "run failed" emails while iterating.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
 
 jobs:
   unit:

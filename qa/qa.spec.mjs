@@ -90,12 +90,16 @@ async function dismissDialog(page, action /* 'accept' | 'dismiss' */, text) {
   await page.waitForSelector('.topbar-brand', { timeout: 15_000 });
   await settle(page, 800); // wait for initial reloadAll() to finish
 
-  await check(page, 'Initial load shows topbar with brand and user', async () => {
+  await check(page, 'Initial load shows topbar with brand and subtitle', async () => {
+    // Subtitle was changed from the user's email to the static "The Pipeline
+    // Group" label once the app moved to multi-tenant use. We still want to
+    // verify both the brand title AND that the subtitle exists and is
+    // non-empty — just not that it's an email.
     const brandTitle = await page.locator('.brand-title').textContent();
-    const userEmail = await page.locator('.brand-sub').textContent();
+    const subtitle  = await page.locator('.brand-sub').textContent();
     if (!brandTitle?.includes('TPG Recruiting ATS')) throw new Error(`brand title was "${brandTitle}"`);
-    if (!userEmail?.includes('@')) throw new Error(`user email empty: "${userEmail}"`);
-    return `brand="${brandTitle?.trim()}" user="${userEmail?.trim()}"`;
+    if (!subtitle || !subtitle.trim()) throw new Error(`subtitle empty: "${subtitle}"`);
+    return `brand="${brandTitle?.trim()}" subtitle="${subtitle?.trim()}"`;
   });
 
   await check(page, 'Initial KPI strip renders all four cards', async () => {
@@ -122,7 +126,7 @@ async function dismissDialog(page, action /* 'accept' | 'dismiss' */, text) {
   // 2. Add a Job (need a job before we can add candidates)
   // ============================================================
   console.log('\n— Section 2: Add Job');
-  await page.locator('button:has-text("Add Job")').click();
+  await page.locator('.topbar button:has-text("Add Job")').click();
   await page.waitForSelector('.modal-dialog .modal-title:has-text("Add Job Opening")');
   await page.locator('.modal-dialog input[x-model="form.title"]').fill('Sales Development Rep');
   await page.locator('.modal-dialog input[x-model="form.department"]').fill('Sales');
@@ -143,7 +147,7 @@ async function dismissDialog(page, action /* 'accept' | 'dismiss' */, text) {
   });
 
   // Add a second job we'll later try to delete
-  await page.locator('button:has-text("Add Job")').click();
+  await page.locator('.topbar button:has-text("Add Job")').click();
   await page.waitForSelector('.modal-dialog .modal-title:has-text("Add Job Opening")');
   await page.locator('.modal-dialog input[x-model="form.title"]').fill('Account Executive (Test Delete)');
   await page.locator('.modal-dialog input[x-model="form.location"]').fill('NYC');
@@ -191,12 +195,14 @@ async function dismissDialog(page, action /* 'accept' | 'dismiss' */, text) {
   // 4. Add Candidate (depends on at least one Open job)
   // ============================================================
   console.log('\n— Section 4: Add Candidate');
-  await page.locator('button:has-text("Add Candidate")').click();
+  await page.locator('.topbar button:has-text("Add Candidate")').click();
   await page.waitForSelector('.modal-dialog .modal-title:has-text("Add Candidate")');
   await page.locator('.modal-dialog input[x-model="form.first_name"]').fill('Riley');
   await page.locator('.modal-dialog input[x-model="form.last_name"]').fill('Anderson');
   await page.locator('.modal-dialog input[x-model="form.email"]').fill('riley@example.com');
-  await page.locator('.modal-dialog input[x-model="form.phone"]').fill('+1-555-0100');
+  // Phone input uses :value + @input (not x-model) because it runs the
+  // live formatter on every keystroke. Select by type="tel" inside the modal.
+  await page.locator('.modal-dialog input[type="tel"]').fill('+1-555-0100');
   await page.locator('.modal-dialog select[x-model="form.job_id"]').selectOption({ label: 'Sales Development Rep' });
   await page.locator('.modal-dialog select[x-model="form.source_id"]').selectOption({ label: 'LinkedIn' });
   await page.locator('.modal-dialog select[x-model="form.region_id"]').selectOption({ label: 'US - East' });
@@ -222,7 +228,7 @@ async function dismissDialog(page, action /* 'accept' | 'dismiss' */, text) {
     { fn: 'Sam',     ln: 'Patel',   email: 'sam@example.com',     source: 'Referral', region: 'US - Central' },
     { fn: 'Quinn',   ln: 'Smith',   email: 'quinn@example.com',   source: 'Outbound', region: 'Remote'       },
   ]) {
-    await page.locator('button:has-text("Add Candidate")').click();
+    await page.locator('.topbar button:has-text("Add Candidate")').click();
     await page.waitForSelector('.modal-dialog .modal-title:has-text("Add Candidate")');
     await page.locator('.modal-dialog input[x-model="form.first_name"]').fill(c.fn);
     await page.locator('.modal-dialog input[x-model="form.last_name"]').fill(c.ln);
@@ -406,9 +412,15 @@ async function dismissDialog(page, action /* 'accept' | 'dismiss' */, text) {
   await page.waitForSelector('.peek-panel .peek-name');
   await settle(page, 300);
 
-  // Pre-arm prompt() with reason 2 (No-Show)
-  await dismissDialog(page, null, '2');
+  // Trigger the reject flow — opens the confirmReject modal (used to be a
+  // native prompt()). Pick "No-Show" from the reasons dropdown and submit.
   await page.locator('.peek-panel button:has-text("Reject")').click();
+  await page.waitForSelector('.modal-dialog .modal-title:has-text("Reject Candidate")');
+  await page.locator('.modal-dialog select[x-model="refuseReasonId"]').selectOption({ label: 'No-Show' });
+  await page.locator('.modal-dialog .modal-footer button:has-text("Reject")').click();
+  // Wait for the modal to fully close before the next section's clicks, or
+  // the modal-overlay intercepts hits.
+  await page.waitForSelector('.modal-overlay', { state: 'detached', timeout: 5000 });
   await settle(page, 700);
 
   await check(page, 'Reject moves candidate to Rejected status', async () => {
@@ -427,28 +439,33 @@ async function dismissDialog(page, action /* 'accept' | 'dismiss' */, text) {
   // 10. Delete-job guard (job with candidates)
   // ============================================================
   console.log('\n— Section 10: Delete-job guard');
-  // SDR has 4 candidates (3 active + 1 rejected) — delete must FAIL.
+  // SDR has 4 candidates (3 active + 1 rejected) — backend delete must FAIL.
+  //
+  // NOTE: Delete flow is now optimistic with a 5s undo window. The job is
+  // removed from the UI on click, the backend delete fires ~5s later. If the
+  // backend rejects (has-candidates guard), the UI rolls back the job.
+  // We wait 6s + settle before asserting to cover both steady states.
   const sdrJobCard = page.locator('.job-card').filter({ hasText: 'Sales Development Rep' });
-  // Auto-accept the confirm() that pops first
   page.on('dialog', async (d) => {
     if (d.type() === 'confirm') await d.accept();
   });
   await sdrJobCard.locator('button:has-text("Delete")').click();
+  await page.waitForTimeout(6000);  // 5s undo timer + buffer for server roundtrip
   await settle(page, 700);
 
   await check(page, 'Delete-job guard prevents deleting SDR (has candidates)', async () => {
     const titles = await page.locator('.job-card-title').allTextContents();
     if (!titles.includes('Sales Development Rep')) throw new Error(`SDR was deleted! titles=${titles.join(',')}`);
-    // Also check toast contained the error message
-    return `SDR still present (delete correctly rejected); current jobs: ${titles.join(', ')}`;
+    return `SDR still present (delete correctly rolled back); current jobs: ${titles.join(', ')}`;
   });
 
   // ============================================================
-  // 11. Delete-job allowed (no candidates)
+  // 11. Delete-job allowed (no candidates) — needs the 5s wait too
   // ============================================================
   console.log('\n— Section 11: Delete unused job');
   const aeJobCard = page.locator('.job-card').filter({ hasText: 'Account Executive (Test Delete)' });
   await aeJobCard.locator('button:has-text("Delete")').click();
+  await page.waitForTimeout(6000);  // let the undo timer expire + backend roundtrip
   await settle(page, 700);
 
   await check(page, 'Delete-job succeeds for AE (no candidates)', async () => {
