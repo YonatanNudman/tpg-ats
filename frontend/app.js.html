@@ -613,6 +613,7 @@ document.addEventListener('alpine:init', function () {
       funnelFilters:    { jobId: '', sourceId: '', recruiterId: '', preset: '', startDate: '', endDate: '' },
       recruiterFilters: { jobId: '', sourceId: '', hiresPreset: '', hiresStartDate: '', hiresEndDate: '' },
       sourceFilters:    { jobId: '', recruiterId: '', preset: '', startDate: '', endDate: '' },
+      analyticsFilters: { jobId: '', sourceId: '', recruiterId: '', preset: '', startDate: '', endDate: '' },
 
       // ── Funnel-as-primary state ──────────────────────────
       // Stage IDs currently expanded inline (one per stage; we track an
@@ -658,6 +659,7 @@ document.addEventListener('alpine:init', function () {
       // re-renders ~500ms later, which feels broken).
       recruiterLoading: false,
       sourceLoading:    false,
+      analyticsHistoricalLoading: false,
 
       analytics: {
         funnelConversion: [], timeToHireTrend: [], stageVelocity: [],
@@ -737,6 +739,7 @@ document.addEventListener('alpine:init', function () {
             funnelFilters:    this.funnelFilters,
             recruiterFilters: this.recruiterFilters,
             sourceFilters:    this.sourceFilters,
+            analyticsFilters: this.analyticsFilters,
             expandedStages:   this.expandedStages,
             // Collapse state for the 3 primary dashboards. Persisted so
             // a recruiter who collapsed Sourcing ROI to focus on the
@@ -760,6 +763,7 @@ document.addEventListener('alpine:init', function () {
             if (snap.funnelFilters)    Object.assign(this.funnelFilters,    snap.funnelFilters);
             if (snap.recruiterFilters) Object.assign(this.recruiterFilters, snap.recruiterFilters);
             if (snap.sourceFilters)    Object.assign(this.sourceFilters,    snap.sourceFilters);
+            if (snap.analyticsFilters) Object.assign(this.analyticsFilters, snap.analyticsFilters);
             if (Array.isArray(snap.expandedStages)) this.expandedStages = snap.expandedStages.slice();
             if (typeof snap.showFunnel     === 'boolean') this.showFunnel     = snap.showFunnel;
             if (typeof snap.showRecruiters === 'boolean') this.showRecruiters = snap.showRecruiters;
@@ -1058,6 +1062,19 @@ document.addEventListener('alpine:init', function () {
             this.sourceFilters.startDate = range.start;
             this.sourceFilters.endDate   = range.end;
           }
+        } else if (section === 'analytics') {
+          preset = this.analyticsFilters.preset;
+          if (preset === 'custom') {
+            if (!this.analyticsFilters.startDate || !this.analyticsFilters.endDate) {
+              range = presetRange('30d');
+              this.analyticsFilters.startDate = this.analyticsFilters.startDate || range.start;
+              this.analyticsFilters.endDate   = this.analyticsFilters.endDate   || range.end;
+            }
+          } else {
+            range = preset ? presetRange(preset) : { start: '', end: '' };
+            this.analyticsFilters.startDate = range.start;
+            this.analyticsFilters.endDate   = range.end;
+          }
         }
       },
 
@@ -1075,6 +1092,8 @@ document.addEventListener('alpine:init', function () {
           f = this.recruiterFilters; sKey = 'hiresStartDate'; eKey = 'hiresEndDate';
         } else if (section === 'source') {
           f = this.sourceFilters; sKey = 'startDate'; eKey = 'endDate';
+        } else if (section === 'analytics') {
+          f = this.analyticsFilters; sKey = 'startDate'; eKey = 'endDate';
         } else {
           return;
         }
@@ -1084,6 +1103,7 @@ document.addEventListener('alpine:init', function () {
         this._persistSectionState();
         if (section === 'recruiterHires') this.reloadRecruiterPerf();
         else if (section === 'source')    this.reloadSourceEffectiveness();
+        else if (section === 'analytics') this.reloadAnalyticsHistorical();
         // Funnel is client-side derived from allCandidates so no refetch
         // needed — the reactive getter picks up the new dates automatically.
       },
@@ -1105,6 +1125,9 @@ document.addEventListener('alpine:init', function () {
         } else if (section === 'source') {
           this.sourceFilters = { jobId: '', recruiterId: '', preset: '', startDate: '', endDate: '' };
           this.reloadSourceEffectiveness();   // persists on success
+        } else if (section === 'analytics') {
+          this.analyticsFilters = { jobId: '', sourceId: '', recruiterId: '', preset: '', startDate: '', endDate: '' };
+          this.reloadAnalyticsHistorical();   // persists on success
         }
       },
 
@@ -1481,6 +1504,33 @@ document.addEventListener('alpine:init', function () {
           Alpine.store('app').toastError('Source ROI reload failed: ' + e.message);
         } finally {
           this.sourceLoading = false;
+        }
+      },
+
+      // Bottom-of-page Analytics section refetch. Routes through
+      // getAnalyticsHistorical, which returns just the three panels
+      // (funnelConversion, timeToHireTrend, stageVelocity) so we don't
+      // churn the recruiter perf / source ROI / SLA / stale state the
+      // user may have separately filtered on.
+      reloadAnalyticsHistorical: async function () {
+        var f = this.mergeSectionFilters(this.analyticsFilters);
+        this.analyticsHistoricalLoading = true;
+        try {
+          var a = await gasCall('getAnalyticsHistorical', f);
+          this.analytics = {
+            funnelConversion: a.funnelConversion,
+            timeToHireTrend:  a.timeToHireTrend,
+            stageVelocity:    a.stageVelocity,
+          };
+          // Charts only render when the Analytics section is open.
+          // Defer to next tick so the DOM is stable before Chart.js
+          // recomputes the canvases.
+          this.$nextTick(this.renderCharts.bind(this));
+          this._persistSectionState();
+        } catch (e) {
+          Alpine.store('app').toastError('Analytics reload failed: ' + e.message);
+        } finally {
+          this.analyticsHistoricalLoading = false;
         }
       },
 

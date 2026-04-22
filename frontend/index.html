@@ -1064,12 +1064,74 @@
 
     <!-- ── Analytics sections (collapsible) ─────────────── -->
     <div class="card section-card" id="sec-analytics">
-      <div class="card-header clickable" @click="showAnalytics = !showAnalytics">
-        <span class="card-title">
-          <span class="material-icons mi-inline">insights</span>
-          Analytics
-        </span>
-        <span class="material-icons collapse-icon" x-text="showAnalytics ? 'expand_less' : 'expand_more'"></span>
+      <div class="card-header section-card-header">
+        <div class="section-card-header-row clickable" @click="showAnalytics = !showAnalytics">
+          <span class="card-title">
+            <span class="material-icons mi-inline">insights</span>
+            Analytics
+            <span class="section-loading-pip" x-show="analyticsHistoricalLoading"
+                  title="Refreshing\u2026" aria-hidden="true"></span>
+          </span>
+          <span class="material-icons collapse-icon" x-text="showAnalytics ? 'expand_less' : 'expand_more'"></span>
+        </div>
+        <!--
+          Per-section filter row \u2014 mirrors the funnel / recruiter / source
+          pattern. Each blank value = inherit from the global filter bar;
+          non-empty overrides for this section only. timeToHireTrend now
+          honors the merged filter (it was previously unfiltered) so all
+          three panels respond consistently.
+        -->
+        <div class="section-filters" x-show="showAnalytics" @click.stop>
+          <select class="section-filter" x-model="analyticsFilters.jobId"
+                  @change="reloadAnalyticsHistorical()">
+            <option value="">Job (global)</option>
+            <template x-for="j in jobs" :key="j.id">
+              <option :value="j.id" x-text="j.title"></option>
+            </template>
+          </select>
+          <select class="section-filter" x-model="analyticsFilters.sourceId"
+                  @change="reloadAnalyticsHistorical()">
+            <option value="">Source (global)</option>
+            <template x-for="s in settings.sources.filter(x => x.is_enabled)" :key="s.id">
+              <option :value="s.id" x-text="s.name"></option>
+            </template>
+          </select>
+          <select class="section-filter" x-model="analyticsFilters.recruiterId"
+                  @change="reloadAnalyticsHistorical()">
+            <option value="">Recruiter (global)</option>
+            <option value="__unassigned__">&mdash; Unassigned &mdash;</option>
+            <template x-for="r in settings.recruiters.filter(x => x.is_active)" :key="r.id">
+              <option :value="r.id" x-text="r.name"></option>
+            </template>
+          </select>
+          <select class="section-filter" x-model="analyticsFilters.preset"
+                  @change="onSectionPresetChange('analytics'); reloadAnalyticsHistorical()">
+            <option value="">Period (global)</option>
+            <option value="7d">Last 7 Days</option>
+            <option value="30d">Last 30 Days</option>
+            <option value="90d">Last 90 Days</option>
+            <option value="6m">Last 6 Months</option>
+            <option value="1y">Last Year</option>
+            <option value="all">All Time</option>
+            <option value="custom">Custom range&hellip;</option>
+          </select>
+          <template x-if="analyticsFilters.preset === 'custom'">
+            <span class="section-custom-date-row">
+              <input type="date" class="section-custom-date-input"
+                x-model="analyticsFilters.startDate"
+                @change="onSectionCustomDateChange('analytics')"
+                aria-label="From date">
+              <span class="section-custom-date-sep">&ndash;</span>
+              <input type="date" class="section-custom-date-input"
+                x-model="analyticsFilters.endDate"
+                @change="onSectionCustomDateChange('analytics')"
+                aria-label="To date">
+            </span>
+          </template>
+          <button class="icon-btn-sm section-filter-reset"
+                  @click="resetSectionFilters('analytics')"
+                  title="Reset Analytics filters to global defaults">&times;</button>
+        </div>
       </div>
 
       <div class="card-body" x-show="showAnalytics">

@@ -34,6 +34,7 @@ import {
   computeStageVelocity,
   computeSlaBreaches,
   computeStaleCandidates,
+  filterCandidates,
 } from "./Analytics";
 import type {
   SettingsResult,
@@ -861,6 +862,34 @@ function getRecruiterPerformance(
 function getSourceEffectiveness(filters: DashboardFilters): import("./types").SourceEffectivenessItem[] {
   const db = getDB();
   return computeSourceEffectiveness(db.getAllCandidates(), db.getAllSources(), filters);
+}
+
+/**
+ * Bottom-of-page Analytics section — funnel conversion, time-to-hire trend,
+ * and stage velocity. Splits out from the legacy getDashboardData bundle so
+ * the section's own filter row (added per user request: "all analytics
+ * should have filters applicable to them") can refetch JUST these three
+ * panels without churning the recruiter perf / source ROI / SLA breach
+ * computations the user may have separately filtered.
+ *
+ * timeToHireTrend gets a pre-filtered candidate slice via filterCandidates
+ * so it honors the section filters too — previously it was unfiltered and
+ * always showed all-time hires regardless of the global filter bar.
+ */
+function getAnalyticsHistorical(filters: DashboardFilters): {
+  funnelConversion: import("./types").FunnelItem[];
+  timeToHireTrend:  import("./types").MonthlyTrendItem[];
+  stageVelocity:    import("./types").StageVelocityItem[];
+} {
+  const db = getDB();
+  const candidates = db.getAllCandidates();
+  const stages     = db.getAllStages();
+  const allHistory = db.getAllHistory();
+  return {
+    funnelConversion: computeFunnelConversion(allHistory, stages, filters),
+    timeToHireTrend:  computeTimeToHireTrend(filterCandidates(candidates, filters)),
+    stageVelocity:    computeStageVelocity(allHistory, stages, filters),
+  };
 }
 
 // ============================================================
