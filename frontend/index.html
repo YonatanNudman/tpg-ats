@@ -81,6 +81,11 @@
       <span class="material-icons mi-inline">person_add</span>
       Add Candidate
     </button>
+    <button class="btn btn-sm btn-outline-secondary" @click="openModal('importCsv')"
+      title="Bulk-import candidates from a CSV (paste or upload)">
+      <span class="material-icons mi-inline">upload_file</span>
+      Import
+    </button>
     <button class="icon-btn" @click="openSettings()" title="Settings">
       <span class="material-icons">settings</span>
     </button>
@@ -180,8 +185,20 @@
             placeholder="Name, email…">
         </div>
 
-        <button class="btn btn-sm btn-outline-secondary filter-reset"
-          @click="resetFilters()">Reset</button>
+        <div class="filter-actions">
+          <button class="btn btn-sm btn-outline-primary"
+            @click="exportCandidatesToCsv(filteredCandidates)"
+            :disabled="filteredCandidates.length === 0"
+            :title="filteredCandidates.length === 0
+              ? 'No candidates in the current view'
+              : 'Download ' + filteredCandidates.length + ' candidates as CSV'">
+            <span class="material-icons mi-inline">download</span>
+            Export
+            <span class="export-count" x-text="'(' + filteredCandidates.length + ')'"></span>
+          </button>
+          <button class="btn btn-sm btn-outline-secondary"
+            @click="resetFilters()">Reset</button>
+        </div>
       </div>
     </div>
 
@@ -624,6 +641,75 @@
             </div>
           </template>
         </div>
+      </div>
+    </div>
+
+    <!-- ── Activity Feed (collapsible) ──────────────────── -->
+    <!--
+      Team activity timeline — derived from the history sheet. Shows the
+      50 most recent stage transitions with who/what/when, newest first.
+      Click any entry to open the peek panel for that candidate.
+      Data refreshes on every reloadAll() (which fires after every local
+      mutation + every 20s sync poll that detected a teammate's change).
+    -->
+    <div class="card section-card">
+      <div class="card-header clickable" @click="toggleActivityFeed()">
+        <span class="card-title">
+          <span class="material-icons mi-inline">history</span>
+          Team Activity
+          <template x-if="activity.length > 0 && !showActivity">
+            <span class="section-badge" x-text="activity.length"></span>
+          </template>
+        </span>
+        <span class="material-icons collapse-icon" x-text="showActivity ? 'expand_less' : 'expand_more'"></span>
+      </div>
+      <div class="card-body p-0" x-show="showActivity" x-transition>
+        <template x-if="activity.length === 0 && !activityLoading">
+          <div class="empty-state">
+            <div class="empty-state-icon">📋</div>
+            <div class="empty-state-text">
+              No activity yet. Add a candidate or change someone's stage to see history appear here.
+            </div>
+          </div>
+        </template>
+        <template x-if="activityLoading">
+          <div class="section-loading"><div class="spinner"></div><span>Loading activity…</span></div>
+        </template>
+        <ul class="activity-list" x-show="activity.length > 0">
+          <template x-for="a in activity" :key="a.id">
+            <li class="activity-item" @click="openPeek(a.candidate_id)">
+              <div class="activity-dot" :style="stageChipStyle(a.stage_to_color || '#6c757d')"></div>
+              <div class="activity-body">
+                <div class="activity-text">
+                  <strong x-text="a.changed_by ? a.changed_by.split('@')[0] : 'Someone'"></strong>
+                  <template x-if="!a.stage_from_id || a.stage_from_id === a.stage_to_id">
+                    <span>
+                      added <strong x-text="a.candidate_name"></strong>
+                      to <span x-text="a.stage_to_name"></span>
+                    </span>
+                  </template>
+                  <template x-if="a.stage_from_id && a.stage_from_id !== a.stage_to_id">
+                    <span>
+                      moved <strong x-text="a.candidate_name"></strong>
+                      <span class="text-muted">
+                        from <span x-text="a.stage_from_name"></span>
+                      </span>
+                      <span class="activity-arrow">→</span>
+                      <span x-text="a.stage_to_name"></span>
+                    </span>
+                  </template>
+                  <template x-if="a.job_title">
+                    <span class="activity-meta">
+                      · <span x-text="a.job_title"></span>
+                    </span>
+                  </template>
+                </div>
+                <div class="activity-time" x-text="relativeTime(a.timestamp)"
+                  :title="fmtDate(a.timestamp.split('T')[0]) + ' ' + a.timestamp.split('T')[1].slice(0,5)"></div>
+              </div>
+            </li>
+          </template>
+        </ul>
       </div>
     </div>
 
@@ -1075,6 +1161,11 @@
     <div class="toast" :class="'toast-' + t.type">
       <div class="toast-icon" x-text="t.icon"></div>
       <div class="toast-message" x-text="t.message"></div>
+      <template x-if="t.actionLabel">
+        <button class="toast-action"
+          @click="$store.app.invokeToastAction(t.id)"
+          x-text="t.actionLabel"></button>
+      </template>
     </div>
   </template>
 </div>

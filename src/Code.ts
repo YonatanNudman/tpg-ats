@@ -598,3 +598,120 @@ function getRecentHires(days = 90): CandidateRow[] {
       db.getAllSources(), db.getAllRegions(), db.getAllRefuseReasons()
     ));
 }
+
+/**
+ * Recent team activity — powered by the existing history sheet.
+ * Returns the N most recent history entries, each a stage transition
+ * with who/what/when already denormalized. The frontend turns each row
+ * into a human sentence ("Brad moved Sarah from Reviewed → Contacted 2h ago").
+ *
+ * Single `getAllHistory` scan + client-side sort, so this is O(n) over
+ * total history rows. Current-period filter is a frontend concern (user
+ * might want "this week" vs "last 30 days").
+ */
+/**
+ * Bulk create candidates in one locked transaction.
+ * Accepts an array of CreateCandidateInput — each validated the same way
+ * createCandidate does. Failures are collected per-row and returned so the
+ * UI can show "24 created, 2 skipped with reasons". Held-lock window is
+ * the whole batch, so concurrent single-adds queue behind it.
+ */
+function bulkCreateCandidates(rows: CreateCandidateInput[]): {
+  created: number;
+  skipped: Array<{ row: number; email: string; reason: string }>;
+  ids: number[];
+} {
+  if (!Array.isArray(rows) || rows.length === 0) {
+    throw new Error("No rows to import");
+  }
+  // Hard cap to protect GAS's 6-minute execution budget
+  if (rows.length > 500) {
+    throw new Error("Import limited to 500 candidates per batch (received " + rows.length + ")");
+  }
+  return withLock(() => {
+    const db = getDB();
+    const stages = db.getAllStages()
+      .filter(s => s.is_enabled)
+      .sort((a, b) => a.sequence - b.sequence);
+    if (stages.length === 0) throw new Error("No pipeline stages configured");
+    const firstStage = stages[0];
+    const today = todayStr();
+    const userEmail = getSessionEmail();
+    const sources = db.getAllSources();
+
+    const skipped: Array<{ row: number; email: string; reason: string }> = [];
+    const ids: number[] = [];
+    let created = 0;
+
+    rows.forEach((data, i) => {
+      try {
+        if (!data.first_name || !data.last_name) {
+          skipped.push({ row: i + 1, email: data.email || "", reason: "Missing name" });
+          return;
+        }
+        if (!data.email) {
+          skipped.push({ row: i + 1, email: "", reason: "Missing email" });
+          return;
+        }
+        if (!data.job_id) {
+          skipped.push({ row: i + 1, email: data.email, reason: "Missing job_id" });
+          return;
+        }
+
+        let motion = data.motion ?? "Inbound";
+        if (data.source_id) {
+          const src = sources.find(s => s.id === data.source_id);
+          if (src) motion = src.default_motion;
+        }
+
+        const candidate = db.appendCandidate({
+          first_name: data.first_name,
+          last_name: data.last_name,
+          email: data.email,
+          phone: data.phone || "",
+          job_id: data.job_id,
+          stage_id: firstStage.id,
+          recruiter_id: null,
+          source_id: data.source_id ?? null,
+          region_id: data.region_id ?? null,
+          motion,
+          status: "Active",
+          rating: 0,
+          linkedin_url: "",
+          resume_url: "",
+          notes: data.notes ?? "",
+          refuse_reason_id: null,
+          kanban_state: "Normal",
+          post_hire_status: "",
+          date_applied: today,
+          date_last_stage_update: today,
+          created_by: userEmail,
+          created_at: nowStr(),
+        });
+
+        logHistory(
+          db,
+          candidate.id, `${data.first_name} ${data.last_name}`,
+          data.job_id, db.getJobById(data.job_id)?.title ?? "",
+          null, "",
+          firstStage.id, firstStage.name,
+          userEmail, today
+        );
+
+        ids.push(candidate.id);
+        created++;
+      } catch (err: any) {
+        skipped.push({ row: i + 1, email: data.email || "", reason: err.message || String(err) });
+      }
+    });
+
+    return { created, skipped, ids };
+  });
+}
+
+function getRecentActivity(limit = 50): import("./types").HistoryRow[] {
+  const history = getDB().getAllHistory();
+  // Newest first — timestamp is an ISO string, lexicographic compare is fine
+  history.sort((a, b) => (b.timestamp || "").localeCompare(a.timestamp || ""));
+  return history.slice(0, Math.max(1, Math.min(200, limit | 0)));
+}

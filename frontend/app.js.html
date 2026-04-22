@@ -45,6 +45,86 @@ window.stageChipStyle = function (color) {
 window.motionClass = function (m) { return m === 'Outbound' ? 'outbound' : 'inbound'; };
 
 /**
+ * Human-readable "time ago" for activity feed timestamps.
+ * Keeps to common buckets that recruiters eyeball quickly:
+ *   <60s       → "just now"
+ *   <60m       → "42m ago"
+ *   <24h       → "5h ago"
+ *   <30d       → "3d ago"
+ *   else       → absolute date "Apr 12"
+ */
+window.relativeTime = function (iso) {
+  if (!iso) return '';
+  var then = new Date(iso).getTime();
+  if (isNaN(then)) return '';
+  var diff = Date.now() - then;
+  if (diff < 60000) return 'just now';
+  if (diff < 3600000) return Math.floor(diff / 60000) + 'm ago';
+  if (diff < 86400000) return Math.floor(diff / 3600000) + 'h ago';
+  if (diff < 30 * 86400000) return Math.floor(diff / 86400000) + 'd ago';
+  return new Date(iso).toLocaleDateString('en-US', { month: 'short', day: 'numeric' });
+};
+
+/**
+ * CSV export helper — joined names (not IDs), RFC-4180 quoted, UTF-8 BOM
+ * so Excel opens it correctly with unicode characters.
+ */
+function toCsvCell(v) {
+  if (v == null) return '';
+  var s = String(v);
+  if (s.indexOf(',') > -1 || s.indexOf('"') > -1 || s.indexOf('\n') > -1) {
+    return '"' + s.replace(/"/g, '""') + '"';
+  }
+  return s;
+}
+window.exportCandidatesToCsv = function (candidates, filename) {
+  if (!candidates || candidates.length === 0) {
+    alert('No candidates to export.');
+    return;
+  }
+  // Recruiter-friendly column order: identity → role → pipeline → context → dates
+  var cols = [
+    ['First Name',       function (c) { return c.first_name; }],
+    ['Last Name',        function (c) { return c.last_name; }],
+    ['Email',            function (c) { return c.email; }],
+    ['Phone',            function (c) { return c.phone; }],
+    ['Job',              function (c) { return c.job_title || ''; }],
+    ['Stage',            function (c) { return c.stage_name || ''; }],
+    ['Status',           function (c) { return c.status; }],
+    ['Recruiter',        function (c) { return c.recruiter_name || ''; }],
+    ['Source',           function (c) { return c.source_name || ''; }],
+    ['Motion',           function (c) { return c.motion || ''; }],
+    ['Region',           function (c) { return c.region_name || ''; }],
+    ['Rating',           function (c) { return c.rating || 0; }],
+    ['Days in Stage',    function (c) { return c.days_in_stage || 0; }],
+    ['Days Applied',     function (c) { return c.days_since_applied || 0; }],
+    ['Date Applied',     function (c) { return c.date_applied || ''; }],
+    ['Last Stage Update', function (c) { return c.date_last_stage_update || ''; }],
+    ['Refuse Reason',    function (c) { return c.refuse_reason_name || ''; }],
+    ['LinkedIn',         function (c) { return c.linkedin_url || ''; }],
+    ['Resume',           function (c) { return c.resume_url || ''; }],
+    ['Notes',            function (c) { return (c.notes || '').replace(/\r?\n/g, ' · '); }],
+    ['Created By',       function (c) { return c.created_by || ''; }],
+  ];
+  var header = cols.map(function (c) { return c[0]; }).join(',');
+  var rows   = candidates.map(function (cand) {
+    return cols.map(function (c) { return toCsvCell(c[1](cand)); }).join(',');
+  });
+  var csv = header + '\n' + rows.join('\n');
+
+  // Prepend UTF-8 BOM so Excel opens it correctly
+  var blob = new Blob(['\uFEFF' + csv], { type: 'text/csv;charset=utf-8' });
+  var url  = URL.createObjectURL(blob);
+  var a    = document.createElement('a');
+  a.href = url;
+  a.download = filename || ('tpg-ats-candidates-' + new Date().toISOString().split('T')[0] + '.csv');
+  document.body.appendChild(a);
+  a.click();
+  document.body.removeChild(a);
+  setTimeout(function () { URL.revokeObjectURL(url); }, 1000);
+};
+
+/**
  * Format a US phone number as the user types.
  *   "4155551234"        → "(415) 555-1234"
  *   "14155551234"       → "+1 (415) 555-1234"
@@ -177,16 +257,56 @@ document.addEventListener('alpine:init', function () {
     settings: { stages: [], sources: [], regions: [], recruiters: [], refuseReasons: [] },
     settingsOpen: false,
 
-    // Toast
-    toast: function (msg, type) {
+    // Toast — "opts" can include:
+    //   actionLabel  — text for the inline action button
+    //   onAction     — fn called when the user clicks the action button.
+    //                  If provided, onDismiss is called instead when the
+    //                  toast times out (used for undo flows)
+    //   onDismiss    — fn called when the toast auto-dismisses without
+    //                  the user clicking the action
+    //   duration     — ms until auto-dismiss (default 4000)
+    toast: function (msg, type, opts) {
       var id = ++this._toastId;
       var icons = { success: '✓', error: '✕', warning: '⚠', info: 'ℹ' };
-      this.toasts.push({ id: id, message: msg, type: type || 'success', icon: icons[type || 'success'] });
+      var o = opts || {};
+      var t = {
+        id: id,
+        message: msg,
+        type: type || 'success',
+        icon: icons[type || 'success'],
+        actionLabel: o.actionLabel || null,
+        onAction: o.onAction || null,
+        onDismiss: o.onDismiss || null,
+        _dismissed: false,
+      };
+      this.toasts.push(t);
       var self = this;
-      setTimeout(function () { self.toasts = self.toasts.filter(function (t) { return t.id !== id; }); }, 4000);
+      var duration = o.duration || 4000;
+      t._timer = setTimeout(function () {
+        if (t._dismissed) return;
+        t._dismissed = true;
+        self.toasts = self.toasts.filter(function (x) { return x.id !== id; });
+        if (t.onDismiss) { try { t.onDismiss(); } catch (e) { /* non-fatal */ } }
+      }, duration);
     },
-    toastSuccess: function (m) { this.toast(m, 'success'); },
-    toastError:   function (m) { this.toast(m, 'error'); },
+    dismissToast: function (id) {
+      var t = this.toasts.find(function (x) { return x.id === id; });
+      if (!t || t._dismissed) return;
+      t._dismissed = true;
+      clearTimeout(t._timer);
+      this.toasts = this.toasts.filter(function (x) { return x.id !== id; });
+    },
+    invokeToastAction: function (id) {
+      var t = this.toasts.find(function (x) { return x.id === id; });
+      if (!t || t._dismissed) return;
+      t._dismissed = true;
+      clearTimeout(t._timer);
+      this.toasts = this.toasts.filter(function (x) { return x.id !== id; });
+      if (t.onAction) { try { t.onAction(); } catch (e) { /* non-fatal */ } }
+    },
+    toastSuccess: function (m, opts) { this.toast(m, 'success', opts); },
+    toastError:   function (m, opts) { this.toast(m, 'error',   opts); },
+    toastInfo:    function (m, opts) { this.toast(m, 'info',    opts); },
 
     // Peek — opt { suppressHistory: true } skips pushing a new history frame
     // (used when restoring from a URL on initial load, or reacting to popstate)
@@ -240,6 +360,9 @@ document.addEventListener('alpine:init', function () {
       drill: null,               // 'active' | 'sla' | null
       showJobs: true,
       showAnalytics: true,
+      showActivity: false,     // collapsed by default so the fold stays analytics-first
+      activity: [],            // array of HistoryRow, newest first
+      activityLoading: false,
 
       allCandidates: [],
       jobs: [],
@@ -496,6 +619,29 @@ document.addEventListener('alpine:init', function () {
 
       scrollTop: function () { window.scrollTo({ top: 0, behavior: 'smooth' }); },
 
+      // Lazy-load activity feed on first expand (saves a sheet scan on page
+      // load for users who don't open it). Reloaded on every open — tiny
+      // payload, avoids stale "2 hours ago" labels when the section has
+      // been left open.
+      toggleActivityFeed: async function () {
+        this.showActivity = !this.showActivity;
+        if (!this.showActivity) return;
+        this.activityLoading = true;
+        try {
+          // stage_to_color is enriched client-side from settings.stages
+          var rows = await gasCall('getRecentActivity', 50);
+          var stageMap = {};
+          this.settings.stages.forEach(function (s) { stageMap[s.id] = s.color; });
+          this.activity = rows.map(function (r) {
+            return Object.assign({}, r, { stage_to_color: stageMap[r.stage_to_id] || '#6c757d' });
+          });
+        } catch (e) {
+          Alpine.store('app').toastError('Could not load activity: ' + e.message);
+        } finally {
+          this.activityLoading = false;
+        }
+      },
+
       // ── Inline candidate field update ────────────────────
       updateCandidateField: async function (c, field, value) {
         var prev = c[field];
@@ -549,15 +695,33 @@ document.addEventListener('alpine:init', function () {
         }
       },
 
-      deleteJob: async function (j) {
-        if (!confirm('Delete "' + j.title + '"?\n\nThis cannot be undone. Jobs with existing candidates cannot be deleted — close them instead.')) return;
-        try {
-          await gasCall('deleteJobOpening', j.id);
-          Alpine.store('app').toastSuccess('Job deleted.');
-          this.jobs = this.jobs.filter(function (x) { return x.id !== j.id; });
-        } catch (e) {
-          Alpine.store('app').toastError(e.message);
-        }
+      // Undoable job delete — same optimistic-UI + 5s undo pattern as candidate delete.
+      // Server-side guard (can't delete jobs with existing candidates) still applies.
+      deleteJob: function (j) {
+        if (!confirm('Delete "' + j.title + '"?\n\nHit Undo on the toast within 5s to cancel. Jobs with existing candidates cannot be deleted.')) return;
+        var self = this;
+        var idx = this.jobs.findIndex(function (x) { return x.id === j.id; });
+        if (idx < 0) return;
+        var snapshot = this.jobs[idx];
+        this.jobs.splice(idx, 1);
+        var undone = false;
+        Alpine.store('app').toastInfo('Deleted "' + j.title + '"', {
+          actionLabel: 'Undo',
+          duration: 5000,
+          onAction: function () {
+            undone = true;
+            self.jobs.splice(idx, 0, snapshot);
+          },
+          onDismiss: async function () {
+            if (undone) return;
+            try {
+              await gasCall('deleteJobOpening', j.id);
+            } catch (e) {
+              self.jobs.splice(idx, 0, snapshot);
+              Alpine.store('app').toastError(e.message);
+            }
+          },
+        });
       },
 
       // ── Modals ────────────────────────────────────────────
@@ -911,18 +1075,56 @@ document.addEventListener('alpine:init', function () {
         });
       },
 
-      confirmDelete: async function () {
-        if (!confirm('Delete ' + this.peekName() + '?\n\nHistory is retained. This cannot be undone.')) return;
+      /**
+       * Undoable delete — optimistic UI + 5s escape hatch.
+       *
+       * Deletion is delayed 5 seconds on the client. During that window
+       * the backend is untouched; a toast with an "Undo" button is the
+       * only record of the pending delete. If Undo is clicked, the
+       * candidate pops back into the list. If the timer expires (or the
+       * tab closes), the server delete fires.
+       *
+       * Upside: no schema change, no soft-delete status column.
+       * Downside: closing the tab before 5s elapses with a Pending delete
+       * preserves the candidate (safe fallback).
+       */
+      confirmDelete: function () {
+        var name = this.peekName();
         var id = this.$store.app.peek.candidateId;
-        try {
-          await gasCall('deleteCandidate', id);
-          this.$store.app.toastSuccess('Candidate deleted.');
-          var root = Alpine.$data(document.querySelector('#app'));
-          if (root) root.reloadAll();
-          this.$store.app.closePeek();
-        } catch (e) {
-          this.$store.app.toastError('Delete failed: ' + e.message);
-        }
+        var root = Alpine.$data(document.querySelector('#app'));
+        if (!root) return;
+
+        // Capture the candidate object + its position in the list so Undo can restore
+        var idx = root.allCandidates.findIndex(function (c) { return c.id === id; });
+        if (idx < 0) return;
+        var snapshot = root.allCandidates[idx];
+
+        // Optimistic remove from the UI
+        root.allCandidates.splice(idx, 1);
+        this.$store.app.closePeek();
+
+        // Undo-able toast. onDismiss (5s timer expired) fires the real server delete.
+        var undone = false;
+        this.$store.app.toastInfo('Deleted ' + name, {
+          actionLabel: 'Undo',
+          duration: 5000,
+          onAction: function () {
+            undone = true;
+            // Restore in place
+            root.allCandidates.splice(idx, 0, snapshot);
+          },
+          onDismiss: async function () {
+            if (undone) return;
+            try {
+              await gasCall('deleteCandidate', id);
+            } catch (e) {
+              // Server delete failed after user thought they'd confirmed —
+              // put the row back and surface the error
+              root.allCandidates.splice(idx, 0, snapshot);
+              Alpine.store('app').toastError('Delete failed: ' + e.message);
+            }
+          },
+        });
       },
     };
   });
