@@ -89,18 +89,25 @@
       </div>
     </template>
 
-    <!-- Manual refresh — users can force a reload without waiting 20s -->
-    <button class="icon-btn refresh-btn" :class="{ 'spinning': syncing }"
+    <!--
+      Topbar tooltip system: data-tooltip + aria-label replaces the
+      native title attribute. Native tooltips have a ~1.5s delay
+      and OS-styled chrome; the CSS .has-tooltip rule animates a
+      consistent dark pill in ~150ms which matches the rest of the
+      app's micro-interactions.
+    -->
+    <button class="icon-btn refresh-btn has-tooltip" :class="{ 'spinning': syncing }"
       :disabled="syncing" @click="manualRefresh()"
-      title="Refresh now (auto-syncs every 20s)">
+      data-tooltip="Refresh now (auto-syncs every 20s)"
+      aria-label="Refresh now">
       <span class="material-icons">refresh</span>
     </button>
 
     <!-- Sync indicator -->
-    <div class="sync-indicator" :class="{ 'syncing': syncing, 'stale': syncStale }"
-      :title="syncStale ? 'Data may be stale — reloading…' : 'Live (auto-syncs every 20s)'">
+    <div class="sync-indicator has-tooltip" :class="{ 'syncing': syncing, 'stale': syncStale }"
+      :data-tooltip="syncStale ? 'Data may be stale \u2014 reloading\u2026' : 'Live \u2014 auto-syncs every 20s'">
       <span class="sync-dot"></span>
-      <span x-text="syncing ? 'Syncing…' : (syncStale ? 'Refreshing' : 'Live')"></span>
+      <span x-text="syncing ? 'Syncing\u2026' : (syncStale ? 'Refreshing' : 'Live')"></span>
     </div>
 
     <!--
@@ -111,13 +118,15 @@
       icon-only because it's a bulk-occasional action and the textual
       label was crowding the bar.
     -->
-    <button class="btn btn-sm btn-primary" @click="openModal('addCandidate')"
-      title="Add a single candidate">
+    <button class="btn btn-sm btn-primary has-tooltip" @click="openModal('addCandidate')"
+      data-tooltip="Add a single candidate to a job"
+      aria-label="Add candidate">
       <span class="material-icons mi-inline">person_add</span>
       Add Candidate
     </button>
-    <button class="btn btn-sm btn-link topbar-link-btn" @click="openModal('addJob')"
-      title="Open a new job">
+    <button class="btn btn-sm btn-link topbar-link-btn has-tooltip" @click="openModal('addJob')"
+      data-tooltip="Open a new job (define title, headcount, recruiter, etc.)"
+      aria-label="Add job">
       <span class="material-icons mi-inline">work</span>
       Add Job
     </button>
@@ -130,14 +139,17 @@
       what you're about to download without having to look at the
       filter card.
     -->
-    <button class="icon-btn" @click="exportCandidatesToCsv(filteredCandidates)"
+    <button class="icon-btn has-tooltip" @click="exportCandidatesToCsv(filteredCandidates)"
       :disabled="filteredCandidates.length === 0"
-      :title="filteredCandidates.length === 0
-        ? 'No candidates in the current view to export'
-        : 'Export ' + filteredCandidates.length + ' candidates to CSV'">
+      :data-tooltip="filteredCandidates.length === 0
+        ? 'Export to CSV (no candidates in the current view)'
+        : 'Export ' + filteredCandidates.length + ' candidates to CSV'"
+      aria-label="Export candidates to CSV">
       <span class="material-icons">download</span>
     </button>
-    <button class="icon-btn" @click="openSettings()" title="Settings">
+    <button class="icon-btn has-tooltip" @click="openSettings()"
+      data-tooltip="Settings (recruiters, stages, sources, regions, refuse reasons)"
+      aria-label="Settings">
       <span class="material-icons">settings</span>
     </button>
   </header>

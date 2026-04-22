@@ -133,6 +133,76 @@ html, body {
 .icon-btn.spinning .material-icons { animation: spin 0.9s linear infinite; }
 @keyframes spin { to { transform: rotate(360deg); } }
 
+/* ── Hover tooltips ──────────────────────────────────────────
+   data-tooltip + .has-tooltip drives a fast custom tooltip pill
+   that replaces the native title attribute. Native tooltips have
+   a ~1.5s OS-controlled delay and can't be styled to match the
+   rest of the app. The CSS-only version below appears in 150ms,
+   sits below the trigger, and uses the same dark-pill aesthetic
+   as the toast pills.
+
+   The two pseudo-elements (::before is the bubble, ::after is the
+   little caret arrow on top) are positioned with calc-relative
+   offsets so the bubble works on both square icon buttons and
+   wider text buttons without per-element tweaking.
+
+   Disabled buttons still show a tooltip \u2014 it's the most useful
+   case ('why is this disabled?').
+
+   Hidden by default via opacity:0 + pointer-events:none so the
+   bubble never intercepts clicks or shows residue when the
+   element is briefly hovered.
+*/
+.has-tooltip { position: relative; }
+.has-tooltip::before,
+.has-tooltip::after {
+  position: absolute;
+  pointer-events: none;
+  opacity: 0;
+  transform: translateY(-2px);
+  transition: opacity 0.12s ease 0.12s, transform 0.12s ease 0.12s;
+  z-index: 200;
+}
+.has-tooltip::before {
+  content: attr(data-tooltip);
+  top: calc(100% + 8px);
+  left: 50%;
+  transform: translate(-50%, -2px);
+  background: rgba(31, 33, 47, 0.96);
+  color: white;
+  font-size: 11.5px;
+  font-weight: 500;
+  line-height: 1.35;
+  letter-spacing: 0.1px;
+  padding: 6px 10px;
+  border-radius: 6px;
+  white-space: nowrap;
+  max-width: 320px;
+  box-shadow: 0 8px 20px rgba(0, 0, 0, 0.18);
+}
+.has-tooltip::after {
+  /* Tiny caret arrow connecting the bubble to the trigger. */
+  content: '';
+  top: calc(100% + 2px);
+  left: 50%;
+  width: 0; height: 0;
+  border: 5px solid transparent;
+  border-bottom-color: rgba(31, 33, 47, 0.96);
+  transform: translate(-50%, -2px);
+}
+.has-tooltip:hover::before,
+.has-tooltip:hover::after,
+.has-tooltip:focus-visible::before,
+.has-tooltip:focus-visible::after {
+  opacity: 1;
+  transform: translate(-50%, 0);
+}
+/* Empty data-tooltip = no bubble. Lets the same conditional binding
+   pattern (data-tooltip="...") gracefully no-op when the source
+   string is falsy. */
+.has-tooltip[data-tooltip=""]::before,
+.has-tooltip[data-tooltip=""]::after { content: none; }
+
 /* Topbar tertiary action — visually a text link, not a button.
    Used for "Add Job" so it doesn't compete with "Add Candidate" for
    attention but stays trivially clickable. */
