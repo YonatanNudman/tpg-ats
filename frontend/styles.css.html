@@ -985,4 +985,213 @@ html, body {
   color: var(--primary-dark);
   font-size: 11px; font-weight: 600;
 }
+
+/* ── Funnel-primary dashboard layout ──────────────────────────
+   The funnel-primary layout introduces three top-level dashboard cards
+   (Pipeline Funnel, Recruiter Performance, Sourcing ROI) that each carry
+   their own filter row in the header. The styles below cover:
+     - .section-filters        — per-section filter dropdowns layout
+     - .funnel-*               — bar chart + click-to-expand candidate list
+     - .recruiter-perf-table   — minor polish on the promoted perf table
+   Designed to inherit the existing .card / .data-table palette so
+   nothing here needs to know about specific colors or spacings beyond
+   the CSS custom properties defined at :root.
+*/
+
+/* Per-section filter rows live inside .card-header next to .card-title. */
+.section-filters {
+  display: flex; gap: 6px; align-items: center; flex-wrap: wrap;
+  margin-left: auto;
+}
+.section-filter {
+  font-size: 12px;
+  padding: 4px 7px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: white;
+  color: var(--text);
+  max-width: 140px;
+  cursor: pointer;
+  transition: border-color 0.15s ease, box-shadow 0.18s cubic-bezier(0.4,0,0.2,1);
+}
+.section-filter:hover { border-color: var(--border-strong); }
+.section-filter:focus {
+  outline: none;
+  border-color: var(--primary);
+  box-shadow: 0 0 0 3px rgba(var(--primary-rgb), 0.18);
+}
+.section-filter-reset {
+  font-size: 14px;
+  width: 24px; height: 24px;
+  border-radius: var(--radius-sm);
+  color: var(--text-muted);
+}
+.section-filter-reset:hover { color: var(--danger); background: rgba(225,75,75,0.08); }
+
+/* ── Pipeline Funnel section ─────────────────────────────────── */
+.funnel-card .card-header {
+  flex-wrap: wrap;
+  gap: 10px;
+}
+.funnel-body {
+  padding: 10px 18px 14px;
+}
+.funnel-list {
+  display: flex; flex-direction: column;
+  gap: 4px;
+}
+.funnel-stage {
+  border-radius: var(--radius-sm);
+  transition: background 0.15s ease;
+}
+.funnel-stage:hover:not(.expanded) {
+  background: #FAFBFE;
+}
+.funnel-stage.expanded {
+  background: rgba(var(--primary-rgb), 0.04);
+  box-shadow: inset 0 0 0 1px rgba(var(--primary-rgb), 0.12);
+  /* Pad inset so the expanded children visually nest into the stage row
+     without colliding with the bar above. */
+  padding-bottom: 4px;
+}
+
+.funnel-row {
+  display: grid;
+  grid-template-columns: 130px 1fr 50px 24px;
+  align-items: center;
+  gap: 12px;
+  padding: 9px 10px;
+  cursor: pointer;
+  user-select: none;
+  border-radius: var(--radius-sm);
+}
+.funnel-stage-name {
+  font-size: 13px; font-weight: 600;
+  color: var(--text);
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+.funnel-bar-track {
+  position: relative;
+  height: 24px;
+  background: #F0F2F8;
+  border-radius: 4px;
+  overflow: hidden;
+}
+.funnel-bar {
+  height: 100%;
+  border-radius: 4px;
+  display: flex; align-items: center; justify-content: flex-end;
+  padding: 0 8px;
+  font-size: 11.5px; font-weight: 700;
+  color: white;
+  text-shadow: 0 1px 2px rgba(0,0,0,0.15);
+  /* Smooth bar growth when filters change so the funnel feels live. */
+  transition: width 0.3s cubic-bezier(0.4,0,0.2,1), background 0.2s ease;
+  min-width: 24px;
+}
+.funnel-bar-count { white-space: nowrap; }
+.funnel-stage-pct {
+  font-size: 12px; font-weight: 600;
+  color: var(--text-muted);
+  text-align: right;
+}
+.funnel-chevron {
+  color: var(--text-muted);
+  font-size: 18px !important;
+}
+
+.funnel-stage-candidates {
+  margin: 0 10px 4px 142px;  /* aligns under the bar track */
+  border-left: 2px solid rgba(var(--primary-rgb), 0.25);
+  padding: 4px 0 4px 12px;
+  display: flex; flex-direction: column; gap: 2px;
+}
+.funnel-candidate-row {
+  display: grid;
+  grid-template-columns: minmax(140px, 1.6fr) 1fr auto 18px;
+  align-items: center;
+  gap: 12px;
+  padding: 7px 10px;
+  border-radius: var(--radius-sm);
+  cursor: pointer;
+  font-size: 13px;
+  transition: background 0.15s ease, transform 0.1s ease;
+}
+.funnel-candidate-row:hover {
+  background: white;
+  box-shadow: 0 1px 4px rgba(0,0,0,0.06);
+  transform: translateX(2px);
+}
+.funnel-cand-name { font-weight: 600; color: var(--text); }
+.funnel-cand-job  { color: var(--text-secondary); font-size: 12.5px; }
+.funnel-cand-meta { display: inline-flex; gap: 6px; align-items: center; }
+.funnel-cand-arrow { color: var(--text-muted); font-size: 16px !important; }
+.funnel-stage-empty {
+  font-size: 12px; color: var(--text-muted);
+  padding: 8px 10px; font-style: italic;
+}
+.funnel-footer {
+  margin-top: 10px; padding: 8px 10px;
+  font-size: 12px; color: var(--text-muted);
+  border-top: 1px dashed var(--border);
+  text-align: right;
+}
+
+/* ── Recruiter Performance table polish ─────────────────────── */
+.recruiter-perf-table tbody tr.clickable {
+  cursor: pointer;
+}
+.recruiter-perf-table .recruiter-name {
+  margin-left: 8px;
+  font-weight: 600;
+  vertical-align: middle;
+}
+.recruiter-perf-table .recruiter-avatar {
+  vertical-align: middle;
+}
+.recruiter-perf-table .metric-strong {
+  font-weight: 700;
+  color: var(--text);
+}
+.recruiter-perf-table .metric-secondary {
+  font-size: 11px;
+  color: var(--text-muted);
+  margin-left: 4px;
+}
+.recruiter-perf-table .th-sub {
+  font-weight: 500;
+  font-size: 10px;
+  color: var(--text-muted);
+  text-transform: none;
+  letter-spacing: 0;
+}
+
+/* ── Source ROI body ────────────────────────────────────────── */
+.source-roi-body {
+  padding: 16px 18px;
+}
+
+/* ── Mobile: stack section filters under the title ──────────── */
+@media (max-width: 900px) {
+  .section-filters {
+    margin-left: 0;
+    width: 100%;
+  }
+  .section-filter {
+    flex: 1; min-width: 0; max-width: none;
+  }
+  .funnel-row {
+    grid-template-columns: 100px 1fr 40px 20px;
+    gap: 8px;
+  }
+  .funnel-stage-candidates {
+    margin-left: 0;
+    border-left: none;
+    padding-left: 4px;
+  }
+  .funnel-candidate-row {
+    grid-template-columns: 1fr auto 16px;
+  }
+  .funnel-cand-job { display: none; }
+}
 </style>

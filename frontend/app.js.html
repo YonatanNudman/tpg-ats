@@ -344,22 +344,16 @@ document.addEventListener('alpine:init', function () {
   Alpine.data('atsApp', function () {
     var syncTimer = null;
     var lastSyncSig = '';
-    var pipelineChart = null, funnelChart = null, sourceChart = null, trendChart = null;
-    var sortableInstances = [];
+    var funnelChart = null, sourceChart = null, trendChart = null;
 
     return {
       userEmail: '',
       loading: true,
       syncing: false,
       syncStale: false,
-      view: 'list',
-      page: 1,
-      pageSize: 25,
-      sortField: 'date_applied',
-      sortDir: 'desc',
-      drill: null,               // 'active' | 'sla' | null
+      drill: null,                // currently only 'stale' (banner toggle)
       showJobs: true,
-      showAnalytics: true,
+      showAnalytics: false,       // collapsed by default — funnel-primary view surfaces the important stuff above
       showActivity: false,     // collapsed by default so the fold stays analytics-first
       activity: [],            // array of HistoryRow, newest first
       activityLoading: false,
@@ -376,16 +370,33 @@ document.addEventListener('alpine:init', function () {
         status: 'Active', search: '',
       },
 
-      kpi: {
-        activeCandidates: 0, openPositions: 0, hiresThisPeriod: 0, slaBreaches: 0,
-        avgDaysToHire: 0, offerAcceptanceRate: 0, expiredPostings: 0, expiringPostings: 0,
-      },
+      // ── Per-section filter overrides ──────────────────────
+      // Each dashboard section has its own filter row whose values
+      // override the global filter bar above for that section only.
+      // Blank/empty value = inherit the global filter; non-empty
+      // overrides it. Keeps the page-wide filter bar as the default
+      // intent while still letting a specific dashboard scope itself
+      // (e.g. global "Last 90 Days" but Recruiter Hires = "Last 30 Days").
+      funnelFilters:    { jobId: '', sourceId: '', recruiterId: '', preset: '', startDate: '', endDate: '' },
+      recruiterFilters: { jobId: '', sourceId: '', hiresPreset: '', hiresStartDate: '', hiresEndDate: '' },
+      sourceFilters:    { jobId: '', recruiterId: '', preset: '', startDate: '', endDate: '' },
+
+      // ── Funnel-as-primary state ──────────────────────────
+      // Stage IDs currently expanded inline (one per stage; we track an
+      // array so multiple can be open simultaneously — useful for cross-
+      // stage comparison when triaging).
+      expandedStages: [],
+
       analytics: {
-        pipelineSnapshot: [], funnelConversion: [], recruiterPerformance: [],
-        sourceEffectiveness: [], timeToHireTrend: [], stageVelocity: [],
+        funnelConversion: [], timeToHireTrend: [], stageVelocity: [],
       },
-      slaBreaches: [],
-      staleCandidates: [],      // pipeline health alerts (2×+ past SLA or >14d no-SLA)
+      // Promoted dashboards — populated from getDashboardData on initial
+      // load, then refreshed via dedicated per-section endpoints whenever
+      // their section filters change (saves recomputing the whole bundle).
+      recruiterPerformance: [],
+      sourceEffectiveness:  [],
+      slaBreaches:      [],
+      staleCandidates:  [],     // pipeline health alerts (2×+ past SLA or >14d no-SLA)
 
       // ── Computed ─────────────────────────────────────────
       get filteredCandidates() {
@@ -425,24 +436,9 @@ document.addEventListener('alpine:init', function () {
         return list;
       },
 
-      get pagedCandidates() {
-        var start = (this.page - 1) * this.pageSize;
-        return this.filteredCandidates.slice(start, start + this.pageSize);
-      },
-
-      get totalPages() { return Math.max(1, Math.ceil(this.filteredCandidates.length / this.pageSize)); },
-
-      get kanbanStages() {
-        return this.settings.stages
-          .filter(function (s) { return s.is_enabled && !s.is_rejected; })
-          .sort(function (a, b) { return a.sequence - b.sequence; });
-      },
-
-      candidatesByStage: function (stageId) {
-        return this.filteredCandidates.filter(function (c) {
-          return c.stage_id === stageId && c.status === 'Active';
-        });
-      },
+      // (List/Kanban view + pagination removed — funnel-primary layout doesn't
+      //  need pagedCandidates, totalPages, kanbanStages, or candidatesByStage.
+      //  Inline candidate lists per stage live in funnelCandidatesForStage.)
 
       // ── Lifecycle ────────────────────────────────────────
       init: async function () {
@@ -455,10 +451,6 @@ document.addEventListener('alpine:init', function () {
 
         await this.reloadAll();
         this.startSyncPolling();
-
-        // Watch view changes to init Sortable for kanban
-        this.$watch('view', function (v) { self.$nextTick(function () { self.initSortable(); }); });
-        this.$watch('filteredCandidates', function () { self.$nextTick(function () { self.initSortable(); }); });
 
         // Register browser back/forward handler — closes topmost overlay
         // rather than navigating off the web app entirely. Pairs with
@@ -498,15 +490,13 @@ document.addEventListener('alpine:init', function () {
         try {
           // Parallelize all four fetches — none of them depend on local
           // `settings`, they each call gasCall which talks to the server.
-          // Was: sequential loadSettings then parallel rest. Saves ~one
-          // sheet roundtrip on cold start (~100-300ms).
           await Promise.all([
             this.loadSettings(),
             this.loadCandidates(),
             this.loadJobs(),
             this.loadAnalytics(),
           ]);
-          this.$nextTick(function () { this.initSortable(); this.renderCharts(); }.bind(this));
+          this.$nextTick(this.renderCharts.bind(this));
         } finally {
           this.loading = false;
         }
@@ -531,7 +521,7 @@ document.addEventListener('alpine:init', function () {
           this.loadJobs(),
           this.loadAnalytics(),
         ]);
-        this.$nextTick(function () { this.initSortable(); this.renderCharts(); }.bind(this));
+        this.$nextTick(this.renderCharts.bind(this));
       },
 
       loadSettings: async function () {
@@ -558,16 +548,20 @@ document.addEventListener('alpine:init', function () {
 
       loadAnalytics: async function () {
         var a = await gasCall('getDashboardData', this.buildDashboardFilters());
-        this.kpi = a.kpis;
+        // Funnel-primary layout: top-level promoted dashboards have their
+        // own state slots so per-section refetches can update them
+        // independently. Funnel itself is derived client-side from
+        // allCandidates (see pipelineFunnelData getter), so we DON'T
+        // store a.pipelineSnapshot.
+        this.recruiterPerformance = a.recruiterPerformance;
+        this.sourceEffectiveness  = a.sourceEffectiveness;
+        // Collapsible bottom-of-page analytics — historical context only.
         this.analytics = {
-          pipelineSnapshot: a.pipelineSnapshot,
           funnelConversion: a.funnelConversion,
-          recruiterPerformance: a.recruiterPerformance,
-          sourceEffectiveness: a.sourceEffectiveness,
-          timeToHireTrend: a.timeToHireTrend,
-          stageVelocity: a.stageVelocity,
+          timeToHireTrend:  a.timeToHireTrend,
+          stageVelocity:    a.stageVelocity,
         };
-        this.slaBreaches = a.slaBreaches;
+        this.slaBreaches     = a.slaBreaches;
         this.staleCandidates = a.staleCandidates || [];
       },
 
@@ -583,6 +577,180 @@ document.addEventListener('alpine:init', function () {
           startDate: f.startDate,
           endDate: f.endDate,
         };
+      },
+
+      // ── Per-section filter merging ────────────────────────
+      // Effective filters for a section = (section overrides) || (global).
+      // Pass through global motion/region/status untouched (those aren't
+      // per-section configurable). The funnel section auto-scopes to
+      // status='Active' separately (see pipelineFunnelData).
+      mergeSectionFilters: function (section) {
+        var g = this.filters;
+        return {
+          jobId:       (section.jobId       || g.jobId)       || null,
+          sourceId:    (section.sourceId    || g.sourceId)    || null,
+          recruiterId: this._effectiveRecruiterId(section.recruiterId, g.recruiterId),
+          motion:      g.motion   || null,
+          regionId:    g.regionId || null,
+          status:      g.status   || null,
+          startDate:   section.startDate || g.startDate,
+          endDate:     section.endDate   || g.endDate,
+        };
+      },
+
+      _effectiveRecruiterId: function (sectionVal, globalVal) {
+        // '__unassigned__' is a sentinel — preserve it through the merge.
+        if (sectionVal === '__unassigned__') return '__unassigned__';
+        if (sectionVal) return sectionVal;
+        if (globalVal === '__unassigned__') return '__unassigned__';
+        return globalVal || null;
+      },
+
+      // Per-section "Period" preset → date range translation.
+      onSectionPresetChange: function (section) {
+        var preset, range;
+        if (section === 'funnel') {
+          preset = this.funnelFilters.preset;
+          range  = preset ? presetRange(preset) : { start: '', end: '' };
+          this.funnelFilters.startDate = range.start;
+          this.funnelFilters.endDate   = range.end;
+        } else if (section === 'recruiterHires') {
+          preset = this.recruiterFilters.hiresPreset;
+          range  = preset ? presetRange(preset) : { start: '', end: '' };
+          this.recruiterFilters.hiresStartDate = range.start;
+          this.recruiterFilters.hiresEndDate   = range.end;
+        } else if (section === 'source') {
+          preset = this.sourceFilters.preset;
+          range  = preset ? presetRange(preset) : { start: '', end: '' };
+          this.sourceFilters.startDate = range.start;
+          this.sourceFilters.endDate   = range.end;
+        }
+      },
+
+      resetSectionFilters: function (section) {
+        if (section === 'funnel') {
+          this.funnelFilters = { jobId: '', sourceId: '', recruiterId: '', preset: '', startDate: '', endDate: '' };
+        } else if (section === 'recruiter') {
+          this.recruiterFilters = { jobId: '', sourceId: '', hiresPreset: '', hiresStartDate: '', hiresEndDate: '' };
+          this.reloadRecruiterPerf();
+        } else if (section === 'source') {
+          this.sourceFilters = { jobId: '', recruiterId: '', preset: '', startDate: '', endDate: '' };
+          this.reloadSourceEffectiveness();
+        }
+      },
+
+      // ── Pipeline Funnel (client-side compute) ─────────────
+      // Derived from local allCandidates + funnelFilters merged over global.
+      // Always scopes to status='Active' since the funnel by definition
+      // shows currently-in-pipeline counts. Bar widths are proportional
+      // to the largest stage so the visualization works with any data shape.
+      get pipelineFunnelData() {
+        var f = this.mergeSectionFilters(this.funnelFilters);
+        var inScope = this.allCandidates.filter(function (c) {
+          if (c.status !== 'Active') return false;
+          if (f.jobId && c.job_id != f.jobId) return false;
+          if (f.sourceId && c.source_id != f.sourceId) return false;
+          if (f.recruiterId === '__unassigned__') {
+            if (c.recruiter_id != null && c.recruiter_id !== '') return false;
+          } else if (f.recruiterId) {
+            if (c.recruiter_id != f.recruiterId) return false;
+          }
+          if (f.startDate && c.date_applied && c.date_applied < f.startDate) return false;
+          if (f.endDate   && c.date_applied && c.date_applied > f.endDate)   return false;
+          return true;
+        });
+        var counts = {};
+        for (var i = 0; i < inScope.length; i++) {
+          var sid = inScope[i].stage_id;
+          counts[sid] = (counts[sid] || 0) + 1;
+        }
+        return this.settings.stages
+          .filter(function (s) { return s.is_enabled && !s.is_rejected; })
+          .sort(function (a, b) { return a.sequence - b.sequence; })
+          .map(function (s) {
+            return {
+              stage_id: s.id,
+              stage_name: s.name,
+              stage_color: s.color,
+              candidate_count: counts[s.id] || 0,
+            };
+          });
+      },
+
+      funnelTotalActive: function () {
+        return this.pipelineFunnelData.reduce(function (sum, s) { return sum + s.candidate_count; }, 0);
+      },
+
+      funnelBarWidth: function (stage) {
+        var counts = this.pipelineFunnelData.map(function (s) { return s.candidate_count; });
+        var max = Math.max.apply(null, counts);
+        if (max <= 0) return 0;
+        return Math.round((stage.candidate_count / max) * 100);
+      },
+
+      toggleFunnelStage: function (stageId) {
+        var idx = this.expandedStages.indexOf(stageId);
+        if (idx >= 0) this.expandedStages.splice(idx, 1);
+        else          this.expandedStages.push(stageId);
+      },
+
+      funnelCandidatesForStage: function (stageId) {
+        var f = this.mergeSectionFilters(this.funnelFilters);
+        return this.allCandidates
+          .filter(function (c) {
+            if (c.stage_id !== stageId) return false;
+            if (c.status !== 'Active')  return false;
+            if (f.jobId && c.job_id != f.jobId) return false;
+            if (f.sourceId && c.source_id != f.sourceId) return false;
+            if (f.recruiterId === '__unassigned__') {
+              if (c.recruiter_id != null && c.recruiter_id !== '') return false;
+            } else if (f.recruiterId) {
+              if (c.recruiter_id != f.recruiterId) return false;
+            }
+            return true;
+          })
+          .sort(function (a, b) { return (a.last_name || '').localeCompare(b.last_name || ''); });
+      },
+
+      // ── Cross-section linking ─────────────────────────────
+      // Click a recruiter row in the perf table → scope the funnel
+      // section above to that recruiter so the user sees only that
+      // recruiter's pipeline. Scrolls funnel into view for the link
+      // to feel like a navigation, not a silent state change.
+      filterFunnelByRecruiter: function (recruiterId) {
+        this.funnelFilters.recruiterId = String(recruiterId);
+        // Auto-expand all stages so the user immediately sees the recruiter's
+        // candidate distribution without having to click each stage open.
+        this.expandedStages = this.pipelineFunnelData.map(function (s) { return s.stage_id; });
+        var el = document.querySelector('.funnel-card');
+        if (el) el.scrollIntoView({ behavior: 'smooth', block: 'start' });
+      },
+
+      // ── Per-section refetches (server-side) ───────────────
+      reloadRecruiterPerf: async function () {
+        var main  = this.mergeSectionFilters(this.recruiterFilters);
+        var hires = null;
+        if (this.recruiterFilters.hiresPreset) {
+          // Same scope as `main` but with the hires-period override applied
+          // to startDate/endDate. Backend's hiresFilters arg only consults
+          // those date fields when filtering hires (the rest of the row's
+          // filters still go through `main`).
+          hires = Object.assign({}, main, {
+            startDate: this.recruiterFilters.hiresStartDate,
+            endDate:   this.recruiterFilters.hiresEndDate,
+          });
+        }
+        try {
+          this.recruiterPerformance = await gasCall('getRecruiterPerformance', main, hires);
+        } catch (e) { Alpine.store('app').toastError('Recruiter perf reload failed: ' + e.message); }
+      },
+
+      reloadSourceEffectiveness: async function () {
+        var f = this.mergeSectionFilters(this.sourceFilters);
+        try {
+          this.sourceEffectiveness = await gasCall('getSourceEffectiveness', f);
+          this.$nextTick(this.renderSourceChart.bind(this));
+        } catch (e) { Alpine.store('app').toastError('Source ROI reload failed: ' + e.message); }
       },
 
       // ── Filter actions ───────────────────────────────────
@@ -609,15 +777,8 @@ document.addEventListener('alpine:init', function () {
         this.applyFilters();
       },
 
-      sortBy: function (field) {
-        if (this.sortField === field) this.sortDir = this.sortDir === 'asc' ? 'desc' : 'asc';
-        else { this.sortField = field; this.sortDir = 'asc'; }
-      },
-      sortIcon: function (f) { return this.sortField === f ? (this.sortDir === 'asc' ? '↑' : '↓') : '⇅'; },
-
+      // (sortBy / sortIcon / scrollTop removed — no list view to sort or jump to.)
       toggleDrill: function (key) { this.drill = this.drill === key ? null : key; },
-
-      scrollTop: function () { window.scrollTo({ top: 0, behavior: 'smooth' }); },
 
       // Lazy-load activity feed on first expand (saves a sheet scan on page
       // load for users who don't open it). Reloaded on every open — tiny
@@ -737,113 +898,27 @@ document.addEventListener('alpine:init', function () {
         return t >= Date.now() && t <= Date.now() + 7 * 86400000;
       },
 
-      // ── Kanban drag-and-drop ──────────────────────────────
-      initSortable: function () {
-        var self = this;
-        if (this.view !== 'kanban') return;
-        sortableInstances.forEach(function (s) { try { s.destroy(); } catch (e) {} });
-        sortableInstances = [];
-        document.querySelectorAll('.sortable-zone').forEach(function (el) {
-          sortableInstances.push(new Sortable(el, {
-            group: 'kanban',
-            animation: 150,
-            ghostClass: 'sortable-ghost',
-            onEnd: function (evt) {
-              var cid = parseInt(evt.item.dataset.candidateId, 10);
-              var toStageId = parseInt(evt.to.dataset.stageId, 10);
-              var fromStageId = parseInt(evt.from.dataset.stageId, 10);
-              if (toStageId === fromStageId) return;
-              var c = self.allCandidates.find(function (x) { return x.id === cid; });
-              if (!c) return;
-              self.optimisticStageMove(c, fromStageId, toStageId);
-            },
-          }));
-        });
-      },
-
-      /**
-       * Optimistic Kanban stage move.
-       *
-       * Differences vs. the inline-select path (updateCandidateField):
-       *   1. Updates ALL joined fields locally (stage_name, stage_color,
-       *      status when dropping into Hired/Rejected) so the chip and
-       *      column color reflect the move IMMEDIATELY — not after the
-       *      ~500-2000ms server roundtrip + refreshCandidate roundtrip.
-       *   2. Shows the success toast at drop-time, not after the awaits.
-       *      Recruiters drag dozens of cards a day; the perceptual gap
-       *      between "card in new column" and "system says saved" was
-       *      the loudest UX papercut on Kanban.
-       *   3. Full snapshot rollback on error — every field we predicted
-       *      gets reverted, plus an error toast so the user knows the
-       *      move didn't persist on the backend.
-       *
-       * The post-success refreshCandidate still runs in the background
-       * to pick up fields we don't predict (days_in_stage resets to 0,
-       * history rows added).
-       */
-      optimisticStageMove: function (c, fromStageId, toStageId) {
-        var self = this;
-        var toStage = this.settings.stages.find(function (s) { return s.id === toStageId; });
-        if (!toStage) return;
-
-        var prev = {
-          stage_id:    c.stage_id,
-          stage_name:  c.stage_name,
-          stage_color: c.stage_color,
-          status:      c.status,
-        };
-
-        c.stage_id    = toStageId;
-        c.stage_name  = toStage.name;
-        c.stage_color = toStage.color;
-        if (toStage.is_hired)         c.status = 'Hired';
-        else if (toStage.is_rejected) c.status = 'Rejected';
-
-        Alpine.store('app').toastSuccess('Moved to ' + toStage.name);
-
-        gasCall('updateCandidateStage', c.id, toStageId)
-          .then(function () { return self.refreshCandidate(c.id); })
-          .catch(function (e) {
-            c.stage_id    = prev.stage_id;
-            c.stage_name  = prev.stage_name;
-            c.stage_color = prev.stage_color;
-            c.status      = prev.status;
-            Alpine.store('app').toastError('Move failed: ' + e.message);
-          });
-      },
+      // (Kanban drag handlers removed — funnel-primary layout has no Kanban
+      //  view. The HTML-rendered funnel doesn't currently support drag-to-
+      //  reorder; stage changes happen via the inline dropdown in the peek
+      //  panel. Re-introduce SortableJS here if drag-to-stage is desired
+      //  on the funnel rows themselves.)
 
       // ── Chart rendering ──────────────────────────────────
+      // Source donut renders inside the always-visible Sourcing ROI section,
+      // so it MUST run regardless of showAnalytics. The funnel/trend/stage
+      // charts only matter when the collapsible Analytics card is open.
       renderCharts: function () {
+        this.renderSourceChart();   // Sourcing ROI (always visible)
         if (!this.showAnalytics) return;
-        this.renderPipelineChart();
         this.renderFunnelChart();
-        this.renderSourceChart();
         this.renderTrendChart();
       },
 
-      renderPipelineChart: function () {
-        var el = document.getElementById('pipelineChart');
-        if (!el) return;
-        if (pipelineChart) pipelineChart.destroy();
-        var snap = this.analytics.pipelineSnapshot;
-        pipelineChart = new Chart(el, {
-          type: 'bar',
-          data: {
-            labels: snap.map(function (s) { return s.stage_name; }),
-            datasets: [{
-              data: snap.map(function (s) { return s.candidate_count; }),
-              backgroundColor: snap.map(function (s) { return (s.stage_color || '#6c757d') + 'B0'; }),
-              borderColor: snap.map(function (s) { return s.stage_color || '#6c757d'; }),
-              borderWidth: 1, borderRadius: 4,
-            }],
-          },
-          options: {
-            indexAxis: 'y', responsive: true, maintainAspectRatio: false,
-            plugins: { legend: { display: false } },
-            scales: { x: { ticks: { font: { size: 11 } } }, y: { ticks: { font: { size: 11 } } } },
-          },
-        });
-      },
+      // (renderPipelineChart removed — Pipeline Snapshot bar chart is
+      //  superseded by the Pipeline Funnel section's HTML-rendered bars
+      //  with click-to-expand candidate lists. The chart's #pipelineChart
+      //  canvas no longer exists in the DOM.)
 
       renderFunnelChart: function () {
         var el = document.getElementById('funnelChart');
@@ -878,7 +953,10 @@ document.addEventListener('alpine:init', function () {
         var el = document.getElementById('sourceDonutChart');
         if (!el) return;
         if (sourceChart) sourceChart.destroy();
-        var s = this.analytics.sourceEffectiveness;
+        // Promoted out of the collapsed analytics object — sourceEffectiveness
+        // is now a top-level field updated by reloadSourceEffectiveness when
+        // the Sourcing ROI section's filters change.
+        var s = this.sourceEffectiveness;
         // TPG orange leads, then diverse accents for additional sources
         var colors = ['#F2831F','#239ED8','#3AA76D','#8E5DC9','#E14B4B','#1A1A2E'];
         sourceChart = new Chart(el, {

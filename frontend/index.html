@@ -202,41 +202,128 @@
       </div>
     </div>
 
-    <!-- ── KPI strip ─────────────────────────────────────── -->
-    <div class="kpi-grid">
-      <div class="kpi-card kpi-accent-primary"
-        :class="{ 'active': drill === 'active' }"
-        @click="toggleDrill('active')">
-        <div class="kpi-label">Active Candidates</div>
-        <div class="kpi-value" x-text="kpi.activeCandidates"></div>
-        <div class="kpi-sub">Click to show list</div>
-      </div>
+    <!--
+      ── Pipeline Funnel — primary work surface ─────────────────────
+      Replaces the prior KPI strip + List/Kanban as the first thing the
+      user sees. Each stage row shows a horizontal bar proportional to
+      the largest active stage, plus the stage's current active count.
+      Click a stage row to expand inline below it and see the candidates
+      currently in that stage; click a candidate to open the existing
+      peek panel for full detail + inline edit.
 
-      <div class="kpi-card kpi-accent-info">
-        <div class="kpi-label">Open Positions</div>
-        <div class="kpi-value" x-text="kpi.openPositions"></div>
-        <div class="kpi-sub">
-          <span x-text="kpi.expiredPostings"></span> expired ·
-          <span x-text="kpi.expiringPostings"></span> expiring soon
+      Per-section filters in the header override the page-wide filter
+      bar above for THIS section only. Blank dropdown = inherit global.
+      Lets a recruiter scope the funnel to one job/source/recruiter
+      without disturbing the rest of the dashboards on this page.
+    -->
+    <div class="card section-card funnel-card">
+      <div class="card-header">
+        <span class="card-title">
+          <span class="material-icons mi-inline">filter_list</span>
+          Pipeline Funnel
+        </span>
+        <div class="section-filters">
+          <select class="section-filter" x-model="funnelFilters.jobId">
+            <option value="">Job (global)</option>
+            <template x-for="j in jobs" :key="j.id">
+              <option :value="j.id" x-text="j.title"></option>
+            </template>
+          </select>
+          <select class="section-filter" x-model="funnelFilters.sourceId">
+            <option value="">Source (global)</option>
+            <template x-for="s in settings.sources.filter(x => x.is_enabled)" :key="s.id">
+              <option :value="s.id" x-text="s.name"></option>
+            </template>
+          </select>
+          <select class="section-filter" x-model="funnelFilters.recruiterId">
+            <option value="">Recruiter (global)</option>
+            <option value="__unassigned__">— Unassigned —</option>
+            <template x-for="r in settings.recruiters.filter(x => x.is_active)" :key="r.id">
+              <option :value="r.id" x-text="r.name"></option>
+            </template>
+          </select>
+          <select class="section-filter" x-model="funnelFilters.preset"
+                  @change="onSectionPresetChange('funnel')">
+            <option value="">Period (global)</option>
+            <option value="30d">Last 30 Days</option>
+            <option value="90d">Last 90 Days</option>
+            <option value="6m">Last 6 Months</option>
+            <option value="1y">Last Year</option>
+            <option value="all">All Time</option>
+          </select>
+          <button class="icon-btn-sm section-filter-reset"
+                  @click="resetSectionFilters('funnel')"
+                  title="Reset section filters to global defaults">×</button>
         </div>
       </div>
 
-      <div class="kpi-card kpi-accent-success">
-        <div class="kpi-label">Hires This Period</div>
-        <div class="kpi-value" x-text="kpi.hiresThisPeriod"></div>
-        <div class="kpi-sub">
-          Avg <span x-text="kpi.avgDaysToHire"></span> days to hire
-        </div>
-      </div>
+      <div class="card-body funnel-body">
+        <template x-if="loading">
+          <div class="skeleton-section">
+            <template x-for="i in 5" :key="i">
+              <div class="skeleton-row">
+                <div class="skeleton skeleton-line skeleton-line-strong" style="width:18%;"></div>
+                <div class="skeleton skeleton-line" style="flex:1;"></div>
+                <div class="skeleton skeleton-line skeleton-line-thin" style="width:8%;"></div>
+              </div>
+            </template>
+          </div>
+        </template>
 
-      <div class="kpi-card kpi-accent-danger"
-        :class="{ 'active': drill === 'sla' }"
-        @click="toggleDrill('sla')">
-        <div class="kpi-label">SLA Breaches</div>
-        <div class="kpi-value" x-text="kpi.slaBreaches"></div>
-        <div class="kpi-sub">
-          Offer accept: <span x-text="kpi.offerAcceptanceRate"></span>%
-        </div>
+        <template x-if="!loading && pipelineFunnelData.length === 0">
+          <div class="empty-state">
+            <div class="empty-state-icon">📊</div>
+            <div class="empty-state-text">No active stages configured.</div>
+            <div class="empty-state-hint">Open Settings to add pipeline stages.</div>
+          </div>
+        </template>
+
+        <template x-if="!loading && pipelineFunnelData.length > 0">
+          <div class="funnel-list">
+            <template x-for="stage in pipelineFunnelData" :key="stage.stage_id">
+              <div class="funnel-stage"
+                   :class="{ 'expanded': expandedStages.includes(stage.stage_id) }">
+                <div class="funnel-row" @click="toggleFunnelStage(stage.stage_id)">
+                  <div class="funnel-stage-name" x-text="stage.stage_name"></div>
+                  <div class="funnel-bar-track">
+                    <div class="funnel-bar"
+                         :style="`width: ${Math.max(funnelBarWidth(stage), stage.candidate_count > 0 ? 6 : 0)}%; background: ${stage.stage_color || 'var(--primary)'};`">
+                      <span class="funnel-bar-count" x-text="stage.candidate_count"></span>
+                    </div>
+                  </div>
+                  <div class="funnel-stage-pct" x-text="funnelBarWidth(stage) + '%'"></div>
+                  <span class="material-icons funnel-chevron"
+                        x-text="expandedStages.includes(stage.stage_id) ? 'expand_less' : 'chevron_right'"></span>
+                </div>
+                <template x-if="expandedStages.includes(stage.stage_id)">
+                  <div class="funnel-stage-candidates">
+                    <template x-for="c in funnelCandidatesForStage(stage.stage_id)" :key="c.id">
+                      <div class="funnel-candidate-row" @click="openPeek(c.id)">
+                        <div class="funnel-cand-name" x-text="c.first_name + ' ' + c.last_name"></div>
+                        <div class="funnel-cand-job" x-text="c.job_title || '—'"></div>
+                        <div class="funnel-cand-meta">
+                          <template x-if="c.recruiter_name">
+                            <span class="recruiter-avatar" :title="c.recruiter_name"
+                                  x-text="initials(c.recruiter_name)"></span>
+                          </template>
+                          <span class="motion-chip" :class="motionClass(c.motion)"
+                                x-text="c.motion"></span>
+                          <span class="days-badge" x-text="(c.days_in_stage || 0) + 'd'"></span>
+                        </div>
+                        <span class="material-icons funnel-cand-arrow">chevron_right</span>
+                      </div>
+                    </template>
+                    <template x-if="funnelCandidatesForStage(stage.stage_id).length === 0">
+                      <div class="funnel-stage-empty">No candidates in this stage.</div>
+                    </template>
+                  </div>
+                </template>
+              </div>
+            </template>
+            <div class="funnel-footer"
+                 x-text="funnelTotalActive() + ' total active candidates across ' + pipelineFunnelData.length + ' stages'"></div>
+          </div>
+        </template>
       </div>
     </div>
 
@@ -316,245 +403,177 @@
       </div>
     </template>
 
-    <!-- ── SLA Drilldown (inline under KPI strip) ───────── -->
-    <template x-if="drill === 'sla' && slaBreaches.length > 0">
-      <div class="card inline-drill">
-        <div class="card-header">
-          <span class="card-title">⚠ SLA Breaches (<span x-text="slaBreaches.length"></span>)</span>
-          <button class="icon-btn-sm" @click="drill = null">✕</button>
+    <!--
+      ── Recruiter Performance ─────────────────────────────────────
+      Promoted out of the collapsible Analytics card to the primary view.
+      Shows the entire active team (including recruiters with empty queues)
+      so an idle teammate is its own actionable signal.
+
+      Click a recruiter row → scopes the Pipeline Funnel section above to
+      that recruiter and auto-expands every stage so their pipeline
+      distribution is immediately visible.
+
+      The "Hires period" section filter scopes only the Hires column
+      independently of the rest of the table — recruiters care about
+      "this month's hires" while their queue/rejection numbers usually
+      span a wider window.
+    -->
+    <div class="card section-card recruiter-perf-card">
+      <div class="card-header">
+        <span class="card-title">
+          <span class="material-icons mi-inline">groups</span>
+          Recruiter Performance
+        </span>
+        <div class="section-filters">
+          <select class="section-filter" x-model="recruiterFilters.jobId"
+                  @change="reloadRecruiterPerf()">
+            <option value="">Job (global)</option>
+            <template x-for="j in jobs" :key="j.id">
+              <option :value="j.id" x-text="j.title"></option>
+            </template>
+          </select>
+          <select class="section-filter" x-model="recruiterFilters.sourceId"
+                  @change="reloadRecruiterPerf()">
+            <option value="">Source (global)</option>
+            <template x-for="s in settings.sources.filter(x => x.is_enabled)" :key="s.id">
+              <option :value="s.id" x-text="s.name"></option>
+            </template>
+          </select>
+          <select class="section-filter" x-model="recruiterFilters.hiresPreset"
+                  @change="onSectionPresetChange('recruiterHires'); reloadRecruiterPerf()"
+                  title="Date window for the Hires column only">
+            <option value="">Hires period (global)</option>
+            <option value="30d">Hires: Last 30 Days</option>
+            <option value="90d">Hires: Last 90 Days</option>
+            <option value="6m">Hires: Last 6 Months</option>
+            <option value="1y">Hires: Last Year</option>
+            <option value="all">Hires: All Time</option>
+          </select>
+          <button class="icon-btn-sm section-filter-reset"
+                  @click="resetSectionFilters('recruiter')"
+                  title="Reset section filters to global defaults">×</button>
         </div>
-        <table class="data-table">
-          <thead><tr><th>Candidate</th><th>Stage</th><th>Job</th><th>Recruiter</th><th>Hours Over</th></tr></thead>
+      </div>
+
+      <div class="card-body p-0">
+        <table class="data-table recruiter-perf-table">
+          <thead>
+            <tr>
+              <th>Recruiter</th>
+              <th>Queue</th>
+              <th>Hires<template x-if="recruiterFilters.hiresPreset"><span class="th-sub" x-text="' (' + recruiterFilters.hiresPreset + ')'"></span></template></th>
+              <th>Rejections</th>
+              <th>Total</th>
+              <th>Avg Days</th>
+            </tr>
+          </thead>
           <tbody>
-            <template x-for="b in slaBreaches" :key="b.candidate_id">
-              <tr @click="openPeek(b.candidate_id)">
-                <td x-text="b.candidate_name"></td>
-                <td><span class="stage-chip" :style="stageChipStyle(b.stage_color)" x-text="b.stage_name"></span></td>
-                <td x-text="b.job_title"></td>
-                <td x-text="b.recruiter_name || '—'"></td>
-                <td class="sla-over" x-text="Math.round(b.hours_overdue) + 'h'"></td>
+            <template x-for="r in recruiterPerformance" :key="r.recruiter_id">
+              <tr class="clickable"
+                  @click="filterFunnelByRecruiter(r.recruiter_id)"
+                  :title="'Filter funnel above to show only ' + r.recruiter_name + '\'s candidates'">
+                <td>
+                  <span class="recruiter-avatar" x-text="initials(r.recruiter_name)"></span>
+                  <span class="recruiter-name" x-text="r.recruiter_name"></span>
+                </td>
+                <td>
+                  <span class="metric-strong" x-text="r.queue"></span>
+                </td>
+                <td>
+                  <span class="metric-strong" x-text="r.hires_in_period"></span>
+                  <template x-if="r.hires !== r.hires_in_period">
+                    <span class="metric-secondary" x-text="' / ' + r.hires + ' all'"></span>
+                  </template>
+                </td>
+                <td x-text="r.rejections"></td>
+                <td x-text="r.total_candidates"></td>
+                <td x-text="r.avg_days_to_hire || '—'"></td>
               </tr>
+            </template>
+            <template x-if="recruiterPerformance.length === 0 && !loading">
+              <tr><td colspan="6" class="empty-state-row">
+                No active recruiters configured.
+                <button class="btn btn-sm btn-link" @click="openSettings()">Open Settings</button>
+                to add your team.
+              </td></tr>
             </template>
           </tbody>
         </table>
       </div>
-    </template>
+    </div>
 
-    <!-- ── Candidates — primary work surface ───────────── -->
-    <div class="card section-card">
+    <!--
+      ── Sourcing ROI ──────────────────────────────────────────────
+      Promoted from the collapsible Analytics card. Shows where hires
+      actually come from so recruiters can double down on the productive
+      sources and de-prioritize the dead ones.
+    -->
+    <div class="card section-card source-roi-card">
       <div class="card-header">
         <span class="card-title">
-          <span x-text="filteredCandidates.length"></span> Candidate<span x-text="filteredCandidates.length === 1 ? '' : 's'"></span>
+          <span class="material-icons mi-inline">trending_up</span>
+          Sourcing ROI
         </span>
-
-        <div class="view-toggle" role="group">
-          <button class="view-btn" :class="{ 'active': view === 'list' }" @click="view = 'list'">
-            <span class="material-icons">view_list</span> List
-          </button>
-          <button class="view-btn" :class="{ 'active': view === 'kanban' }" @click="view = 'kanban'">
-            <span class="material-icons">view_kanban</span> Kanban
-          </button>
+        <div class="section-filters">
+          <select class="section-filter" x-model="sourceFilters.jobId"
+                  @change="reloadSourceEffectiveness()">
+            <option value="">Job (global)</option>
+            <template x-for="j in jobs" :key="j.id">
+              <option :value="j.id" x-text="j.title"></option>
+            </template>
+          </select>
+          <select class="section-filter" x-model="sourceFilters.recruiterId"
+                  @change="reloadSourceEffectiveness()">
+            <option value="">Recruiter (global)</option>
+            <template x-for="r in settings.recruiters.filter(x => x.is_active)" :key="r.id">
+              <option :value="r.id" x-text="r.name"></option>
+            </template>
+          </select>
+          <select class="section-filter" x-model="sourceFilters.preset"
+                  @change="onSectionPresetChange('source'); reloadSourceEffectiveness()">
+            <option value="">Period (global)</option>
+            <option value="30d">Last 30 Days</option>
+            <option value="90d">Last 90 Days</option>
+            <option value="6m">Last 6 Months</option>
+            <option value="1y">Last Year</option>
+            <option value="all">All Time</option>
+          </select>
+          <button class="icon-btn-sm section-filter-reset"
+                  @click="resetSectionFilters('source')"
+                  title="Reset section filters to global defaults">×</button>
         </div>
       </div>
 
-      <!-- LIST VIEW -->
-      <template x-if="view === 'list' && !loading">
-        <div class="table-wrapper">
-          <template x-if="filteredCandidates.length === 0">
-            <div class="empty-state">
-              <div class="empty-state-icon">👥</div>
-              <!-- Context-aware CTA: distinguishes "zero data" from "filters too narrow" -->
-              <template x-if="allCandidates.length === 0">
-                <div>
-                  <div class="empty-state-text">
-                    No candidates yet. Add your first one to get started.
-                  </div>
-                  <div class="empty-state-actions">
-                    <button class="btn btn-primary btn-sm"
-                      @click="openModal('addCandidate')">
-                      <span class="material-icons mi-inline">person_add</span> Add Candidate
-                    </button>
-                    <template x-if="jobs.length === 0">
-                      <button class="btn btn-outline-secondary btn-sm"
-                        @click="openModal('addJob')">
-                        <span class="material-icons mi-inline">work</span> Add Job first
-                      </button>
-                    </template>
-                  </div>
-                </div>
-              </template>
-              <template x-if="allCandidates.length > 0">
-                <div>
-                  <div class="empty-state-text">No candidates match your current filters.</div>
-                  <div class="empty-state-hint"
-                    x-text="'Showing ' + allCandidates.length + ' total in the database'"></div>
-                  <div class="empty-state-actions">
-                    <button class="btn btn-outline-primary btn-sm" @click="resetFilters()">
-                      Clear filters
-                    </button>
-                  </div>
-                </div>
-              </template>
-            </div>
-          </template>
-
-          <table class="data-table candidates-table" x-show="filteredCandidates.length > 0">
+      <div class="card-body source-roi-body">
+        <div class="source-row">
+          <div class="source-donut"><canvas id="sourceDonutChart"></canvas></div>
+          <table class="data-table compact">
             <thead>
-              <tr>
-                <th class="sortable" @click="sortBy('last_name')">Name <span x-text="sortIcon('last_name')"></span></th>
-                <th class="sortable" @click="sortBy('job_title')">Job <span x-text="sortIcon('job_title')"></span></th>
-                <th>Stage</th>
-                <th>Recruiter</th>
-                <th>Source</th>
-                <th>Motion</th>
-                <th class="sortable" @click="sortBy('days_in_stage')">Days <span x-text="sortIcon('days_in_stage')"></span></th>
-                <th>Status</th>
-              </tr>
+              <tr><th>Source</th><th>Total</th><th>Hired</th><th>Rate</th></tr>
             </thead>
             <tbody>
-              <template x-for="c in pagedCandidates" :key="c.id">
-                <tr class="candidate-row">
-                  <td @click="openPeek(c.id)" class="clickable-cell">
-                    <div class="name-primary" x-text="c.first_name + ' ' + c.last_name"></div>
-                    <div class="name-secondary" x-text="c.email"></div>
-                  </td>
-
-                  <td @click="openPeek(c.id)" class="clickable-cell" x-text="c.job_title || '—'"></td>
-
-                  <!-- Inline STAGE dropdown -->
-                  <td>
-                    <select class="inline-select" :data-id="c.id"
-                      @change="updateCandidateField(c, 'stage_id', parseInt($event.target.value))"
-                      @click.stop>
-                      <template x-for="s in settings.stages.filter(x => x.is_enabled)" :key="s.id">
-                        <option :value="s.id" :selected="s.id === c.stage_id" x-text="s.name"></option>
-                      </template>
-                    </select>
-                  </td>
-
-                  <!-- Inline RECRUITER dropdown -->
-                  <td>
-                    <select class="inline-select"
-                      @change="updateCandidateField(c, 'recruiter_id', $event.target.value === '' ? null : parseInt($event.target.value))"
-                      @click.stop>
-                      <option value="" :selected="c.recruiter_id === null">— Unassigned —</option>
-                      <template x-for="r in settings.recruiters.filter(x => x.is_active)" :key="r.id">
-                        <option :value="r.id" :selected="r.id === c.recruiter_id" x-text="r.name"></option>
-                      </template>
-                    </select>
-                  </td>
-
-                  <!-- Inline SOURCE dropdown -->
-                  <td>
-                    <select class="inline-select"
-                      @change="updateCandidateField(c, 'source_id', $event.target.value === '' ? null : parseInt($event.target.value))"
-                      @click.stop>
-                      <option value="" :selected="c.source_id === null">—</option>
-                      <template x-for="s in settings.sources.filter(x => x.is_enabled)" :key="s.id">
-                        <option :value="s.id" :selected="s.id === c.source_id" x-text="s.name"></option>
-                      </template>
-                    </select>
-                  </td>
-
-                  <!-- Inline MOTION dropdown -->
-                  <td>
-                    <select class="inline-select motion-select" :class="motionClass(c.motion)"
-                      @change="updateCandidateField(c, 'motion', $event.target.value)"
-                      @click.stop>
-                      <option value="Inbound" :selected="c.motion === 'Inbound'">Inbound</option>
-                      <option value="Outbound" :selected="c.motion === 'Outbound'">Outbound</option>
-                    </select>
-                  </td>
-
-                  <td @click="openPeek(c.id)" class="clickable-cell">
-                    <span class="days-badge" x-text="(c.days_in_stage || 0) + 'd'"></span>
-                  </td>
-
-                  <td @click="openPeek(c.id)" class="clickable-cell">
-                    <span class="status-badge" :class="'status-' + (c.status || 'active').toLowerCase()"
-                      x-text="c.status"></span>
-                  </td>
+              <template x-for="s in sourceEffectiveness" :key="s.source_id">
+                <tr>
+                  <td x-text="s.source_name"></td>
+                  <td x-text="s.total_candidates"></td>
+                  <td x-text="s.hired_candidates"></td>
+                  <td x-text="s.hire_rate + '%'"></td>
                 </tr>
+              </template>
+              <template x-if="sourceEffectiveness.length === 0 && !loading">
+                <tr><td colspan="4" class="empty-state-row">
+                  No source data yet. Sources populate as candidates are added.
+                </td></tr>
               </template>
             </tbody>
           </table>
-
-          <!-- Pagination -->
-          <div class="pagination-bar" x-show="filteredCandidates.length > pageSize">
-            <span class="text-muted">
-              Showing <span x-text="(page-1)*pageSize+1"></span>–<span x-text="Math.min(page*pageSize, filteredCandidates.length)"></span>
-              of <span x-text="filteredCandidates.length"></span>
-            </span>
-            <div>
-              <button class="page-btn" :disabled="page === 1" @click="page--">‹</button>
-              <span class="mx-2" x-text="page + ' / ' + totalPages"></span>
-              <button class="page-btn" :disabled="page === totalPages" @click="page++">›</button>
-            </div>
-          </div>
         </div>
-      </template>
-
-      <!-- KANBAN VIEW -->
-      <template x-if="view === 'kanban' && !loading">
-        <div class="kanban-board">
-          <template x-for="stage in kanbanStages" :key="stage.id">
-            <div class="kanban-column">
-              <div class="kanban-column-header" :style="'--stage-color:' + (stage.color || 'var(--primary)')">
-                <span class="kanban-column-title" x-text="stage.name"></span>
-                <span class="kanban-column-count" x-text="candidatesByStage(stage.id).length"></span>
-              </div>
-              <div class="kanban-cards sortable-zone" :data-stage-id="stage.id">
-                <template x-for="c in candidatesByStage(stage.id)" :key="c.id">
-                  <div class="kanban-card" :data-candidate-id="c.id" @click="openPeek(c.id)">
-                    <div class="kanban-card-head">
-                      <div class="kanban-card-name" x-text="c.first_name + ' ' + c.last_name"></div>
-                      <span class="days-badge" x-text="(c.days_in_stage || 0) + 'd'"></span>
-                    </div>
-                    <div class="kanban-card-meta">
-                      <template x-if="c.recruiter_name">
-                        <span class="recruiter-avatar" :title="c.recruiter_name" x-text="initials(c.recruiter_name)"></span>
-                      </template>
-                      <span class="motion-chip" :class="motionClass(c.motion)" x-text="c.motion"></span>
-                      <template x-if="c.source_name">
-                        <span class="source-chip" x-text="c.source_name"></span>
-                      </template>
-                    </div>
-                  </div>
-                </template>
-                <template x-if="candidatesByStage(stage.id).length === 0">
-                  <div class="kanban-empty">No candidates</div>
-                </template>
-              </div>
-            </div>
-          </template>
-        </div>
-      </template>
-
-      <!--
-        Skeleton loader replaces the spinner during initial load. Renders
-        the same approximate row geometry the real table will fill, so the
-        page doesn't reflow when data arrives. We use 8 placeholder rows
-        as a sensible average that fits above the fold without overflowing.
-        Subsequent reloads (manualRefresh, checkSync) use silentReload()
-        which doesn't flip `loading`, so this template only fires on first
-        mount — there's no skeleton flicker on every sync poll.
-      -->
-      <template x-if="loading">
-        <div class="skeleton-section" aria-busy="true" aria-label="Loading candidates">
-          <template x-for="i in 8" :key="i">
-            <div class="skeleton-row">
-              <div class="skeleton skeleton-avatar"></div>
-              <div class="skeleton-row-body">
-                <div class="skeleton skeleton-line skeleton-line-strong"></div>
-                <div class="skeleton skeleton-line skeleton-line-thin"></div>
-              </div>
-              <div class="skeleton skeleton-pill"></div>
-              <div class="skeleton skeleton-pill skeleton-pill-narrow"></div>
-            </div>
-          </template>
-        </div>
-      </template>
+      </div>
     </div>
+
+    <!-- (List view + Kanban view + view-toggle + pagination removed —
+         funnel-primary layout uses the inline candidate lists per stage
+         expansion, see Pipeline Funnel section above.) -->
 
     <!-- ── Jobs section (collapsible) ─────────────────────── -->
     <div class="card section-card">
@@ -725,38 +744,18 @@
 
       <div class="card-body" x-show="showAnalytics">
 
-        <!-- Pipeline + Funnel side-by-side -->
+        <!--
+          Trimmed analytics — the panels that became their own primary
+          dashboards above (Pipeline Snapshot, Source Effectiveness,
+          Team Performance) are removed here to avoid duplicate UI.
+          What's left is purely historical context that complements the
+          live dashboards: stage-to-stage conversion over the period,
+          monthly time-to-hire trend, and per-stage average dwell time.
+        -->
         <div class="analytics-grid">
           <div class="analytics-panel">
-            <div class="panel-header">Pipeline Snapshot</div>
-            <div class="chart-container"><canvas id="pipelineChart"></canvas></div>
-          </div>
-
-          <div class="analytics-panel">
-            <div class="panel-header">Funnel Conversion</div>
+            <div class="panel-header">Funnel Conversion (historical)</div>
             <div class="chart-container"><canvas id="funnelChart"></canvas></div>
-          </div>
-        </div>
-
-        <div class="analytics-grid">
-          <div class="analytics-panel">
-            <div class="panel-header">Source Effectiveness</div>
-            <div class="source-row">
-              <div class="source-donut"><canvas id="sourceDonutChart"></canvas></div>
-              <table class="data-table compact">
-                <thead><tr><th>Source</th><th>Total</th><th>Hired</th><th>Rate</th></tr></thead>
-                <tbody>
-                  <template x-for="s in analytics.sourceEffectiveness" :key="s.source_id">
-                    <tr>
-                      <td x-text="s.source_name"></td>
-                      <td x-text="s.total_candidates"></td>
-                      <td x-text="s.hired_candidates"></td>
-                      <td x-text="s.hire_rate + '%'"></td>
-                    </tr>
-                  </template>
-                </tbody>
-              </table>
-            </div>
           </div>
 
           <div class="analytics-panel">
@@ -766,33 +765,6 @@
         </div>
 
         <div class="analytics-grid">
-          <div class="analytics-panel">
-            <div class="panel-header">Team Performance</div>
-            <table class="data-table compact">
-              <thead>
-                <tr><th>Recruiter</th><th>Total</th><th>Active</th><th>Hired</th><th>Avg Days</th></tr>
-              </thead>
-              <tbody>
-                <template x-for="r in analytics.recruiterPerformance" :key="r.recruiter_id">
-                  <tr class="clickable" @click="filters.recruiterId = r.recruiter_id; applyFilters(); scrollTop()">
-                    <td x-text="r.recruiter_name"></td>
-                    <td x-text="r.total_candidates"></td>
-                    <td x-text="r.active_candidates"></td>
-                    <td x-text="r.hires"></td>
-                    <td x-text="r.avg_days_to_hire || '—'"></td>
-                  </tr>
-                </template>
-                <template x-if="analytics.recruiterPerformance.length === 0">
-                  <tr><td colspan="5" class="empty-state-row">
-                    <span x-text="settings.recruiters.length === 0
-                      ? 'No recruiters added yet \u2014 open Settings to add your team.'
-                      : 'No candidates assigned to recruiters in this period.'"></span>
-                  </td></tr>
-                </template>
-              </tbody>
-            </table>
-          </div>
-
           <div class="analytics-panel">
             <div class="panel-header">Stage Velocity</div>
             <table class="data-table compact">
