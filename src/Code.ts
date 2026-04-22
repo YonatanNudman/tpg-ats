@@ -479,6 +479,49 @@ function getDashboardData(filters: DashboardFilters): DashboardResult {
 }
 
 // ============================================================
+// Per-section dashboard endpoints
+// ============================================================
+//
+// The funnel-primary dashboard layout lets each section have its own
+// filter row that overrides the global filters. To keep network round
+// trips light, each section gets a standalone endpoint that recomputes
+// only its own slice — instead of re-running the entire getDashboardData
+// bundle every time one filter changes anywhere on the page.
+//
+// All three endpoints share the per-execution row cache in SheetDB, so
+// once one of them populates the candidates+settings reads, the others
+// in the same execution are essentially free. They DON'T share between
+// executions (each frontend call is its own GAS request).
+
+function getPipelineFunnel(filters: DashboardFilters): import("./types").PipelineSnapshotItem[] {
+  const db = getDB();
+  return computePipelineSnapshot(db.getAllCandidates(), db.getAllStages(), filters);
+}
+
+/**
+ * Recruiter performance leaderboard — supports an OPTIONAL `hiresFilters`
+ * override so the dashboard's "Hires period" picker can scope just the
+ * Hires column independently of the rest of the table.
+ */
+function getRecruiterPerformance(
+  filters: DashboardFilters,
+  hiresFilters?: DashboardFilters
+): import("./types").RecruiterPerformanceItem[] {
+  const db = getDB();
+  return computeRecruiterPerformance(
+    db.getAllCandidates(),
+    db.getAllRecruiters(),
+    filters,
+    hiresFilters
+  );
+}
+
+function getSourceEffectiveness(filters: DashboardFilters): import("./types").SourceEffectivenessItem[] {
+  const db = getDB();
+  return computeSourceEffectiveness(db.getAllCandidates(), db.getAllSources(), filters);
+}
+
+// ============================================================
 // Multi-user sync fingerprint
 // ============================================================
 

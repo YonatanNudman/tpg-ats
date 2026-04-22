@@ -197,12 +197,31 @@ export function computeFunnelConversion(
 
 // ---------- Recruiter Performance ----------
 
+/**
+ * Recruiter performance leaderboard.
+ *
+ * `filters`        — applies to the Candidates / Rejections / Avg Days /
+ *                    Queue columns. The "what's their caseload right now"
+ *                    metrics share the dashboard's primary scope.
+ * `hiresFilters`   — OPTIONAL separate filter for the Hires column ONLY.
+ *                    Lets the dashboard show e.g. "Last 30 days hires"
+ *                    while the rest of the columns honor a wider period.
+ *                    Defaults to the same scope as `filters` when omitted.
+ *
+ * Includes ALL active recruiters (not just those with > 0 candidates) so
+ * the team roster is visible at a glance — a recruiter with an empty
+ * queue is its own kind of signal worth surfacing on the dashboard.
+ */
 export function computeRecruiterPerformance(
   candidates: CandidateRow[],
   recruiters: RecruiterRow[],
-  filters: DashboardFilters
+  filters: DashboardFilters,
+  hiresFilters?: DashboardFilters
 ): RecruiterPerformanceItem[] {
   const filtered = filterCandidates(candidates, filters);
+  const hiresScope = hiresFilters
+    ? filterCandidates(candidates, hiresFilters)
+    : filtered;
 
   return recruiters
     .filter(r => r.is_active)
@@ -210,6 +229,7 @@ export function computeRecruiterPerformance(
       const mine = filtered.filter(c => c.recruiter_id === r.id);
       const active = mine.filter(c => c.status === "Active").length;
       const hires = mine.filter(c => c.status === "Hired");
+      const hiresInPeriod = hiresScope.filter(c => c.recruiter_id === r.id && c.status === "Hired").length;
       const rejections = mine.filter(c => c.status === "Rejected").length;
 
       const avgDaysToHire = hires.length > 0
@@ -224,13 +244,18 @@ export function computeRecruiterPerformance(
         recruiter_name: r.name,
         total_candidates: mine.length,
         active_candidates: active,
+        queue: active,
         hires: hires.length,
+        hires_in_period: hiresInPeriod,
         rejections,
         avg_days_to_hire: Math.round(avgDaysToHire * 10) / 10,
       };
     })
-    .filter(r => r.total_candidates > 0)
-    .sort((a, b) => b.hires - a.hires || b.total_candidates - a.total_candidates);
+    .sort((a, b) =>
+      b.hires_in_period - a.hires_in_period ||
+      b.queue - a.queue ||
+      b.total_candidates - a.total_candidates
+    );
 }
 
 // ---------- Source Effectiveness ----------

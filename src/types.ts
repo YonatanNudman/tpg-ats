@@ -231,7 +231,22 @@ export interface RecruiterPerformanceItem {
   recruiter_name: string;
   total_candidates: number;
   active_candidates: number;
+  /**
+   * Currently active candidates (status === 'Active') assigned to this
+   * recruiter. Same value as `active_candidates` — kept as a separate
+   * field so the dashboard table can show both "your queue right now"
+   * and "your historical caseload" if those ever diverge (e.g. when
+   * we add custom queue states beyond Active).
+   */
+  queue: number;
   hires: number;
+  /**
+   * Hires within the section's hires-period filter (independent of the
+   * dashboard's primary date range). When the dashboard's "Hires period"
+   * picker is set differently from the global period, this column shows
+   * a different number than `hires`. When unset, equal to `hires`.
+   */
+  hires_in_period: number;
   rejections: number;
   avg_days_to_hire: number;
 }

@@ -283,11 +283,40 @@ describe("computeRecruiterPerformance", () => {
     expect(alice.avg_days_to_hire).toBeGreaterThan(0);
   });
 
-  it("excludes recruiters with no candidates", () => {
+  it("includes active recruiters with no candidates (so the team roster is always visible)", () => {
+    // Behavior change: previously hid 0-candidate recruiters. The dashboard
+    // now wants the full active-team list visible at all times so an empty
+    // queue is its own surfaced signal ("Bob has nothing to work on").
     const recruiters = [makeRecruiter(1, "Alice"), makeRecruiter(2, "Bob")];
     const candidates = [makeCandidate({ id: 1, recruiter_id: 1, status: "Active" })];
     const result = computeRecruiterPerformance(candidates, recruiters, wideFilters);
-    expect(result.some(r => r.recruiter_name === "Bob")).toBe(false);
+    const bob = result.find(r => r.recruiter_name === "Bob");
+    expect(bob).toBeDefined();
+    expect(bob!.total_candidates).toBe(0);
+    expect(bob!.queue).toBe(0);
+    expect(bob!.hires).toBe(0);
+    expect(bob!.hires_in_period).toBe(0);
+  });
+
+  it("hires_in_period uses hiresFilters override when provided", () => {
+    const recruiters = [makeRecruiter(1, "Alice")];
+    // Two hires by Alice: one applied 200d ago, one applied 10d ago
+    const ancient = new Date(Date.now() - 200 * 86_400_000).toISOString().split("T")[0];
+    const recent  = new Date(Date.now() - 10  * 86_400_000).toISOString().split("T")[0];
+    const candidates = [
+      makeCandidate({ id: 1, recruiter_id: 1, status: "Hired", date_applied: ancient, date_last_stage_update: ancient }),
+      makeCandidate({ id: 2, recruiter_id: 1, status: "Hired", date_applied: recent,  date_last_stage_update: recent }),
+    ];
+    // Wide primary scope catches both hires
+    // Narrow hires scope (last 30 days) catches only the recent one
+    const last30: typeof wideFilters = {
+      ...wideFilters,
+      startDate: new Date(Date.now() - 30 * 86_400_000).toISOString().split("T")[0],
+    };
+    const result = computeRecruiterPerformance(candidates, recruiters, wideFilters, last30);
+    const alice = result.find(r => r.recruiter_name === "Alice")!;
+    expect(alice.hires).toBe(2);            // unchanged — uses wide filters
+    expect(alice.hires_in_period).toBe(1);  // narrowed by hiresFilters
   });
 
   it("excludes inactive recruiters", () => {
