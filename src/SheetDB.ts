@@ -95,14 +95,42 @@ function parseBool(val: unknown): boolean {
  */
 export function parseStr(val: unknown): string {
   if (val == null) return "";
-  if (val instanceof Date) {
-    // A Sheets-stored date with no explicit time component comes back
-    // as midnight UTC (or midnight local, depending on the spreadsheet
-    // locale). Truncating to YYYY-MM-DD when the time slice is exactly
-    // midnight keeps date-only fields visually clean while preserving
-    // the full ISO for true datetime fields like `created_at`.
-    const iso = val.toISOString();
-    return iso.endsWith("T00:00:00.000Z") ? iso.split("T")[0] : iso;
+  // Duck-type Date detection. The naive `val instanceof Date` check is
+  // unreliable in the Apps Script V8 runtime: cells returned by
+  // SpreadsheetApp.getRange().getValues() carry a Date-like object that
+  // DOES NOT match the local `Date` constructor's prototype (different
+  // realm or subclassed type), so `instanceof Date` returns false even
+  // though the value has all the Date methods.
+  //
+  // The diagnostic (v25-v27) caught this in production: parseStr was
+  // falling through to String(val) for date cells, producing the JS
+  // toString format ("Wed Apr 22 2026 00:00:00 GMT-0400 ..."), which
+  // then broke calendar-date filters because slice(0,10) on that string
+  // gives "Wed Apr 22" — not anything that compares correctly against
+  // a "2026-04-22" filter input.
+  //
+  // Fix: also accept any object that exposes both .toISOString() and
+  // .getTime(). Together those uniquely identify the Date interface
+  // among built-ins; nothing else in our pipeline would pass.
+  const isDateLike =
+    val instanceof Date ||
+    (
+      typeof val === "object" &&
+      val !== null &&
+      typeof (val as { toISOString?: unknown }).toISOString === "function" &&
+      typeof (val as { getTime?: unknown }).getTime === "function"
+    );
+  if (isDateLike) {
+    try {
+      const iso = (val as Date).toISOString();
+      // Date-only when stored at exact midnight UTC (cells typed as
+      // "YYYY-MM-DD" with no time component in a UTC-locale spreadsheet).
+      // Otherwise emit the full ISO; downstream calendar-date filters
+      // slice(0,10) so any "YYYY-MM-DDT...Z" still compares correctly.
+      return iso.endsWith("T00:00:00.000Z") ? iso.split("T")[0] : iso;
+    } catch (_e) {
+      // Pathological Date (timestamp out of range, etc.) — fall through.
+    }
   }
   return String(val);
 }

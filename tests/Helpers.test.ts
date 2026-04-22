@@ -99,6 +99,35 @@ describe("parseStr", () => {
     expect(candidate >= ninetyDaysAgo).toBe(true);
     expect(candidate <= "2026-12-31").toBe(true);
   });
+
+  it("regression: handles a Date-like object that fails `instanceof Date`", () => {
+    // Apps Script V8 returns cells as Date-like objects from a different
+    // realm — they have all the Date methods but `instanceof Date`
+    // against the local constructor is false. Without duck-typing,
+    // parseStr fell through to String(val) and emitted the toString
+    // format ("Wed Apr 22 2026 00:00:00 GMT-0400 ..."), breaking every
+    // calendar-date filter. Locked in here so a future cleanup can't
+    // accidentally drop the duck-type branch.
+    const realDate = new Date("2026-04-22T04:00:00.000Z");
+    const fakeDate = {
+      toISOString: () => realDate.toISOString(),
+      getTime:     () => realDate.getTime(),
+    } as unknown as Date;
+    expect(parseStr(fakeDate)).toBe("2026-04-22T04:00:00.000Z");
+  });
+
+  it("regression: pathological Date-like that throws on toISOString falls through to String()", () => {
+    // Defense in depth: a malformed Date-like (e.g. invalid timestamp)
+    // shouldn't crash parseStr — it should fall back to String(val) so
+    // the row mapper still produces *some* string and the rest of the
+    // pipeline keeps moving instead of dying mid-load.
+    const bad = {
+      toISOString: () => { throw new RangeError("invalid time"); },
+      getTime:     () => NaN,
+      toString:    () => "broken",
+    } as unknown as Date;
+    expect(parseStr(bad)).toBe("broken");
+  });
 });
 
 // ============================================================
