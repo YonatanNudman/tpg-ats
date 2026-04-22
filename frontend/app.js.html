@@ -237,11 +237,16 @@ document.addEventListener('alpine:init', function () {
 
       loadSettings: async function () {
         var s = await gasCall('getSettings');
-        this.settings = {
-          stages: s.stages, sources: s.sources, regions: s.regions,
-          recruiters: s.recruiters, refuseReasons: s.refuseReasons,
-        };
-        Alpine.store('app').settings = this.settings;
+        // Mutate in place so all bound templates stay reactive across
+        // re-loads (initial load + every 20s sync tick). Replacing the
+        // whole object would detach reactivity from every dependent
+        // template (dropdowns, Kanban columns, filters).
+        var local = this.settings, shared = Alpine.store('app').settings;
+        local.stages   = shared.stages   = s.stages;
+        local.sources  = shared.sources  = s.sources;
+        local.regions  = shared.regions  = s.regions;
+        local.recruiters    = shared.recruiters    = s.recruiters;
+        local.refuseReasons = shared.refuseReasons = s.refuseReasons;
       },
 
       loadCandidates: async function () {
@@ -459,8 +464,8 @@ document.addEventListener('alpine:init', function () {
             labels: f.map(function (x) { return x.stage_name; }),
             datasets: [{
               data: f.map(function (x) { return x.conversion_rate; }),
-              backgroundColor: 'rgba(89,74,226,0.7)',
-              borderColor: '#594AE2', borderWidth: 1, borderRadius: 4,
+              backgroundColor: 'rgba(242,131,31,0.75)',
+              borderColor: '#F2831F', borderWidth: 1, borderRadius: 4,
             }],
           },
           options: {
@@ -482,7 +487,8 @@ document.addEventListener('alpine:init', function () {
         if (!el) return;
         if (sourceChart) sourceChart.destroy();
         var s = this.analytics.sourceEffectiveness;
-        var colors = ['#594AE2','#039be5','#4caf50','#fb8c00','#e53935','#8e24aa'];
+        // TPG orange leads, then diverse accents for additional sources
+        var colors = ['#F2831F','#239ED8','#3AA76D','#8E5DC9','#E14B4B','#1A1A2E'];
         sourceChart = new Chart(el, {
           type: 'doughnut',
           data: {
@@ -508,7 +514,7 @@ document.addEventListener('alpine:init', function () {
             labels: t.map(function (x) { return x.month_label; }),
             datasets: [{
               data: t.map(function (x) { return x.avg_days_to_hire; }),
-              borderColor: '#594AE2', backgroundColor: 'rgba(89,74,226,0.08)',
+              borderColor: '#F2831F', backgroundColor: 'rgba(242,131,31,0.1)',
               fill: true, tension: 0.35, pointRadius: 4,
             }],
           },
@@ -521,9 +527,27 @@ document.addEventListener('alpine:init', function () {
       },
 
       // ── Multi-user sync polling ──────────────────────────
+      // 20s interval = 180 polls/hour/user. Comfortable headroom under
+      // GAS Workspace's 6-hour/day script runtime quota for the expected
+      // 5-10 recruiters. Polling pauses automatically when tab is hidden
+      // (document.hidden) or when the user has a peek panel open.
       startSyncPolling: function () {
         var self = this;
-        syncTimer = setInterval(function () { self.checkSync(); }, 15000);
+        syncTimer = setInterval(function () { self.checkSync(); }, 20000);
+      },
+
+      // Manual refresh — wired to the 🔄 button in the topbar
+      manualRefresh: async function () {
+        if (this.syncing) return;
+        this.syncing = true;
+        try {
+          await this.reloadAll();
+          Alpine.store('app').toastSuccess('Refreshed.');
+        } catch (e) {
+          Alpine.store('app').toastError('Refresh failed: ' + e.message);
+        } finally {
+          this.syncing = false;
+        }
       },
 
       checkSync: async function () {
@@ -736,17 +760,30 @@ document.addEventListener('alpine:init', function () {
         this.saving = true;
         try {
           await gasCall(conf.gas, rows);
-          // Reload from server so local copy has real IDs  (fixes C5)
+          // Reload from server so local copy has real IDs (fixes C5)
           var fresh = await gasCall('getSettings');
-          this.$store.app.settings = {
-            stages: fresh.stages, sources: fresh.sources, regions: fresh.regions,
-            recruiters: fresh.recruiters, refuseReasons: fresh.refuseReasons,
-          };
+          // IMPORTANT: MUTATE the store's settings object in place instead of
+          // replacing it. Alpine's reactivity tracks the original proxy; a
+          // bulk-replace (= { ... }) detaches dependent templates (the Add Job
+          // modal's recruiter dropdown, the topbar Recruiter filter, the
+          // Kanban stage columns) and they keep rendering the old values.
+          var s = this.$store.app.settings;
+          s.stages        = fresh.stages;
+          s.sources       = fresh.sources;
+          s.regions       = fresh.regions;
+          s.recruiters    = fresh.recruiters;
+          s.refuseReasons = fresh.refuseReasons;
           this.reload(kind);
-          // Notify main app to refresh
+          // Notify main app — also mutate its local `settings` in place
+          // so its own bindings (topbar filter, Kanban stage columns)
+          // refresh without re-initialization.
           var root = Alpine.$data(document.querySelector('#app'));
           if (root) {
-            root.settings = self.$store.app.settings;
+            root.settings.stages        = fresh.stages;
+            root.settings.sources       = fresh.sources;
+            root.settings.regions       = fresh.regions;
+            root.settings.recruiters    = fresh.recruiters;
+            root.settings.refuseReasons = fresh.refuseReasons;
             root.loadCandidates();
           }
           this.$store.app.toastSuccess('Saved.');

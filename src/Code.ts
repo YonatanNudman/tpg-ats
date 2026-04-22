@@ -464,6 +464,7 @@ function getSyncFingerprint(): { sig: string; userEmail: string } {
   const candidates = db.getAllCandidates();
   const jobs = db.getAllJobs();
 
+  // ── Candidates signal: detect adds, stage changes, status changes ──
   let maxCandidateId = 0;
   let latestStageUpdate = "";
   let activeCount = 0;
@@ -473,7 +474,40 @@ function getSyncFingerprint(): { sig: string; userEmail: string } {
     if (c.status === "Active") activeCount++;
   }
 
-  const maxJobId = jobs.reduce((m, j) => Math.max(m, j.id), 0);
+  // ── Jobs signal: catch edits (status change, title rename), not just adds ──
+  let jobHash = 0;
+  let maxJobId = 0;
+  for (const j of jobs) {
+    if (j.id > maxJobId) maxJobId = j.id;
+    jobHash = (jobHash + j.id * 31 + (j.status || "").length * 13 + (j.title || "").length) | 0;
+  }
+
+  // ── Settings signal: any add/remove/rename/toggle on any settings list
+  // triggers a refresh for all other open tabs. Hash the name + active/enabled
+  // flags for each list. 5 tiny strings joined together; cheap to compute. ──
+  function hashList(
+    rows: Array<{ id: number; name: string }>,
+    flag?: (r: any) => number
+  ): string {
+    let h = rows.length;
+    for (const r of rows) {
+      h = (h * 131 + (r.name || "").length + r.id) | 0;
+      if (flag) h = (h + flag(r)) | 0;
+    }
+    return String(h);
+  }
+
+  const settingsSig = [
+    hashList(db.getAllRecruiters(),    (r: any) => r.is_active ? 1 : 0),
+    hashList(db.getAllStages(),        (s: any) => (s.is_enabled ? 1 : 0)
+                                                 + (s.is_hired ? 2 : 0)
+                                                 + (s.is_rejected ? 4 : 0)
+                                                 + (s.is_offer ? 8 : 0)
+                                                 + ((s.sequence | 0) * 16)),
+    hashList(db.getAllSources(),       (s: any) => s.is_enabled ? 1 : 0),
+    hashList(db.getAllRegions(),       (r: any) => r.is_enabled ? 1 : 0),
+    hashList(db.getAllRefuseReasons(), (r: any) => r.is_enabled ? 1 : 0),
+  ].join(",");
 
   return {
     sig: [
@@ -483,6 +517,8 @@ function getSyncFingerprint(): { sig: string; userEmail: string } {
       latestStageUpdate,
       jobs.length,
       maxJobId,
+      jobHash,
+      settingsSig,
     ].join("|"),
     userEmail: getSessionEmail(),
   };

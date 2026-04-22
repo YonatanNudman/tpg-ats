@@ -4,9 +4,11 @@
    ============================================================= */
 
 :root {
-  --primary: #594AE2;
-  --primary-dark: #4237B5;
-  --primary-light: #EEE9FF;
+  /* TPG brand orange — matches the arrow in the logo */
+  --primary: #F2831F;
+  --primary-dark: #CE6A0D;
+  --primary-light: #FDEEDD;
+  --primary-rgb: 242, 131, 31;  /* for rgba() shadow calls */
   --body-bg: #F6F7FB;
   --card-bg: #FFFFFF;
   --border: #E3E5EC;
@@ -90,6 +92,9 @@ html, body {
 }
 .icon-btn:hover { background: var(--primary-light); color: var(--primary); }
 .icon-btn .material-icons { font-size: 20px; }
+.icon-btn:disabled { opacity: 0.5; cursor: not-allowed; }
+.icon-btn.spinning .material-icons { animation: spin 0.9s linear infinite; }
+@keyframes spin { to { transform: rotate(360deg); } }
 
 .icon-btn-sm {
   width: 28px; height: 28px; border-radius: 6px;
@@ -158,7 +163,7 @@ html, body {
 .filter-group select:focus, .filter-group input:focus {
   outline: none;
   border-color: var(--primary);
-  box-shadow: 0 0 0 3px rgba(89,74,226,0.15);
+  box-shadow: 0 0 0 3px rgba(var(--primary-rgb),0.18);
 }
 .filter-reset { align-self: flex-end; margin-left: auto; }
 
@@ -259,7 +264,7 @@ html, body {
 .inline-select:hover { background-color: #F4F6FC; border-color: var(--border); }
 .inline-select:focus {
   outline: none; border-color: var(--primary);
-  background-color: white; box-shadow: 0 0 0 3px rgba(89,74,226,0.15);
+  background-color: white; box-shadow: 0 0 0 3px rgba(var(--primary-rgb),0.18);
 }
 
 .motion-select.inbound { color: var(--inbound); }
@@ -628,7 +633,7 @@ html, body {
 }
 .form-control:focus, .form-select:focus {
   border-color: var(--primary);
-  box-shadow: 0 0 0 3px rgba(89,74,226,0.15);
+  box-shadow: 0 0 0 3px rgba(var(--primary-rgb),0.18);
 }
 .btn { font-size: 13px; font-weight: 500; border-radius: 6px; padding: 6px 14px; }
 .btn-primary { background: var(--primary); border-color: var(--primary); }

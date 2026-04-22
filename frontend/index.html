@@ -53,15 +53,22 @@
       <div class="brand-mark">T</div>
       <div>
         <div class="brand-title">TPG Recruiting ATS</div>
-        <div class="brand-sub" x-text="userEmail || 'Signed in…'"></div>
+        <div class="brand-sub">The Pipeline Group</div>
       </div>
     </div>
 
     <div class="topbar-spacer"></div>
 
+    <!-- Manual refresh — users can force a reload without waiting 20s -->
+    <button class="icon-btn refresh-btn" :class="{ 'spinning': syncing }"
+      :disabled="syncing" @click="manualRefresh()"
+      title="Refresh now (auto-syncs every 20s)">
+      <span class="material-icons">refresh</span>
+    </button>
+
     <!-- Sync indicator -->
     <div class="sync-indicator" :class="{ 'syncing': syncing, 'stale': syncStale }"
-      :title="syncStale ? 'Data may be stale — reloading…' : 'Live (auto-syncs every 15s)'">
+      :title="syncStale ? 'Data may be stale — reloading…' : 'Live (auto-syncs every 20s)'">
       <span class="sync-dot"></span>
       <span x-text="syncing ? 'Syncing…' : (syncStale ? 'Refreshing' : 'Live')"></span>
     </div>
