@@ -14,12 +14,81 @@
    Plus: 15s sync fingerprint poll for multi-user coordination.
    ============================================================= */
 
+// ── Client-side error visibility ─────────────────────────────
+// Without this, JS errors and unhandled promise rejections are silent
+// in production — the app sits frozen and nobody knows why. The handler
+// below shows a toast when Alpine is ready and a degraded banner when
+// it isn't (e.g. error during Alpine init itself). All errors also
+// log to the GAS execution log via the lightweight logClientError
+// endpoint so post-incident triage doesn't require shipping debug
+// builds.
+function _showFatalBanner(msg) {
+  // Used only when the Alpine toast store isn't available yet. Idempotent
+  // — second call updates the existing banner instead of stacking.
+  var id = '__tpg_fatal_banner';
+  var el = document.getElementById(id);
+  if (!el) {
+    el = document.createElement('div');
+    el.id = id;
+    el.style.cssText = [
+      'position:fixed', 'top:0', 'left:0', 'right:0',
+      'background:#E14B4B', 'color:white',
+      'padding:10px 16px', 'font:13px/1.4 system-ui,sans-serif',
+      'z-index:99999', 'box-shadow:0 2px 6px rgba(0,0,0,0.15)',
+    ].join(';');
+    document.body.appendChild(el);
+  }
+  el.textContent = 'Something went wrong: ' + msg + ' (Cmd+R to reload)';
+}
+
+function _reportClientError(kind, err) {
+  var msg = (err && (err.message || err.toString())) || String(err) || 'Unknown error';
+  var stack = (err && err.stack) || '';
+  // Try to surface visually — Alpine first, fallback to fatal banner.
+  try {
+    var store = (typeof Alpine !== 'undefined' && Alpine.store) ? Alpine.store('app') : null;
+    if (store && typeof store.toastError === 'function') {
+      store.toastError(kind + ': ' + msg);
+    } else {
+      _showFatalBanner(msg);
+    }
+  } catch (_) { _showFatalBanner(msg); }
+  // Always log to console so devs can grab the stack from DevTools.
+  console.error('[' + kind + ']', err);
+  // Best-effort server log. We do NOT await — error reporting must never
+  // throw or block the original error path.
+  try {
+    if (typeof google !== 'undefined' && google.script && google.script.run) {
+      google.script.run
+        .withFailureHandler(function () { /* swallow — can't error on the error path */ })
+        .logClientError({
+          kind: kind,
+          message: msg,
+          stack: stack.slice(0, 2000),
+          url: (typeof location !== 'undefined' && location.href) || '',
+          ua: (typeof navigator !== 'undefined' && navigator.userAgent) || '',
+          ts: new Date().toISOString(),
+        });
+    }
+  } catch (_) { /* swallow */ }
+}
+
+window.addEventListener('error', function (e) {
+  _reportClientError('JS error', e.error || e.message);
+});
+window.addEventListener('unhandledrejection', function (e) {
+  _reportClientError('Unhandled promise', e.reason);
+});
+
 // ── Promise wrapper for google.script.run ───────────────────
 function gasCall(fnName, ...args) {
   return new Promise(function (resolve, reject) {
     var runner = google.script.run
       .withSuccessHandler(resolve)
       .withFailureHandler(function (err) {
+        // Note: caller errors typically surface via the per-action toast
+        // (e.g. "Save failed: …"). _reportClientError is for the cases
+        // where the rejection bubbles all the way up to unhandledrejection.
         reject(new Error(err.message || String(err)));
       });
     runner[fnName].apply(runner, args);

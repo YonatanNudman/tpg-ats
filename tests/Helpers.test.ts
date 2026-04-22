@@ -1,4 +1,5 @@
 import { daysBetween, logHistory, joinCandidate } from "../src/Helpers";
+import { parseStr } from "../src/SheetDB";
 import type { ISheetDB, CandidateRow, StageRow, JobRow, RecruiterRow, SourceRow, RegionRow, RefuseReasonRow } from "../src/types";
 
 // ---------- Mock SheetDB ----------
@@ -44,6 +45,61 @@ function makeCandidate(overrides: Partial<CandidateRow> = {}): CandidateRow {
     ...overrides,
   };
 }
+
+// ============================================================
+// parseStr — Sheets cell coercion to string
+// ============================================================
+//
+// Sheets returns date-typed cells as native JS Date objects from
+// getRange().getValues(). The naive String(date) produces the locale
+// toString format, which silently breaks every consumer of the date
+// fields downstream (lex compares fail, CSV export looks awful,
+// activity feed shows "Wed Apr 22 2026 ...").
+//
+// These tests lock in the contract: parseStr always returns a string,
+// and Date instances are normalized to ISO so YYYY-MM-DD lex sorts work.
+
+describe("parseStr", () => {
+  it("returns empty string for null/undefined", () => {
+    expect(parseStr(null)).toBe("");
+    expect(parseStr(undefined)).toBe("");
+  });
+
+  it("passes through plain strings unchanged", () => {
+    expect(parseStr("2026-04-22")).toBe("2026-04-22");
+    expect(parseStr("hello")).toBe("hello");
+  });
+
+  it("coerces numbers and booleans via String()", () => {
+    expect(parseStr(42)).toBe("42");
+    expect(parseStr(true)).toBe("true");
+  });
+
+  it("normalizes a Sheets-style midnight Date to YYYY-MM-DD", () => {
+    // What Sheets gives back when a cell was written as "2026-04-22" —
+    // it's auto-detected as a date and stored at midnight UTC.
+    const midnight = new Date("2026-04-22T00:00:00.000Z");
+    expect(parseStr(midnight)).toBe("2026-04-22");
+  });
+
+  it("preserves full ISO when a Date carries a time component", () => {
+    // What created_at columns look like — a real timestamp, not a date.
+    const timestamped = new Date("2026-04-22T13:45:30.123Z");
+    expect(parseStr(timestamped)).toBe("2026-04-22T13:45:30.123Z");
+  });
+
+  it("regression: parseStr-of-Date sorts lexicographically with date strings", () => {
+    // The bug this fix addresses: client-side filters compare
+    // c.date_applied (string from parseStr) against f.startDate
+    // (string from presetRange). If parseStr emitted JS Date toString,
+    // "Wed Apr 22..." would sort BEFORE any "2026-..." string and
+    // every candidate would look out-of-range.
+    const candidate = parseStr(new Date("2026-04-22T00:00:00.000Z"));
+    const ninetyDaysAgo = "2026-01-22";
+    expect(candidate >= ninetyDaysAgo).toBe(true);
+    expect(candidate <= "2026-12-31").toBe(true);
+  });
+});
 
 // ============================================================
 // daysBetween

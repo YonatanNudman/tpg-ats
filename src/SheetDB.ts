@@ -93,7 +93,7 @@ function parseBool(val: unknown): boolean {
  * full `"YYYY-MM-DDTHH:mm:ss.sssZ"`. Both formats sort correctly via
  * string comparison.
  */
-function parseStr(val: unknown): string {
+export function parseStr(val: unknown): string {
   if (val == null) return "";
   if (val instanceof Date) {
     // A Sheets-stored date with no explicit time component comes back

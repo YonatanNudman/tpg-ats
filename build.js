@@ -54,6 +54,92 @@ for (const file of fs.readdirSync(frontendSrc)) {
   }
 }
 
+// ---- 3b. Structural sanity checks on the copied frontend ----
+// Catches the class of bugs that produced v11 (a stray </style> mid-file
+// leaked 68 lines of raw CSS into the page body as text). Cheap to run
+// every build; failing here is much friendlier than discovering the same
+// issue from a recruiter's screenshot post-deploy.
+//
+// The checks are intentionally conservative — they verify structural
+// invariants the deployed app cannot survive without, NOT visual quality.
+// A failure here means "this build will render broken", not "stylistic
+// nit". To bypass during local experimentation, set SKIP_BUILD_CHECKS=1.
+function checkFrontendStructure() {
+  const errors = [];
+
+  function check(filename, predicate, message) {
+    const filepath = path.join(FRONTEND_DEST, filename);
+    if (!fs.existsSync(filepath)) {
+      errors.push(`${filename}: file missing from dist/`);
+      return;
+    }
+    const content = fs.readFileSync(filepath, 'utf8');
+    if (!predicate(content)) errors.push(`${filename}: ${message}`);
+  }
+
+  // styles.css.html: exactly one <style> and one </style>, with </style>
+  // at the very end. Extra closing tags mid-file render the rest as body text.
+  check('styles.css.html',
+    s => (s.match(/<style>/g) || []).length === 1,
+    'expected exactly one <style> opening tag');
+  check('styles.css.html',
+    s => (s.match(/<\/style>/g) || []).length === 1,
+    'expected exactly one </style> closing tag');
+  check('styles.css.html',
+    s => /<\/style>\s*$/.test(s),
+    '</style> must be at end of file (anything after leaks into the page body as text)');
+
+  // app.js.html: must be wrapped in a single <script>...</script> block.
+  check('app.js.html',
+    s => (s.match(/<script>/g) || []).length === 1 &&
+         (s.match(/<\/script>/g) || []).length === 1,
+    'expected exactly one <script>/</script> pair');
+  check('app.js.html',
+    s => /<\/script>\s*$/.test(s),
+    '</script> must be at end of file');
+
+  // index.html: required mounting points the app cannot start without.
+  check('index.html', s => s.includes('id="app"'),     'missing #app root mount');
+  check('index.html', s => s.includes("x-data=\"atsApp()\""), 'missing atsApp() x-data on #app');
+  check('index.html', s => s.includes("x-init=\"init()\""),   'missing x-init on #app');
+  check('index.html', s => s.includes("include('styles.css')"), 'missing styles.css include');
+  check('index.html', s => s.includes("include('app.js')"),     'missing app.js include');
+
+  // index.html: each top-level dashboard section must be present, since
+  // removing one accidentally would visibly break the funnel-primary layout.
+  const REQUIRED_SECTIONS = [
+    ['funnel-card',          'Pipeline Funnel section'],
+    ['recruiter-perf-card',  'Recruiter Performance section'],
+    ['source-roi-card',      'Sourcing ROI section'],
+  ];
+  for (const [cls, label] of REQUIRED_SECTIONS) {
+    check('index.html',
+      s => s.includes(cls),
+      `missing ${label} (.${cls})`);
+  }
+
+  // Code.js: bundled output must expose doGet (GAS web-app entry point).
+  // Without this, the deployment URL returns "Script function not found".
+  const codeJs = fs.readFileSync(path.join(DIST, 'Code.js'), 'utf8');
+  if (!/function\s+doGet\s*\(/.test(codeJs)) {
+    errors.push('Code.js: missing doGet() — web app would 404 after deploy');
+  }
+
+  if (errors.length > 0) {
+    console.error('\n[build.js] Structural sanity checks FAILED:');
+    for (const e of errors) console.error('  ✗ ' + e);
+    if (process.env.SKIP_BUILD_CHECKS === '1') {
+      console.warn('\n[build.js] Continuing anyway because SKIP_BUILD_CHECKS=1.');
+    } else {
+      console.error('\n[build.js] Aborting. Set SKIP_BUILD_CHECKS=1 to bypass.\n');
+      process.exit(1);
+    }
+  } else {
+    console.log('[build.js] Structural sanity: ok');
+  }
+}
+checkFrontendStructure();
+
 // ---- 4. Copy appsscript.json → dist/ ----
 fs.copyFileSync(
   path.join(__dirname, 'appsscript.json'),

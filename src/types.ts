@@ -303,9 +303,21 @@ export interface StaleCandidateItem {
   severity: "stale" | "abandoned";
 }
 
+/**
+ * Bundle returned by `getDashboardData` for the funnel-primary layout.
+ *
+ * Trimmed after the funnel-primary refactor — the following fields used to
+ * be on this shape but are no longer consumed anywhere on the frontend, so
+ * they are no longer computed:
+ *   - kpis             (KPI strip retired; metrics live on the funnel + perf cards)
+ *   - pipelineSnapshot (funnel is computed client-side from allCandidates)
+ *   - recentHires      (use the standalone getRecentHires endpoint instead)
+ *
+ * The compute functions for those metrics (computeKpis, computePipelineSnapshot)
+ * are still exported and unit-tested; they're just no longer called by the
+ * dashboard bundle.
+ */
 export interface DashboardResult {
-  kpis: KpiData;
-  pipelineSnapshot: PipelineSnapshotItem[];
   funnelConversion: FunnelItem[];
   recruiterPerformance: RecruiterPerformanceItem[];
   sourceEffectiveness: SourceEffectivenessItem[];
@@ -313,7 +325,6 @@ export interface DashboardResult {
   stageVelocity: StageVelocityItem[];
   slaBreaches: SlaBreachItem[];
   staleCandidates: StaleCandidateItem[];
-  recentHires: CandidateRow[];
 }
 
 export interface CandidateDetailResult {

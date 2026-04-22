@@ -23,8 +23,10 @@ import {
   getCurrentUserEmail as getSessionEmail,
 } from "./Helpers";
 import {
-  computeKpis,
-  computePipelineSnapshot,
+  // computeKpis + computePipelineSnapshot used to feed the dashboard bundle
+  // but the funnel-primary frontend doesn't consume them. They remain
+  // exported from Analytics.ts for the unit tests and as building blocks
+  // for any future endpoint that needs them.
   computeFunnelConversion,
   computeRecruiterPerformance,
   computeSourceEffectiveness,
@@ -439,34 +441,28 @@ function deleteJobOpening(id: number): void {
 // Dashboard
 // ============================================================
 
+/**
+ * Dashboard bundle for the funnel-primary layout.
+ *
+ * Trimmed (see DashboardResult comment in types.ts): no longer computes
+ * KPI strip metrics, the pipeline snapshot bar chart, or the recent-hires
+ * list — those are either unused by the new UI or fetched separately.
+ *
+ * Drops three calls (computeKpis, computePipelineSnapshot, joinCandidates +
+ * recentHires sort) per dashboard request. At a few candidates that's
+ * micro-optimization; once the workspace grows past a few hundred rows it
+ * compounds nicely with the per-execution row cache.
+ */
 function getDashboardData(filters: DashboardFilters): DashboardResult {
   const db = getDB();
   const candidates  = db.getAllCandidates();
   const jobs        = db.getAllJobs();
   const stages      = db.getAllStages();
   const sources     = db.getAllSources();
-  const regions     = db.getAllRegions();
   const recruiters  = db.getAllRecruiters();
-  const refuseReasons = db.getAllRefuseReasons();
-
-  // Single-scan history fetch (was O(n²) via per-candidate filter before)
-  const allHistory = db.getAllHistory();
-
-  const joinedCandidates = candidates.map(c =>
-    joinCandidate(c, stages, jobs, recruiters, sources, regions, refuseReasons)
-  );
-
-  const recentHires = joinedCandidates
-    .filter(c => c.status === "Hired")
-    .sort((a, b) =>
-      new Date(b.date_last_stage_update).getTime() -
-      new Date(a.date_last_stage_update).getTime()
-    )
-    .slice(0, 20);
+  const allHistory  = db.getAllHistory();   // single scan, used by funnel + velocity
 
   return {
-    kpis:                 computeKpis(candidates, jobs, stages, filters),
-    pipelineSnapshot:     computePipelineSnapshot(candidates, stages, filters),
     funnelConversion:     computeFunnelConversion(allHistory, stages, filters),
     recruiterPerformance: computeRecruiterPerformance(candidates, recruiters, filters),
     sourceEffectiveness:  computeSourceEffectiveness(candidates, sources, filters),
@@ -474,7 +470,6 @@ function getDashboardData(filters: DashboardFilters): DashboardResult {
     stageVelocity:        computeStageVelocity(allHistory, stages, filters),
     slaBreaches:          computeSlaBreaches(candidates, stages, recruiters, jobs, filters),
     staleCandidates:      computeStaleCandidates(candidates, stages, recruiters, jobs, filters),
-    recentHires,
   };
 }
 
@@ -878,6 +873,50 @@ function bulkCreateCandidates(rows: CreateCandidateInput[]): {
 
     return { created, skipped, ids };
   });
+}
+
+// ============================================================
+// Client error logging
+// ============================================================
+//
+// Frontend window.onerror / unhandledrejection handlers POST to this
+// endpoint so we can see what's breaking in production without asking
+// users for screenshots. Output goes to the GAS execution log
+// (Apps Script editor → Executions tab) and to console.error so a
+// project owner can review them post-hoc. Intentionally NOT writing
+// to a sheet — keeps the volume bounded under a runaway-error scenario.
+//
+// Best-effort: if the log call itself fails for any reason, swallow.
+// Error reporting must never become its own outage.
+
+interface ClientErrorPayload {
+  kind: string;        // "JS error" | "Unhandled promise" | etc.
+  message: string;
+  stack?: string;
+  url?: string;
+  ua?: string;
+  ts?: string;
+}
+
+function logClientError(payload: ClientErrorPayload): { ok: boolean } {
+  try {
+    const userEmail = getSessionEmail() || "unknown";
+    // console.error in GAS routes to Stackdriver / Cloud Logging when the
+    // project is GCP-linked. Otherwise it lands in the Apps Script
+    // execution log, which is enough to debug without infrastructure.
+    console.error("[client-error]", JSON.stringify({
+      user: userEmail,
+      kind: payload.kind,
+      message: payload.message,
+      url: payload.url,
+      ua: payload.ua,
+      ts: payload.ts,
+      stack: payload.stack ? payload.stack.slice(0, 2000) : undefined,
+    }));
+  } catch (_e) {
+    // Never throw — this would loop the unhandledrejection handler.
+  }
+  return { ok: true };
 }
 
 function getRecentActivity(limit = 50): import("./types").HistoryRow[] {
