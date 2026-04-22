@@ -121,6 +121,22 @@
       <span class="material-icons mi-inline">work</span>
       Add Job
     </button>
+    <!--
+      Export to CSV \u2014 occasional action, demoted to icon-only in the
+      topbar (was previously next to Reset in the filter card, but it
+      gets used <1x/week and was visually heavy down there). Disabled
+      state covers the empty-view case so clicking it can never
+      download a 0-row file. Tooltip surfaces the count so you know
+      what you're about to download without having to look at the
+      filter card.
+    -->
+    <button class="icon-btn" @click="exportCandidatesToCsv(filteredCandidates)"
+      :disabled="filteredCandidates.length === 0"
+      :title="filteredCandidates.length === 0
+        ? 'No candidates in the current view to export'
+        : 'Export ' + filteredCandidates.length + ' candidates to CSV'">
+      <span class="material-icons">download</span>
+    </button>
     <button class="icon-btn" @click="openSettings()" title="Settings">
       <span class="material-icons">settings</span>
     </button>
@@ -274,16 +290,7 @@
         </div>
 
         <div class="filter-actions">
-          <button class="btn btn-sm btn-outline-primary"
-            @click="exportCandidatesToCsv(filteredCandidates)"
-            :disabled="filteredCandidates.length === 0"
-            :title="filteredCandidates.length === 0
-              ? 'No candidates in the current view'
-              : 'Download ' + filteredCandidates.length + ' candidates as CSV'">
-            <span class="material-icons mi-inline">download</span>
-            Export
-            <span class="export-count" x-text="'(' + filteredCandidates.length + ')'"></span>
-          </button>
+          <!-- Export moved to the topbar (icon-only) since it's used <1x/week. -->
           <button class="btn btn-sm btn-outline-secondary"
             @click="resetFilters()">Reset</button>
         </div>

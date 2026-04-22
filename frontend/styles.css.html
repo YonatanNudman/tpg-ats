@@ -302,8 +302,16 @@ html, body {
 .filter-actions {
   margin-left: auto; display: flex; gap: 8px; align-self: flex-end;
 }
-.export-count {
-  opacity: 0.7; font-weight: 400; margin-left: 2px;
+/* (.export-count was the small "(143)" label inside the filter-card
+   Export button; the button moved to the topbar as icon-only and the
+   count now lives in its tooltip, so the inline-label class retired.) */
+
+/* Topbar download icon \u2014 dim the disabled state so an empty-view
+   click target reads as "nothing to do here" rather than a normal
+   button you can press. */
+.icon-btn:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
 }
 
 /* (.kpi-* styles removed — KPI strip retired in favor of the funnel-primary
