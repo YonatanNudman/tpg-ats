@@ -362,16 +362,53 @@ function createCandidate(data: CreateCandidateInput): CandidateRow {
   });
 }
 
-function updateCandidate(id: number, data: UpdateCandidateInput): void {
-  withLock(() => getDB().updateCandidate(id, data));
+// ============================================================
+// Conflict detection (poor-man's optimistic locking)
+// ============================================================
+//
+// All candidate writes accept an optional `expectedDate` argument — the
+// `date_last_stage_update` value the client last loaded. If the server's
+// current value is newer (i.e. a teammate has since touched this
+// candidate), the write is rejected with a CONFLICT_PREFIX error so the
+// frontend can prompt the user to reload + retry instead of silently
+// overwriting.
+//
+// Known limitation: date_last_stage_update only bumps on stage changes,
+// so concurrent edits to OTHER fields (recruiter assignment, notes,
+// etc.) on the same candidate at the same time still last-write-wins.
+// Catching those would require an `updated_at` column + sheet migration,
+// which is out of scope for this 3-month interim tool. The high-value
+// case — two recruiters racing to advance the same candidate's stage —
+// is fully covered.
+const CONFLICT_PREFIX = "CONFLICT: ";
+
+function _assertNoConflict(currentDate: string, expectedDate?: string | null): void {
+  if (!expectedDate) return;   // legacy caller / opt-out
+  if (currentDate && currentDate !== expectedDate) {
+    throw new Error(
+      `${CONFLICT_PREFIX}This candidate was updated by someone else after you loaded it. ` +
+      `Reload to see the latest changes, then retry.`
+    );
+  }
 }
 
-function updateCandidateStage(id: number, newStageId: number): void {
+function updateCandidate(id: number, data: UpdateCandidateInput, expectedDate?: string): void {
+  withLock(() => {
+    const db = getDB();
+    const candidate = db.getCandidateById(id);
+    if (!candidate) throw new Error(`Candidate ${id} not found`);
+    _assertNoConflict(candidate.date_last_stage_update, expectedDate);
+    db.updateCandidate(id, data);
+  });
+}
+
+function updateCandidateStage(id: number, newStageId: number, expectedDate?: string): void {
   withLock(() => {
     const db = getDB();
     const candidate = db.getCandidateById(id);
     if (!candidate) throw new Error(`Candidate ${id} not found`);
     if (candidate.stage_id === newStageId) return;
+    _assertNoConflict(candidate.date_last_stage_update, expectedDate);
 
     const stages = db.getAllStages();
     const fromStage = stages.find(s => s.id === candidate.stage_id);
@@ -402,11 +439,12 @@ function updateCandidateStage(id: number, newStageId: number): void {
   });
 }
 
-function rejectCandidate(id: number, refuseReasonId: number): void {
+function rejectCandidate(id: number, refuseReasonId: number, expectedDate?: string): void {
   withLock(() => {
     const db = getDB();
     const candidate = db.getCandidateById(id);
     if (!candidate) throw new Error(`Candidate ${id} not found`);
+    _assertNoConflict(candidate.date_last_stage_update, expectedDate);
 
     const stages = db.getAllStages();
     const rejectedStage = stages.find(s => s.is_rejected && s.is_enabled);

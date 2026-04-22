@@ -1010,27 +1010,49 @@ document.addEventListener('alpine:init', function () {
       },
 
       // ── Inline candidate field update ────────────────────
+      // Sends date_last_stage_update as the optimistic-lock version so a
+      // teammate's intervening edit produces a CONFLICT error instead of
+      // silently overwriting their work. On conflict we keep the local
+      // optimistic value (so the user can copy it before reloading) but
+      // surface a Reload action via the toast.
       updateCandidateField: async function (c, field, value) {
         var prev = c[field];
         c[field] = value;   // optimistic
 
+        var self = this;
         try {
           if (field === 'stage_id') {
-            await gasCall('updateCandidateStage', c.id, value);
-            // Backend may set status to Hired/Rejected; reload this candidate
+            await gasCall('updateCandidateStage', c.id, value, c.date_last_stage_update);
             await this.refreshCandidate(c.id);
           } else {
             var updates = {};
             updates[field] = value;
-            await gasCall('updateCandidate', c.id, updates);
-            // Refresh joined fields (names, stage_color, etc.)
+            await gasCall('updateCandidate', c.id, updates, c.date_last_stage_update);
             await this.refreshCandidate(c.id);
           }
           Alpine.store('app').toastSuccess('Saved.');
         } catch (e) {
           c[field] = prev;   // rollback
-          Alpine.store('app').toastError('Save failed: ' + e.message);
+          if (self._isConflict(e)) {
+            Alpine.store('app').toastError(
+              'Conflict — someone else updated this candidate.',
+              {
+                actionLabel: 'Reload',
+                duration: 8000,
+                onAction: function () { self.refreshCandidate(c.id); },
+              }
+            );
+          } else {
+            Alpine.store('app').toastError('Save failed: ' + e.message);
+          }
         }
+      },
+
+      // Conflict errors come back as plain Error objects whose message is
+      // prefixed by the server. Detect by prefix so we can surface a
+      // different toast (Reload action) instead of the generic "save failed".
+      _isConflict: function (err) {
+        return !!(err && err.message && err.message.indexOf('CONFLICT: ') === 0);
       },
 
       refreshCandidate: async function (id) {
@@ -1349,17 +1371,44 @@ document.addEventListener('alpine:init', function () {
       saveStage: async function () {
         var id = this.$store.app.peek.candidateId;
         var newStage = parseInt(this.editStageId, 10);
+        var expected = this.$store.app.peek.candidate
+          ? this.$store.app.peek.candidate.date_last_stage_update
+          : null;
         try {
-          await gasCall('updateCandidateStage', id, newStage);
+          await gasCall('updateCandidateStage', id, newStage, expected);
           var r = await gasCall('getCandidateDetail', id);
           this.$store.app.peek.candidate = r.candidate;
           this.$store.app.peek.history = r.history;
-          // Also update the main list
           var root = Alpine.$data(document.querySelector('#app'));
           if (root && root.refreshCandidate) await root.refreshCandidate(id);
           this.$store.app.toastSuccess('Stage updated.');
         } catch (e) {
-          this.$store.app.toastError('Stage update failed: ' + e.message);
+          this._handleSaveError(e, 'Stage update failed: ', id);
+        }
+      },
+
+      // Shared error handler for peek panel saves. Surfaces conflict
+      // errors with a Reload action (matches updateCandidateField in the
+      // root component) and falls through to a generic toast otherwise.
+      _handleSaveError: function (err, prefix, candidateId) {
+        var self = this;
+        var isConflict = err && err.message && err.message.indexOf('CONFLICT: ') === 0;
+        if (isConflict) {
+          this.$store.app.toastError(
+            'Conflict — someone else updated this candidate.',
+            {
+              actionLabel: 'Reload',
+              duration: 8000,
+              onAction: function () {
+                gasCall('getCandidateDetail', candidateId).then(function (r) {
+                  self.$store.app.peek.candidate = r.candidate;
+                  self.$store.app.peek.history = r.history;
+                });
+              },
+            }
+          );
+        } else {
+          this.$store.app.toastError(prefix + (err.message || String(err)));
         }
       },
 
@@ -1376,16 +1425,19 @@ document.addEventListener('alpine:init', function () {
 
       saveField: async function (field, value) {
         var id = this.$store.app.peek.candidateId;
+        var expected = this.$store.app.peek.candidate
+          ? this.$store.app.peek.candidate.date_last_stage_update
+          : null;
         try {
           var updates = {}; updates[field] = value;
-          await gasCall('updateCandidate', id, updates);
+          await gasCall('updateCandidate', id, updates, expected);
           var r = await gasCall('getCandidateDetail', id);
           this.$store.app.peek.candidate = r.candidate;
           var root = Alpine.$data(document.querySelector('#app'));
           if (root && root.refreshCandidate) await root.refreshCandidate(id);
           this.$store.app.toastSuccess('Saved.');
         } catch (e) {
-          this.$store.app.toastError('Save failed: ' + e.message);
+          this._handleSaveError(e, 'Save failed: ', id);
         }
       },
 
