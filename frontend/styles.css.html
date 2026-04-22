@@ -96,6 +96,21 @@ html, body {
 .icon-btn.spinning .material-icons { animation: spin 0.9s linear infinite; }
 @keyframes spin { to { transform: rotate(360deg); } }
 
+/* Topbar tertiary action — visually a text link, not a button.
+   Used for "Add Job" so it doesn't compete with "Add Candidate" for
+   attention but stays trivially clickable. */
+.topbar-link-btn {
+  color: var(--text-secondary);
+  background: transparent;
+  border: none;
+  text-decoration: none;
+  padding: 6px 8px;
+}
+.topbar-link-btn:hover {
+  color: var(--primary);
+  background: var(--primary-light);
+}
+
 /* ── Duplicate warning (Add Candidate modal) ─────────────── */
 .dup-warning {
   background: rgba(var(--primary-rgb), 0.08);
@@ -1076,6 +1091,95 @@ html, body {
 /* ── Source ROI body ────────────────────────────────────────── */
 .source-roi-body {
   padding: 16px 18px;
+}
+
+/* ── Sticky section navigation rail ──────────────────────────
+   Sits below the topbar, sticky-pinned, lets users jump between the
+   long-scroll dashboards. Designed to be invisible-by-default (low
+   visual weight) so it doesn't compete with content; only the active
+   section gets the orange accent. */
+.section-nav {
+  position: sticky;
+  top: 56px;             /* below the .topbar */
+  z-index: 90;
+  background: rgba(255, 255, 255, 0.92);
+  backdrop-filter: blur(6px);
+  border-bottom: 1px solid var(--border);
+  padding: 8px 20px;
+  display: flex; gap: 6px; align-items: center;
+  overflow-x: auto;
+  white-space: nowrap;
+  scrollbar-width: thin;
+}
+.section-nav-chip {
+  display: inline-flex; align-items: center; gap: 2px;
+  padding: 5px 10px;
+  font-size: 12.5px; font-weight: 600;
+  color: var(--text-secondary);
+  background: transparent;
+  border: 1px solid transparent;
+  border-radius: 999px;
+  text-decoration: none;
+  cursor: pointer;
+  transition: background 0.15s ease, color 0.15s ease, border-color 0.15s ease;
+}
+.section-nav-chip:hover {
+  background: var(--primary-light);
+  color: var(--primary-dark);
+  border-color: rgba(var(--primary-rgb), 0.3);
+}
+.section-nav-chip .material-icons { font-size: 14px; }
+.section-nav-count {
+  margin-left: 4px;
+  background: var(--border);
+  color: var(--text-secondary);
+  font-size: 10.5px; font-weight: 700;
+  padding: 0 6px; border-radius: 999px;
+  min-width: 16px; text-align: center;
+}
+.section-nav-chip:hover .section-nav-count {
+  background: rgba(var(--primary-rgb), 0.15);
+  color: var(--primary-dark);
+}
+@media (max-width: 600px) {
+  /* On phones the rail is more annoying than helpful — hide. */
+  .section-nav { display: none; }
+}
+
+/* ── Right-aligned numeric columns ───────────────────────────
+   Recruiter perf and source ROI tables now mark numeric cells with
+   .num. Right-align + tabular numerals so columns scan cleanly down. */
+.data-table th.num,
+.data-table td.num {
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+/* ── Recruiter perf: sticky thead inside the card ──────────── */
+.recruiter-perf-table thead th {
+  position: sticky;
+  top: 100px;             /* below topbar (56) + section nav (~44) */
+  background: #FAFBFE;
+  z-index: 5;
+}
+
+/* ── Funnel: stronger count badge on the bar ────────────────
+   The previous bar had a 700-weight white count floating at the end
+   with a soft text-shadow. On bars that fill <30% of the track that
+   number was illegible on the gray track behind it. Pull the count
+   into a pill so it's always readable regardless of bar width. */
+.funnel-bar-count {
+  background: rgba(0, 0, 0, 0.18);
+  padding: 1px 7px;
+  border-radius: 999px;
+  font-variant-numeric: tabular-nums;
+}
+.funnel-stage:hover:not(.expanded) .funnel-bar {
+  filter: brightness(1.05);
+}
+.funnel-stage.expanded .funnel-row {
+  border-bottom: 1px dashed rgba(var(--primary-rgb), 0.18);
 }
 
 /* ── Mobile: stack section filters under the title ──────────── */

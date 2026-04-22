@@ -870,6 +870,23 @@ document.addEventListener('alpine:init', function () {
       // (sortBy / sortIcon / scrollTop removed — no list view to sort or jump to.)
       toggleDrill: function (key) { this.drill = this.drill === key ? null : key; },
 
+      // Sticky-nav jump. Smooth-scrolls so the section title clears the
+      // sticky topbar (~56px) + the nav rail (~44px) above it. window.scrollTo
+      // with `top` calculated from getBoundingClientRect handles this in one
+      // call without needing CSS scroll-margin-top on every section.
+      scrollToSection: function (id) {
+        var el = document.getElementById(id);
+        if (!el) return;
+        var rect = el.getBoundingClientRect();
+        var topbar = document.querySelector('.topbar');
+        var nav = document.querySelector('.section-nav');
+        var offset =
+          (topbar ? topbar.getBoundingClientRect().height : 0) +
+          (nav    ? nav.getBoundingClientRect().height    : 0) +
+          8;
+        window.scrollTo({ top: rect.top + window.scrollY - offset, behavior: 'smooth' });
+      },
+
       // Lazy-load activity feed on first expand (saves a sheet scan on page
       // load for users who don't open it). Reloaded on every open — tiny
       // payload, avoids stale "2 hours ago" labels when the section has

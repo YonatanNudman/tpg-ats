@@ -73,23 +73,64 @@
       <span x-text="syncing ? 'Syncing…' : (syncStale ? 'Refreshing' : 'Live')"></span>
     </div>
 
-    <button class="btn btn-sm btn-outline-primary" @click="openModal('addJob')">
-      <span class="material-icons mi-inline">work</span>
-      Add Job
-    </button>
-    <button class="btn btn-sm btn-primary" @click="openModal('addCandidate')">
+    <!--
+      Action hierarchy (left → right): primary daily action, secondary
+      occasional, tertiary monthly, settings as icon. Add Candidate stays
+      filled-primary so it visually anchors the topbar; Add Job demotes to
+      ghost/outline since it fires once per opening; Import collapses to
+      icon-only because it's a bulk-occasional action and the textual
+      label was crowding the bar.
+    -->
+    <button class="btn btn-sm btn-primary" @click="openModal('addCandidate')"
+      title="Add a single candidate">
       <span class="material-icons mi-inline">person_add</span>
       Add Candidate
     </button>
-    <button class="btn btn-sm btn-outline-secondary" @click="openModal('importCsv')"
+    <button class="btn btn-sm btn-link topbar-link-btn" @click="openModal('addJob')"
+      title="Open a new job">
+      <span class="material-icons mi-inline">work</span>
+      Add Job
+    </button>
+    <button class="icon-btn" @click="openModal('importCsv')"
       title="Bulk-import candidates from a CSV (paste or upload)">
-      <span class="material-icons mi-inline">upload_file</span>
-      Import
+      <span class="material-icons">upload_file</span>
     </button>
     <button class="icon-btn" @click="openSettings()" title="Settings">
       <span class="material-icons">settings</span>
     </button>
   </header>
+
+  <!--
+    Sticky section navigation rail. Lets recruiters jump between the
+    long-scroll dashboards without manual scrolling. Sits below the
+    topbar and follows the user as they scroll. Each chip is a
+    fragment-link to its section's id, plus a click handler that
+    smooth-scrolls past the topbar's height so the section title
+    isn't tucked underneath. Hidden on very narrow viewports where
+    horizontal scroll on the rail would feel worse than just scrolling
+    the page itself.
+  -->
+  <nav class="section-nav" aria-label="Jump to section">
+    <a class="section-nav-chip" href="#sec-funnel" @click.prevent="scrollToSection('sec-funnel')">
+      <span class="material-icons mi-inline">filter_list</span> Funnel
+    </a>
+    <a class="section-nav-chip" href="#sec-recruiters" @click.prevent="scrollToSection('sec-recruiters')">
+      <span class="material-icons mi-inline">groups</span> Recruiters
+    </a>
+    <a class="section-nav-chip" href="#sec-sources" @click.prevent="scrollToSection('sec-sources')">
+      <span class="material-icons mi-inline">trending_up</span> Sources
+    </a>
+    <a class="section-nav-chip" href="#sec-jobs" @click.prevent="scrollToSection('sec-jobs')">
+      <span class="material-icons mi-inline">work</span> Jobs
+      <span class="section-nav-count" x-text="jobs.length" x-show="jobs.length > 0"></span>
+    </a>
+    <a class="section-nav-chip" href="#sec-activity" @click.prevent="scrollToSection('sec-activity')">
+      <span class="material-icons mi-inline">history</span> Activity
+    </a>
+    <a class="section-nav-chip" href="#sec-analytics" @click.prevent="scrollToSection('sec-analytics')">
+      <span class="material-icons mi-inline">insights</span> Analytics
+    </a>
+  </nav>
 
   <!-- ── Main content column ────────────────────────────── -->
   <main class="page-content">
@@ -216,7 +257,7 @@
       Lets a recruiter scope the funnel to one job/source/recruiter
       without disturbing the rest of the dashboards on this page.
     -->
-    <div class="card section-card funnel-card">
+    <div class="card section-card funnel-card" id="sec-funnel">
       <div class="card-header">
         <span class="card-title">
           <span class="material-icons mi-inline">filter_list</span>
@@ -418,7 +459,7 @@
       "this month's hires" while their queue/rejection numbers usually
       span a wider window.
     -->
-    <div class="card section-card recruiter-perf-card">
+    <div class="card section-card recruiter-perf-card" id="sec-recruiters">
       <div class="card-header">
         <span class="card-title">
           <span class="material-icons mi-inline">groups</span>
@@ -460,11 +501,13 @@
           <thead>
             <tr>
               <th>Recruiter</th>
-              <th>Queue</th>
-              <th>Hires<template x-if="recruiterFilters.hiresPreset"><span class="th-sub" x-text="' (' + recruiterFilters.hiresPreset + ')'"></span></template></th>
-              <th>Rejections</th>
-              <th>Total</th>
-              <th>Avg Days</th>
+              <th class="num">Queue</th>
+              <th class="num">
+                Hires<template x-if="recruiterFilters.hiresPreset"><span class="th-sub" x-text="' (' + recruiterFilters.hiresPreset + ')'"></span></template>
+              </th>
+              <th class="num">Rejections</th>
+              <th class="num">Total</th>
+              <th class="num">Avg Days</th>
             </tr>
           </thead>
           <tbody>
@@ -476,18 +519,18 @@
                   <span class="recruiter-avatar" x-text="initials(r.recruiter_name)"></span>
                   <span class="recruiter-name" x-text="r.recruiter_name"></span>
                 </td>
-                <td>
+                <td class="num">
                   <span class="metric-strong" x-text="r.queue"></span>
                 </td>
-                <td>
+                <td class="num">
                   <span class="metric-strong" x-text="r.hires_in_period"></span>
                   <template x-if="r.hires !== r.hires_in_period">
-                    <span class="metric-secondary" x-text="' / ' + r.hires + ' all'"></span>
+                    <span class="metric-secondary" x-text="' / ' + r.hires"></span>
                   </template>
                 </td>
-                <td x-text="r.rejections"></td>
-                <td x-text="r.total_candidates"></td>
-                <td x-text="r.avg_days_to_hire || '—'"></td>
+                <td class="num" x-text="r.rejections"></td>
+                <td class="num" x-text="r.total_candidates"></td>
+                <td class="num" x-text="r.avg_days_to_hire || '—'"></td>
               </tr>
             </template>
             <template x-if="recruiterPerformance.length === 0 && !loading">
@@ -508,7 +551,7 @@
       actually come from so recruiters can double down on the productive
       sources and de-prioritize the dead ones.
     -->
-    <div class="card section-card source-roi-card">
+    <div class="card section-card source-roi-card" id="sec-sources">
       <div class="card-header">
         <span class="card-title">
           <span class="material-icons mi-inline">trending_up</span>
@@ -545,29 +588,57 @@
       </div>
 
       <div class="card-body source-roi-body">
-        <div class="source-row">
-          <div class="source-donut"><canvas id="sourceDonutChart"></canvas></div>
-          <table class="data-table compact">
-            <thead>
-              <tr><th>Source</th><th>Total</th><th>Hired</th><th>Rate</th></tr>
-            </thead>
-            <tbody>
-              <template x-for="s in sourceEffectiveness" :key="s.source_id">
-                <tr>
-                  <td x-text="s.source_name"></td>
-                  <td x-text="s.total_candidates"></td>
-                  <td x-text="s.hired_candidates"></td>
-                  <td x-text="s.hire_rate + '%'"></td>
-                </tr>
-              </template>
-              <template x-if="sourceEffectiveness.length === 0 && !loading">
-                <tr><td colspan="4" class="empty-state-row">
-                  No source data yet. Sources populate as candidates are added.
-                </td></tr>
-              </template>
-            </tbody>
-          </table>
-        </div>
+        <!--
+          Two states:
+            - Have data → donut + table side-by-side (the original layout).
+            - Empty → centered empty-state with a clear next step. The
+              previous "No source data yet…" line on its own row was easy
+              to miss because it sat between an empty donut and an empty
+              table — both filling space without communicating "nothing
+              here yet". Splitting them surfaces the empty case clearly.
+        -->
+        <template x-if="sourceEffectiveness.length === 0 && !loading">
+          <div class="empty-state">
+            <div class="empty-state-icon">📈</div>
+            <div class="empty-state-text">No source data yet</div>
+            <div class="empty-state-hint">
+              Sources populate automatically as candidates are added with
+              a source assigned. Make sure your sources are configured
+              and that new candidates pick one.
+            </div>
+            <div class="empty-state-actions">
+              <button class="btn btn-sm btn-outline-primary" @click="openSettings()">
+                <span class="material-icons mi-inline">settings</span>
+                Configure sources
+              </button>
+              <button class="btn btn-sm btn-primary" @click="openModal('addCandidate')">
+                <span class="material-icons mi-inline">person_add</span>
+                Add a candidate
+              </button>
+            </div>
+          </div>
+        </template>
+
+        <template x-if="sourceEffectiveness.length > 0">
+          <div class="source-row">
+            <div class="source-donut"><canvas id="sourceDonutChart"></canvas></div>
+            <table class="data-table compact source-table">
+              <thead>
+                <tr><th>Source</th><th class="num">Total</th><th class="num">Hired</th><th class="num">Rate</th></tr>
+              </thead>
+              <tbody>
+                <template x-for="s in sourceEffectiveness" :key="s.source_id">
+                  <tr>
+                    <td x-text="s.source_name"></td>
+                    <td class="num" x-text="s.total_candidates"></td>
+                    <td class="num" x-text="s.hired_candidates"></td>
+                    <td class="num metric-strong" x-text="s.hire_rate + '%'"></td>
+                  </tr>
+                </template>
+              </tbody>
+            </table>
+          </div>
+        </template>
       </div>
     </div>
 
@@ -576,7 +647,7 @@
          expansion, see Pipeline Funnel section above.) -->
 
     <!-- ── Jobs section (collapsible) ─────────────────────── -->
-    <div class="card section-card">
+    <div class="card section-card" id="sec-jobs">
       <div class="card-header clickable" @click="showJobs = !showJobs">
         <span class="card-title">
           <span class="material-icons mi-inline">work</span>
@@ -671,7 +742,7 @@
       Data refreshes on every reloadAll() (which fires after every local
       mutation + every 20s sync poll that detected a teammate's change).
     -->
-    <div class="card section-card">
+    <div class="card section-card" id="sec-activity">
       <div class="card-header clickable" @click="toggleActivityFeed()">
         <span class="card-title">
           <span class="material-icons mi-inline">history</span>
@@ -733,7 +804,7 @@
     </div>
 
     <!-- ── Analytics sections (collapsible) ─────────────── -->
-    <div class="card section-card">
+    <div class="card section-card" id="sec-analytics">
       <div class="card-header clickable" @click="showAnalytics = !showAnalytics">
         <span class="card-title">
           <span class="material-icons mi-inline">insights</span>
