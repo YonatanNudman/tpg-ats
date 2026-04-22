@@ -298,6 +298,24 @@
         </div>
       </div>
 
+      <!--
+        Scoped banner: only shows when funnelFilters has an actual override
+        beyond what the global filter bar provides. Makes the otherwise-invisible
+        per-section scoping explicit so a recruiter who clicked into "Brad's
+        pipeline" via the perf table can see WHY the funnel looks different
+        from the global state, and clear it without hunting for the right ×.
+      -->
+      <template x-if="funnelScopeLabel()">
+        <div class="scope-banner">
+          <span class="material-icons mi-inline">filter_alt</span>
+          <span>Scoped to: <strong x-text="funnelScopeLabel()"></strong></span>
+          <button class="scope-banner-clear" @click="resetSectionFilters('funnel')"
+                  title="Clear funnel-specific filters and inherit the page-wide filter bar">
+            Clear scope
+          </button>
+        </div>
+      </template>
+
       <div class="card-body funnel-body">
         <template x-if="loading">
           <div class="skeleton-section">
@@ -464,6 +482,8 @@
         <span class="card-title">
           <span class="material-icons mi-inline">groups</span>
           Recruiter Performance
+          <span class="section-loading-pip" x-show="recruiterLoading"
+                title="Refreshing…" aria-hidden="true"></span>
         </span>
         <div class="section-filters">
           <select class="section-filter" x-model="recruiterFilters.jobId"
@@ -556,6 +576,8 @@
         <span class="card-title">
           <span class="material-icons mi-inline">trending_up</span>
           Sourcing ROI
+          <span class="section-loading-pip" x-show="sourceLoading"
+                title="Refreshing…" aria-hidden="true"></span>
         </span>
         <div class="section-filters">
           <select class="section-filter" x-model="sourceFilters.jobId"

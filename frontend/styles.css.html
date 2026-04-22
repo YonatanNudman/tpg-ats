@@ -1182,6 +1182,50 @@ html, body {
   border-bottom: 1px dashed rgba(var(--primary-rgb), 0.18);
 }
 
+/* ── Scoped banner (above the funnel rows) ──────────────────
+   Shows when funnelFilters has a per-section override active. Makes
+   implicit scoping (e.g. clicking a recruiter row) explicit, with a
+   one-click clear so the user is never trapped in a filter they
+   don't realize is set. */
+.scope-banner {
+  display: flex; align-items: center; gap: 8px;
+  margin: 8px 18px;
+  padding: 8px 12px;
+  background: rgba(var(--primary-rgb), 0.08);
+  border: 1px solid rgba(var(--primary-rgb), 0.25);
+  border-left: 3px solid var(--primary);
+  border-radius: var(--radius-sm);
+  font-size: 12.5px; color: var(--text);
+}
+.scope-banner .material-icons { color: var(--primary); font-size: 16px; }
+.scope-banner strong { font-weight: 700; color: var(--primary-dark); }
+.scope-banner-clear {
+  margin-left: auto;
+  background: transparent;
+  border: 1px solid var(--primary);
+  color: var(--primary);
+  font-size: 11.5px; font-weight: 700;
+  padding: 3px 10px; border-radius: 999px;
+  cursor: pointer;
+  text-transform: uppercase; letter-spacing: 0.4px;
+  transition: background 0.15s, color 0.15s;
+}
+.scope-banner-clear:hover { background: var(--primary); color: white; }
+
+/* ── Per-section loading pip ────────────────────────────────
+   A small pulsing dot next to the section title while a per-section
+   filter change is in flight. Subtle enough not to fight the title
+   for attention but visible enough to confirm "request received". */
+.section-loading-pip {
+  display: inline-block;
+  width: 8px; height: 8px;
+  border-radius: 50%;
+  background: var(--info);
+  margin-left: 8px;
+  vertical-align: middle;
+  animation: pulse 1.2s ease-in-out infinite;
+}
+
 /* ── Mobile: stack section filters under the title ──────────── */
 @media (max-width: 900px) {
   .section-filters {

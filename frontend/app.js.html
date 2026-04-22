@@ -456,6 +456,13 @@ document.addEventListener('alpine:init', function () {
       // stage comparison when triaging).
       expandedStages: [],
 
+      // Per-section loading flags. Toggled by reloadRecruiterPerf /
+      // reloadSourceEffectiveness so the user gets visible feedback that
+      // the filter change is in flight (otherwise the table just silently
+      // re-renders ~500ms later, which feels broken).
+      recruiterLoading: false,
+      sourceLoading:    false,
+
       analytics: {
         funnelConversion: [], timeToHireTrend: [], stageVelocity: [],
       },
@@ -515,9 +522,53 @@ document.addEventListener('alpine:init', function () {
       //  need pagedCandidates, totalPages, kanbanStages, or candidatesByStage.
       //  Inline candidate lists per stage live in funnelCandidatesForStage.)
 
+      // ── Per-section state persistence ─────────────────────
+      // Section filters and which funnel stages are expanded are restored
+      // on page load so a recruiter who set "scope to my pipeline +
+      // expand Pre-screen" doesn't have to redo that on every refresh.
+      // Persisted per-browser, NOT per-user — fine for this interim
+      // tool's deployment model where each recruiter has their own
+      // workstation and account. Storage failures (private mode, quota)
+      // are silently swallowed: missing persistence is annoying, but
+      // throwing on every filter change would be worse.
+      _SECTION_STATE_KEY: 'tpg-ats.section-state.v1',
+
+      _persistSectionState: function () {
+        try {
+          var snapshot = {
+            funnelFilters:    this.funnelFilters,
+            recruiterFilters: this.recruiterFilters,
+            sourceFilters:    this.sourceFilters,
+            expandedStages:   this.expandedStages,
+          };
+          localStorage.setItem(this._SECTION_STATE_KEY, JSON.stringify(snapshot));
+        } catch (e) { /* quota / private mode — non-fatal */ }
+      },
+
+      _restoreSectionState: function () {
+        try {
+          var raw = localStorage.getItem(this._SECTION_STATE_KEY);
+          if (!raw) return;
+          var snap = JSON.parse(raw);
+          if (snap && typeof snap === 'object') {
+            // Defensive merge — never overwrite a field with undefined,
+            // and discard schema mismatches by only copying known keys.
+            if (snap.funnelFilters)    Object.assign(this.funnelFilters,    snap.funnelFilters);
+            if (snap.recruiterFilters) Object.assign(this.recruiterFilters, snap.recruiterFilters);
+            if (snap.sourceFilters)    Object.assign(this.sourceFilters,    snap.sourceFilters);
+            if (Array.isArray(snap.expandedStages)) this.expandedStages = snap.expandedStages.slice();
+          }
+        } catch (e) { /* malformed JSON or storage error — start clean */ }
+      },
+
       // ── Lifecycle ────────────────────────────────────────
       init: async function () {
         var self = this;
+
+        // Restore persisted section state BEFORE the first network round
+        // trip so the funnel renders with the right filter scope on the
+        // initial paint, not after a re-render.
+        this._restoreSectionState();
 
         try {
           this.userEmail = await gasCall('getCurrentUserEmail');
@@ -526,6 +577,14 @@ document.addEventListener('alpine:init', function () {
 
         await this.reloadAll();
         this.startSyncPolling();
+
+        // Persist on funnel-stage expansion so a recruiter mid-triage
+        // can refresh and pick up where they left off. Filter changes
+        // already persist via the reload* functions above.
+        this.$watch('expandedStages', function () { self._persistSectionState(); });
+        // Funnel filters are applied client-side (no network call), so
+        // they don't go through reload* — watch them too.
+        this.$watch('funnelFilters', function () { self._persistSectionState(); }, { deep: true });
 
         // Register browser back/forward handler — closes topmost overlay
         // rather than navigating off the web app entirely. Pairs with
@@ -705,13 +764,40 @@ document.addEventListener('alpine:init', function () {
       resetSectionFilters: function (section) {
         if (section === 'funnel') {
           this.funnelFilters = { jobId: '', sourceId: '', recruiterId: '', preset: '', startDate: '', endDate: '' };
+          this._persistSectionState();
         } else if (section === 'recruiter') {
           this.recruiterFilters = { jobId: '', sourceId: '', hiresPreset: '', hiresStartDate: '', hiresEndDate: '' };
-          this.reloadRecruiterPerf();
+          this.reloadRecruiterPerf();   // persists on success
         } else if (section === 'source') {
           this.sourceFilters = { jobId: '', recruiterId: '', preset: '', startDate: '', endDate: '' };
-          this.reloadSourceEffectiveness();
+          this.reloadSourceEffectiveness();   // persists on success
         }
+      },
+
+      // ── Scoped banner: human label for the current funnel scope ──
+      // Returns a short string describing which OVERRIDE is active on the
+      // funnel section (i.e. set on funnelFilters specifically, not just
+      // inherited from the global filter bar). Used by the banner above
+      // the funnel rows to make implicit scoping explicit.
+      funnelScopeLabel: function () {
+        var f = this.funnelFilters;
+        var parts = [];
+        if (f.recruiterId === '__unassigned__') {
+          parts.push('Unassigned candidates');
+        } else if (f.recruiterId) {
+          var r = this.settings.recruiters.find(function (x) { return String(x.id) === String(f.recruiterId); });
+          if (r) parts.push(r.name + "'s pipeline");
+        }
+        if (f.jobId) {
+          var j = this.jobs.find(function (x) { return String(x.id) === String(f.jobId); });
+          if (j) parts.push(j.title);
+        }
+        if (f.sourceId) {
+          var s = this.settings.sources.find(function (x) { return String(x.id) === String(f.sourceId); });
+          if (s) parts.push(s.name);
+        }
+        if (f.preset) parts.push(f.preset);
+        return parts.length > 0 ? parts.join(' · ') : '';
       },
 
       // ── Pipeline Funnel (client-side compute) ─────────────
@@ -815,30 +901,43 @@ document.addEventListener('alpine:init', function () {
       },
 
       // ── Per-section refetches (server-side) ───────────────
+      // Both flip the per-section loading flag while the request is in
+      // flight so the section can render a spinner / skeleton without
+      // touching the page-wide `loading` state. Persisted filter state
+      // is saved AFTER a successful refetch so a failed call doesn't
+      // pollute storage with a state that can't be reproduced.
       reloadRecruiterPerf: async function () {
         var main  = this.mergeSectionFilters(this.recruiterFilters);
         var hires = null;
         if (this.recruiterFilters.hiresPreset) {
-          // Same scope as `main` but with the hires-period override applied
-          // to startDate/endDate. Backend's hiresFilters arg only consults
-          // those date fields when filtering hires (the rest of the row's
-          // filters still go through `main`).
           hires = Object.assign({}, main, {
             startDate: this.recruiterFilters.hiresStartDate,
             endDate:   this.recruiterFilters.hiresEndDate,
           });
         }
+        this.recruiterLoading = true;
         try {
           this.recruiterPerformance = await gasCall('getRecruiterPerformance', main, hires);
-        } catch (e) { Alpine.store('app').toastError('Recruiter perf reload failed: ' + e.message); }
+          this._persistSectionState();
+        } catch (e) {
+          Alpine.store('app').toastError('Recruiter perf reload failed: ' + e.message);
+        } finally {
+          this.recruiterLoading = false;
+        }
       },
 
       reloadSourceEffectiveness: async function () {
         var f = this.mergeSectionFilters(this.sourceFilters);
+        this.sourceLoading = true;
         try {
           this.sourceEffectiveness = await gasCall('getSourceEffectiveness', f);
           this.$nextTick(this.renderSourceChart.bind(this));
-        } catch (e) { Alpine.store('app').toastError('Source ROI reload failed: ' + e.message); }
+          this._persistSectionState();
+        } catch (e) {
+          Alpine.store('app').toastError('Source ROI reload failed: ' + e.message);
+        } finally {
+          this.sourceLoading = false;
+        }
       },
 
       // ── Filter actions ───────────────────────────────────
