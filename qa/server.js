@@ -63,6 +63,13 @@ window.google.script.run = (function () {
       'getCandidateDetail','createCandidate','updateCandidate','updateCandidateStage',
       'rejectCandidate','deleteCandidate','getJobOpenings','createJobOpening',
       'updateJobOpening','deleteJobOpening','getDashboardData','getSyncFingerprint',
+      'getRecruiterPerformance','getSourceEffectiveness','getAnalyticsHistorical',
+      'getWaterfallMetrics',
+      'getRecentActivity','getRecentHires','getRecentRejections','findDuplicateCandidatesByEmail',
+      'touchAppPresence','getAppPresence','touchPresence','getPresence',
+      'bulkAdvanceStage','bulkAssignRecruiter','bulkRejectCandidates',
+      'updateKanbanState','updatePostHireStatus','assignRecruiter',
+      'logClientError','getDebugInfo',
     ];
     runner.withSuccessHandler = function (cb) { return makeRunner(cb, failure); };
     runner.withFailureHandler = function (cb) { return makeRunner(success, cb); };

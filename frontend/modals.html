@@ -165,28 +165,42 @@
         <div class="modal-dialog" x-data="rejectModal()" x-init="init()">
           <div class="modal-header">
             <span class="modal-title"
-              x-text="$store.app.modal.data?.bulk ? ('Reject ' + ($store.app.modal.data.ids?.length || 0) + ' candidates') : 'Reject Candidate'"></span>
-            <button class="icon-btn-sm" @click="$store.app.closeModal()">\u2715</button>
+              x-text="(($store.app.modal.data || {}).bulk) ? ('Reject ' + ((($store.app.modal.data || {}).ids || []).length) + ' candidates') : 'Reject Candidate'"></span>
+            <button class="icon-btn-sm" @click="$store.app.closeModal()">&times;</button>
           </div>
 
           <div class="modal-body">
-            <template x-if="!$store.app.modal.data?.bulk">
+            <template x-if="!(($store.app.modal.data || {}).bulk)">
               <p class="modal-lead">
-                Reject <strong x-text="$store.app.modal.data?.candidateName || 'candidate'"></strong>?
+                Reject <strong x-text="(($store.app.modal.data || {}).candidateName) || 'candidate'"></strong>?
               </p>
             </template>
-            <template x-if="$store.app.modal.data?.bulk">
-              <p class="modal-lead">
-                Reject <strong x-text="$store.app.modal.data.ids?.length || 0"></strong> selected candidates?
-                The same reason will be applied to all of them.
-              </p>
+            <template x-if="(($store.app.modal.data || {}).bulk)">
+              <div>
+                <p class="modal-lead">
+                  Reject <strong x-text="((($store.app.modal.data || {}).ids) || []).length"></strong> selected candidates?
+                  The same reason will be applied to all of them.
+                </p>
+                <div class="mb-3">
+                  <div class="form-label">Selected candidates</div>
+                  <div class="dup-warning" style="max-height:140px; overflow:auto;">
+                    <template x-for="(n, idx) in ((($store.app.modal.data || {}).names) || []).slice(0, 8)" :key="idx">
+                      <div style="font-size:12.5px; margin-bottom:2px;" x-text="'\u2022 ' + n"></div>
+                    </template>
+                    <template x-if="((($store.app.modal.data || {}).names) || []).length > 8">
+                      <div class="dup-meta"
+                        x-text="'+' + (((($store.app.modal.data || {}).names) || []).length - 8) + ' more'"></div>
+                    </template>
+                  </div>
+                </div>
+              </div>
             </template>
 
             <div class="mb-3">
               <label class="form-label">Reason *</label>
               <select class="form-select" x-model="refuseReasonId"
                 :class="{ 'is-invalid': error }">
-                <option value="">— Select a reason —</option>
+                <option value="">&mdash; Select a reason &mdash;</option>
                 <template x-for="r in $store.app.settings.refuseReasons.filter(x => x.is_enabled)"
                           :key="r.id">
                   <option :value="r.id" x-text="r.name"></option>
@@ -200,12 +214,23 @@
               <textarea class="form-control" rows="2" x-model="note"
                 placeholder="Added to the candidate's notes for context."></textarea>
             </div>
+            <template x-if="(($store.app.modal.data || {}).bulk)">
+              <div class="form-check mt-3">
+                <input class="form-check-input" type="checkbox" id="bulkRejectConfirm"
+                  x-model="bulkConfirmed">
+                <label class="form-check-label" for="bulkRejectConfirm">
+                  I understand this will reject all selected candidates.
+                </label>
+              </div>
+            </template>
           </div>
 
           <div class="modal-footer">
             <button class="btn btn-outline-secondary" @click="$store.app.closeModal()">Cancel</button>
-            <button class="btn btn-danger" :disabled="submitting" @click="submit()">
-              <span x-text="submitting ? 'Rejecting\u2026' : 'Reject'"></span>
+            <button class="btn btn-danger"
+              :disabled="rejectButtonDisabled()"
+              @click="submit()">
+              <span x-text="submitting ? 'Rejecting…' : 'Reject'"></span>
             </button>
           </div>
         </div>
@@ -363,21 +388,40 @@ document.addEventListener('alpine:init', function () {
       note: '',
       error: '',
       submitting: false,
+      bulkConfirmed: false,
 
       init: function () {
         this.refuseReasonId = '';
         this.note = '';
         this.error = '';
+        this.bulkConfirmed = false;
+        this.submitting = false;
+      },
+
+      // Centralized so the inline :disabled binding can't accidentally
+      // get mis-evaluated. Single-candidate reject is enabled the moment
+      // a reason is picked. Bulk reject also requires the explicit
+      // confirmation checkbox.
+      rejectButtonDisabled: function () {
+        if (this.submitting) return true;
+        if (!this.refuseReasonId) return true;
+        var data = this.$store.app.modal.data || {};
+        if (data.bulk) return !this.bulkConfirmed;
+        return false;
       },
 
       submit: async function () {
+        var data = this.$store.app.modal.data || {};
         if (!this.refuseReasonId) {
           this.error = 'Pick a reason to reject this candidate.';
           return;
         }
         this.error = '';
+        if (data.bulk && !this.bulkConfirmed) {
+          this.error = 'Confirm bulk reject before continuing.';
+          return;
+        }
         this.submitting = true;
-        var data = this.$store.app.modal.data || {};
         var reasonId = parseInt(this.refuseReasonId, 10);
         try {
           if (data.bulk && Array.isArray(data.ids) && data.ids.length > 0) {
@@ -386,8 +430,19 @@ document.addEventListener('alpine:init', function () {
             var result = await gasCall('bulkRejectCandidates', data.ids, reasonId);
             var ok  = (result.successIds || []).length;
             var bad = (result.failures   || []).length;
+            var storeBulk = this.$store.app;
             if (bad === 0) {
-              this.$store.app.toastSuccess('Rejected ' + ok + ' candidate' + (ok === 1 ? '' : 's') + '.');
+              storeBulk.toastSuccess('Rejected ' + ok + ' candidate' + (ok === 1 ? '' : 's') + '.', {
+                actionLabel: 'View rejections',
+                duration: 7000,
+                onAction: function () {
+                  var root = Alpine.$data(document.querySelector('#app'));
+                  if (!root) return;
+                  root.showRejections = true;
+                  root.loadRecentRejections();
+                  root.scrollToSection('sec-rejections');
+                },
+              });
             } else {
               this.$store.app.toastError(
                 'Rejected ' + ok + ', ' + bad + ' failed. First error: ' +
@@ -419,11 +474,20 @@ document.addEventListener('alpine:init', function () {
               await gasCall('updateCandidate', candidateId, { notes: combined });
             } catch (e) { /* non-fatal — reject already succeeded */ }
           }
-          this.$store.app.toastSuccess('Candidate rejected.');
           this.$store.app.closeModal();
           this.$store.app.closePeek();
           var root = Alpine.$data(document.querySelector('#app'));
           if (root) await root.reloadAll();
+          this.$store.app.toastSuccess('Candidate rejected.', {
+            actionLabel: 'View rejections',
+            duration: 7000,
+            onAction: function () {
+              if (!root) return;
+              root.showRejections = true;
+              root.loadRecentRejections();
+              root.scrollToSection('sec-rejections');
+            },
+          });
         } catch (e) {
           this.$store.app.toastError('Reject failed: ' + e.message);
         } finally { this.submitting = false; }

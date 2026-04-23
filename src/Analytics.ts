@@ -23,6 +23,9 @@ import type {
   StageVelocityItem,
   SlaBreachItem,
   StaleCandidateItem,
+  WaterfallItem,
+  WaterfallResult,
+  WaterfallFilters,
 } from "./types";
 
 // ---------- Filters ----------
@@ -52,11 +55,33 @@ export function filterCandidates(
   const end = dateOnly(filters.endDate);
 
   return candidates.filter(c => {
-    if (filters.jobId && c.job_id !== filters.jobId) return false;
-    if (filters.recruiterId && c.recruiter_id !== filters.recruiterId) return false;
-    if (filters.sourceId && c.source_id !== filters.sourceId) return false;
-    if (filters.regionId && c.region_id !== filters.regionId) return false;
-    if (filters.motion && c.motion !== filters.motion) return false;
+    if (filters.jobId === "__unassigned__") {
+      if (c.job_id != null && c.job_id !== 0) return false;
+    } else if (filters.jobId && c.job_id !== filters.jobId) {
+      return false;
+    }
+    if (filters.recruiterId === "__unassigned__") {
+      if (c.recruiter_id != null && c.recruiter_id !== 0) return false;
+    } else if (filters.recruiterId === "__assigned__") {
+      if (c.recruiter_id == null || c.recruiter_id === 0) return false;
+    } else if (filters.recruiterId && c.recruiter_id !== filters.recruiterId) {
+      return false;
+    }
+    if (filters.sourceId === "__unassigned__") {
+      if (c.source_id != null && c.source_id !== 0) return false;
+    } else if (filters.sourceId && c.source_id !== filters.sourceId) {
+      return false;
+    }
+    if (filters.regionId === "__unassigned__") {
+      if (c.region_id != null && c.region_id !== 0) return false;
+    } else if (filters.regionId && c.region_id !== filters.regionId) {
+      return false;
+    }
+    if (filters.motion === "__unassigned__") {
+      if (c.motion === "Inbound" || c.motion === "Outbound") return false;
+    } else if (filters.motion && c.motion !== filters.motion) {
+      return false;
+    }
     if (filters.status && c.status !== filters.status) return false;
     const applied = dateOnly(c.date_applied);
     if (start && applied && applied < start) return false;
@@ -479,4 +504,201 @@ export function computeStaleCandidates(
     if (a.severity !== b.severity) return a.severity === "abandoned" ? -1 : 1;
     return b.days_in_stage - a.days_in_stage;
   });
+}
+
+// ---------- Cohort Waterfall ----------
+
+/**
+ * xDR waterfall benchmarks (step-to-step conversion rates).
+ *
+ * Derived from TPG Recruiting Weekly Update, "February 2026" tab, row 23
+ * ("US xDR AVERAGES", Inbound motion): per-recruiter-per-month volumes
+ * 100 → 50 → 40 → 30 → 24 → 19 → 17 → 16. These are the canonical goals
+ * Janice compares actuals against in executive briefings.
+ *
+ * Shape assumes 7 transitions between 8 non-rejected stages:
+ *   Applied → Reviewed → Contacted → Pre-screen → Roleplay/CG
+ *   → Final Interview → Offer → Hired
+ *
+ * If an admin customizes stages such that there are not exactly 8 enabled
+ * non-rejected stages, the waterfall still renders counts but sets
+ * `benchmarksValid: false` so the UI can hide/disclaim the bench column.
+ */
+export const XDR_BENCH: readonly number[] = [50, 80, 75, 80, 79, 89, 94];
+
+/**
+ * Compute the cohort waterfall.
+ *
+ * Cohort membership: candidates whose `date_applied` is within
+ * [filters.startDate, filters.endDate] AND who pass all scope filters.
+ *
+ * Per-candidate "max stage reached" = max sequence across
+ *   (every `stage_to_id` in that candidate's history + their current
+ *    `stage_id`), excluding any rejected stage.
+ * Floor at first-stage.sequence so a cohort member is always present in
+ * the first bucket (they applied; logHistory always records the initial
+ * placement).
+ *
+ * Invariants:
+ *   - rows[0].count === cohortSize (first bucket = everyone)
+ *   - rows are in ascending `sequence`
+ *   - rejected stages are never rendered
+ *   - step_pct is null on the first row, computed as count/prev*100 elsewhere
+ */
+export function computeWaterfall(
+  candidates: CandidateRow[],
+  history: HistoryRow[],
+  stages: StageRow[],
+  jobs: JobRow[],
+  filters: WaterfallFilters,
+): WaterfallResult {
+  const start = dateOnly(filters.startDate);
+  const end = dateOnly(filters.endDate);
+
+  // Enabled, non-rejected stages in order (the ones we render).
+  const orderedStages = stages
+    .filter(s => s.is_enabled && !s.is_rejected)
+    .sort((a, b) => a.sequence - b.sequence);
+
+  // Every stage (including rejected/disabled) — needed to look up sequence
+  // by id when walking a candidate's history.
+  const stageSeqById = new Map<number, number>();
+  const rejectedStageIds = new Set<number>();
+  for (const s of stages) {
+    stageSeqById.set(s.id, s.sequence);
+    if (s.is_rejected) rejectedStageIds.add(s.id);
+  }
+
+  const firstStageSeq = orderedStages.length > 0 ? orderedStages[0].sequence : 0;
+
+  // xDR job allowlist (title contains "xdr" case-insensitive).
+  let xdrJobIds: Set<number> | null = null;
+  if (filters.xdrOnly) {
+    xdrJobIds = new Set<number>();
+    for (const j of jobs) {
+      if ((j.title || "").toLowerCase().indexOf("xdr") !== -1) {
+        xdrJobIds.add(j.id);
+      }
+    }
+  }
+
+  // Build the cohort.
+  const cohort: CandidateRow[] = [];
+  for (const c of candidates) {
+    const applied = dateOnly(c.date_applied);
+    if (!applied) continue;
+    if (start && applied < start) continue;
+    if (end && applied > end) continue;
+
+    // Scope filters (mirror DashboardFilters semantics, including sentinels).
+    // Truthy check on the filter value handles "" / null / 0 as "no filter".
+    if (filters.jobId === "__unassigned__") {
+      if (c.job_id != null && c.job_id !== 0) continue;
+    } else if (filters.jobId && c.job_id !== filters.jobId) {
+      continue;
+    }
+    if (filters.recruiterId === "__unassigned__") {
+      if (c.recruiter_id != null && c.recruiter_id !== 0) continue;
+    } else if (filters.recruiterId === "__assigned__") {
+      if (c.recruiter_id == null || c.recruiter_id === 0) continue;
+    } else if (filters.recruiterId && c.recruiter_id !== filters.recruiterId) {
+      continue;
+    }
+    if (filters.sourceId === "__unassigned__") {
+      if (c.source_id != null && c.source_id !== 0) continue;
+    } else if (filters.sourceId && c.source_id !== filters.sourceId) {
+      continue;
+    }
+    if (filters.regionId === "__unassigned__") {
+      if (c.region_id != null && c.region_id !== 0) continue;
+    } else if (filters.regionId && c.region_id !== filters.regionId) {
+      continue;
+    }
+    if (filters.motion === "__unassigned__") {
+      if (c.motion === "Inbound" || c.motion === "Outbound") continue;
+    } else if (filters.motion && c.motion !== filters.motion) {
+      continue;
+    }
+    if (xdrJobIds !== null && !xdrJobIds.has(c.job_id)) continue;
+
+    cohort.push(c);
+  }
+
+  const cohortIds = new Set<number>(cohort.map(c => c.id));
+
+  // Index history by candidate_id — only for candidates in the cohort,
+  // to keep the working set small.
+  const historyByCand = new Map<number, number[]>();   // candidate_id → stage_to_ids
+  for (const h of history) {
+    if (!cohortIds.has(h.candidate_id)) continue;
+    let arr = historyByCand.get(h.candidate_id);
+    if (!arr) {
+      arr = [];
+      historyByCand.set(h.candidate_id, arr);
+    }
+    arr.push(h.stage_to_id);
+  }
+
+  // For each candidate, compute max non-rejected sequence reached.
+  const maxSeqByCand = new Map<number, number>();
+  for (const c of cohort) {
+    let maxSeq = 0;
+    const histStages = historyByCand.get(c.id) || [];
+    for (const sid of histStages) {
+      if (rejectedStageIds.has(sid)) continue;
+      const seq = stageSeqById.get(sid);
+      if (seq !== undefined && seq > maxSeq) maxSeq = seq;
+    }
+    // Include current stage if it's not a rejected one.
+    if (!rejectedStageIds.has(c.stage_id)) {
+      const curSeq = stageSeqById.get(c.stage_id);
+      if (curSeq !== undefined && curSeq > maxSeq) maxSeq = curSeq;
+    }
+    // Defensive floor: every cohort member has, at minimum, entered the
+    // first stage (createCandidate logs the initial placement). If history
+    // is broken or they were reject-on-arrival, still count them at Applied
+    // so the top bar reads "everyone who came in".
+    if (maxSeq < firstStageSeq) maxSeq = firstStageSeq;
+    maxSeqByCand.set(c.id, maxSeq);
+  }
+
+  // Bucket candidates into stages.
+  const benchmarksValid = orderedStages.length === 8;
+  const rows: WaterfallItem[] = orderedStages.map((s, i) => {
+    let count = 0;
+    for (const c of cohort) {
+      if ((maxSeqByCand.get(c.id) || 0) >= s.sequence) count++;
+    }
+    return {
+      stage_id:    s.id,
+      stage_name:  s.name,
+      stage_color: s.color,
+      sequence:    s.sequence,
+      count,
+      step_pct:    null,
+      bench_pct:   null,
+      bench_above: null,
+    };
+  });
+
+  // Fill step_pct + bench comparisons.
+  for (let i = 1; i < rows.length; i++) {
+    const prev = rows[i - 1].count;
+    const curr = rows[i].count;
+    rows[i].step_pct = prev > 0 ? Math.round((curr / prev) * 100) : null;
+
+    if (benchmarksValid && (i - 1) < XDR_BENCH.length) {
+      const bench = XDR_BENCH[i - 1];
+      rows[i].bench_pct = bench;
+      rows[i].bench_above =
+        rows[i].step_pct !== null ? (rows[i].step_pct! >= bench) : null;
+    }
+  }
+
+  return {
+    cohortSize: cohort.length,
+    rows,
+    window: { startDate: start, endDate: end },
+    benchmarksValid,
+  };
 }

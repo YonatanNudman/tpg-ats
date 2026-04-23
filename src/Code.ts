@@ -34,6 +34,7 @@ import {
   computeStageVelocity,
   computeSlaBreaches,
   computeStaleCandidates,
+  computeWaterfall,
   filterCandidates,
 } from "./Analytics";
 import type {
@@ -53,6 +54,8 @@ import type {
   UpdateJobInput,
   DashboardFilters,
   DashboardResult,
+  WaterfallFilters,
+  WaterfallResult,
 } from "./types";
 
 // ============================================================
@@ -302,12 +305,34 @@ function getCandidates(filters: CandidateFilters): CandidateRow[] {
   const db = getDB();
   let all = db.getAllCandidates();
 
-  if (filters.jobId)       all = all.filter(c => c.job_id       === filters.jobId);
+  if (filters.jobId === "__unassigned__") {
+    all = all.filter(c => !c.job_id || c.job_id === 0);
+  } else if (filters.jobId) {
+    all = all.filter(c => c.job_id === filters.jobId);
+  }
   if (filters.stageId)     all = all.filter(c => c.stage_id     === filters.stageId);
-  if (filters.recruiterId) all = all.filter(c => c.recruiter_id === filters.recruiterId);
-  if (filters.sourceId)    all = all.filter(c => c.source_id    === filters.sourceId);
-  if (filters.regionId)    all = all.filter(c => c.region_id    === filters.regionId);
-  if (filters.motion)      all = all.filter(c => c.motion       === filters.motion);
+  if (filters.recruiterId === "__unassigned__") {
+    all = all.filter(c => !c.recruiter_id || c.recruiter_id === 0);
+  } else if (filters.recruiterId === "__assigned__") {
+    all = all.filter(c => !!c.recruiter_id && c.recruiter_id !== 0);
+  } else if (filters.recruiterId) {
+    all = all.filter(c => c.recruiter_id === filters.recruiterId);
+  }
+  if (filters.sourceId === "__unassigned__") {
+    all = all.filter(c => !c.source_id || c.source_id === 0);
+  } else if (filters.sourceId) {
+    all = all.filter(c => c.source_id === filters.sourceId);
+  }
+  if (filters.regionId === "__unassigned__") {
+    all = all.filter(c => !c.region_id || c.region_id === 0);
+  } else if (filters.regionId) {
+    all = all.filter(c => c.region_id === filters.regionId);
+  }
+  if (filters.motion === "__unassigned__") {
+    all = all.filter(c => c.motion !== "Inbound" && c.motion !== "Outbound");
+  } else if (filters.motion) {
+    all = all.filter(c => c.motion === filters.motion);
+  }
   if (filters.status)      all = all.filter(c => c.status       === filters.status);
 
   if (filters.search) {
@@ -865,6 +890,30 @@ function getSourceEffectiveness(filters: DashboardFilters): import("./types").So
 }
 
 /**
+ * Cohort waterfall — for Janice's executive briefings.
+ *
+ * Different from the snapshot funnel (which computes "who's in each stage
+ * RIGHT NOW" client-side from allCandidates). This one walks the history
+ * table to figure out, for each candidate who applied in the window, the
+ * max stage they ever reached — and buckets them accordingly. That's the
+ * metric that's directly comparable to TPG's xDR benchmarks (row 23 of
+ * the Recruiting Weekly Update sheet).
+ *
+ * Runs server-side because it needs `getAllHistory()` which isn't loaded
+ * on the frontend and shouldn't be round-tripped for every filter change.
+ */
+function getWaterfallMetrics(filters: WaterfallFilters): WaterfallResult {
+  const db = getDB();
+  return computeWaterfall(
+    db.getAllCandidates(),
+    db.getAllHistory(),
+    db.getAllStages(),
+    db.getAllJobs(),
+    filters,
+  );
+}
+
+/**
  * Bottom-of-page Analytics section — funnel conversion, time-to-hire trend,
  * and stage velocity. Splits out from the legacy getDashboardData bundle so
  * the section's own filter row (added per user request: "all analytics
@@ -999,6 +1048,29 @@ function getSyncFingerprint(): { sig: string; userEmail: string } {
   }
 
   return { sig, userEmail };
+}
+
+/**
+ * Recent rejections — surfaces what happened to candidates after the
+ * funnel auto-hides them. Without this, recruiters reject someone and
+ * see them disappear from the funnel with no way to verify it worked
+ * or undo if they made a mistake. Returns the most recently rejected
+ * candidates with the refuse reason joined in for context.
+ */
+function getRecentRejections(days = 30, limit = 100): CandidateRow[] {
+  const db = getDB();
+  const cutoff = new Date(Date.now() - days * 86_400_000).toISOString().split("T")[0];
+  const stages    = db.getAllStages();
+  const jobs      = db.getAllJobs();
+  const recruiters = db.getAllRecruiters();
+  const sources   = db.getAllSources();
+  const regions   = db.getAllRegions();
+  const refuseReasons = db.getAllRefuseReasons();
+  return db.getAllCandidates()
+    .filter(c => c.status === "Rejected" && c.date_last_stage_update >= cutoff)
+    .sort((a, b) => (b.date_last_stage_update || "").localeCompare(a.date_last_stage_update || ""))
+    .slice(0, Math.max(1, Math.min(500, limit | 0)))
+    .map(c => joinCandidate(c, stages, jobs, recruiters, sources, regions, refuseReasons));
 }
 
 function getRecentHires(days = 90): CandidateRow[] {

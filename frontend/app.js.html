@@ -120,6 +120,18 @@ function gasCall(fnName, ...args) {
   });
 }
 
+function userFacingError(err, fallback, hint) {
+  var msg = (err && err.message) ? String(err.message) : String(err || '');
+  if (!msg) msg = fallback || 'Request failed.';
+  if (hint) return msg + ' ' + hint;
+  return msg;
+}
+
+function hasAssignedId(val) {
+  if (val === null || val === undefined || val === '') return false;
+  return Number(val) !== 0;
+}
+
 // ── Global helpers (used in HTML via x-text, x-html, @) ─────
 window.fmtDate = function (d) {
   if (!d) return '—';
@@ -438,6 +450,7 @@ document.addEventListener('alpine:init', function () {
     // without reaching up to the root component for every render.
     jobs:     [],
     settingsOpen: false,
+    settingsDirty: false,
 
     // Toast — "opts" can include:
     //   actionLabel  — text for the inline action button
@@ -568,6 +581,15 @@ document.addEventListener('alpine:init', function () {
       this.modal.open = false; this.modal.type = null; this.modal.data = null;
       if (!opt || !opt.suppressHistory) popHistory();
     },
+    requestCloseSettings: function () {
+      if (this.settingsDirty) {
+        var ok = window.confirm('You have unsaved Settings changes. Close without saving?');
+        if (!ok) return false;
+      }
+      this.settingsDirty = false;
+      this.settingsOpen = false;
+      return true;
+    },
   });
 
   // ── Main ATS app component ──────────────────────────────────
@@ -575,6 +597,9 @@ document.addEventListener('alpine:init', function () {
     var syncTimer = null;
     var lastSyncSig = '';
     var funnelChart = null, sourceChart = null, trendChart = null;
+    var lastFunnelChartSig = '';
+    var lastSourceChartSig = '';
+    var lastTrendChartSig = '';
 
     return {
       userEmail: '',
@@ -585,6 +610,7 @@ document.addEventListener('alpine:init', function () {
       showJobs: true,
       showAnalytics: false,       // collapsed by default — funnel-primary view surfaces the important stuff above
       showActivity: false,     // collapsed by default so the fold stays analytics-first
+      showRejections: false,   // collapsed by default; expands when user rejects via toast action
       // The three primary dashboards default to expanded (they're the
       // value the page exists to show), but recruiters can collapse any
       // of them when they want to focus on one. State persists via
@@ -594,10 +620,28 @@ document.addEventListener('alpine:init', function () {
       showSources: true,
       activity: [],            // array of HistoryRow, newest first
       activityLoading: false,
+      recentRejections: [],    // populated by loadRecentRejections; hydrated by reloadAll
+      rejectionsLoading: false,
 
       allCandidates: [],
+      _candidatesVersion: 0,   // increments on any candidate list mutation
+      _stagesVersion: 0,       // increments when settings.stages refreshes
+      _funnelCacheSig: '',
+      _funnelCacheData: null,
       jobs: [],
       settings: { stages: [], sources: [], regions: [], recruiters: [], refuseReasons: [] },
+      _globalAnalyticsReloadTimer: null,
+      _globalAnalyticsReloadSeq: 0,
+      _chartRenderTimer: null,
+      _chartRenderRaf: null,
+      globalAnalyticsLoading: false,
+      inlineSavingCount: 0,
+      syncBackoffMs: 20000,
+      syncBackoffMaxMs: 120000,
+      syncErrorStreak: 0,
+      presenceBackoffMs: 30000,
+      presenceBackoffMaxMs: 120000,
+      _presenceTimer: null,
 
       filters: {
         preset: '90d',
@@ -614,7 +658,7 @@ document.addEventListener('alpine:init', function () {
       // overrides it. Keeps the page-wide filter bar as the default
       // intent while still letting a specific dashboard scope itself
       // (e.g. global "Last 90 Days" but Recruiter Hires = "Last 30 Days").
-      funnelFilters:    { jobId: '', sourceId: '', recruiterId: '', preset: '', startDate: '', endDate: '' },
+      funnelFilters:    { jobId: '', sourceId: '', recruiterId: '', preset: '', startDate: '', endDate: '', xdrOnly: false },
       recruiterFilters: { jobId: '', sourceId: '', hiresPreset: '', hiresStartDate: '', hiresEndDate: '' },
       sourceFilters:    { jobId: '', recruiterId: '', preset: '', startDate: '', endDate: '' },
       analyticsFilters: { jobId: '', sourceId: '', recruiterId: '', preset: '', startDate: '', endDate: '' },
@@ -691,12 +735,22 @@ document.addEventListener('alpine:init', function () {
         var f = this.filters;
         return this.allCandidates.filter(function (c) {
           if (f.status && c.status !== f.status) return false;
-          if (f.jobId && c.job_id != f.jobId) return false;
-          if (f.sourceId && c.source_id != f.sourceId) return false;
-          if (f.motion && c.motion !== f.motion) return false;
-          if (f.regionId && c.region_id != f.regionId) return false;
+          if (f.jobId === '__unassigned__') {
+            if (hasAssignedId(c.job_id)) return false;
+          } else if (f.jobId && c.job_id != f.jobId) return false;
+          if (f.sourceId === '__unassigned__') {
+            if (hasAssignedId(c.source_id)) return false;
+          } else if (f.sourceId && c.source_id != f.sourceId) return false;
+          if (f.motion === '__unassigned__') {
+            if (c.motion === 'Inbound' || c.motion === 'Outbound') return false;
+          } else if (f.motion && c.motion !== f.motion) return false;
+          if (f.regionId === '__unassigned__') {
+            if (hasAssignedId(c.region_id)) return false;
+          } else if (f.regionId && c.region_id != f.regionId) return false;
           if (f.recruiterId === '__unassigned__') {
-            if (c.recruiter_id !== null && c.recruiter_id !== undefined && c.recruiter_id !== '') return false;
+            if (hasAssignedId(c.recruiter_id)) return false;
+          } else if (f.recruiterId === '__assigned__') {
+            if (!hasAssignedId(c.recruiter_id)) return false;
           } else if (f.recruiterId) {
             if (c.recruiter_id != f.recruiterId) return false;
           }
@@ -736,24 +790,35 @@ document.addEventListener('alpine:init', function () {
       // are silently swallowed: missing persistence is annoying, but
       // throwing on every filter change would be worse.
       _SECTION_STATE_KEY: 'tpg-ats.section-state.v1',
+      _persistTimer: null,
 
+      // Debounced + idle-scheduled so rapid dropdown changes (or typing
+      // into custom date inputs that fire a deep watcher per keystroke)
+      // don't synchronously hit localStorage. localStorage writes can
+      // take 1-5ms each and block the main thread; coalescing them is
+      // the difference between a snappy dropdown and a draggy one.
       _persistSectionState: function () {
-        try {
-          var snapshot = {
-            funnelFilters:    this.funnelFilters,
-            recruiterFilters: this.recruiterFilters,
-            sourceFilters:    this.sourceFilters,
-            analyticsFilters: this.analyticsFilters,
-            expandedStages:   this.expandedStages,
-            // Collapse state for the 3 primary dashboards. Persisted so
-            // a recruiter who collapsed Sourcing ROI to focus on the
-            // funnel doesn't have to re-collapse every page load.
-            showFunnel:     this.showFunnel,
-            showRecruiters: this.showRecruiters,
-            showSources:    this.showSources,
+        var self = this;
+        if (this._persistTimer) clearTimeout(this._persistTimer);
+        this._persistTimer = setTimeout(function () {
+          var write = function () {
+            try {
+              var snapshot = {
+                funnelFilters:    self.funnelFilters,
+                recruiterFilters: self.recruiterFilters,
+                sourceFilters:    self.sourceFilters,
+                analyticsFilters: self.analyticsFilters,
+                expandedStages:   self.expandedStages,
+                showFunnel:     self.showFunnel,
+                showRecruiters: self.showRecruiters,
+                showSources:    self.showSources,
+              };
+              localStorage.setItem(self._SECTION_STATE_KEY, JSON.stringify(snapshot));
+            } catch (e) { /* quota / private mode — non-fatal */ }
           };
-          localStorage.setItem(this._SECTION_STATE_KEY, JSON.stringify(snapshot));
-        } catch (e) { /* quota / private mode — non-fatal */ }
+          if (typeof requestIdleCallback === 'function') requestIdleCallback(write);
+          else write();
+        }, 250);
       },
 
       _restoreSectionState: function () {
@@ -839,12 +904,22 @@ document.addEventListener('alpine:init', function () {
         this.$watch('expandedStages', function () { self._persistSectionState(); });
         // Funnel filters are applied client-side (no network call), so
         // they don't go through reload* — watch them too.
-        this.$watch('funnelFilters', function () { self._persistSectionState(); }, { deep: true });
+        this.$watch('funnelFilters', function () {
+          self._persistSectionState();
+          self.pruneSelectionToVisible();
+        }, { deep: true });
         // Persist collapse state for the three primary dashboards so
         // a refresh restores the user's preferred section visibility.
         this.$watch('showFunnel',     function () { self._persistSectionState(); });
         this.$watch('showRecruiters', function () { self._persistSectionState(); });
         this.$watch('showSources',    function () { self._persistSectionState(); });
+        // Defer chart work until the section is actually visible.
+        this.$watch('showSources', function (open) {
+          if (open) self.scheduleChartRender();
+        });
+        this.$watch('showAnalytics', function (open) {
+          if (open) self.scheduleChartRender();
+        });
 
         // Esc key clears any active bulk selection — common shortcut for
         // "abandon what I just started" that recruiters expect to work.
@@ -894,15 +969,16 @@ document.addEventListener('alpine:init', function () {
       reloadAll: async function () {
         this.loading = true;
         try {
-          // Parallelize all four fetches — none of them depend on local
-          // `settings`, they each call gasCall which talks to the server.
+          // Critical-path fetches only. Recent Rejections is loaded lazily
+          // when the user expands that section (or via the post-reject
+          // toast) — keeps initial load + every silent sync tick light.
           await Promise.all([
             this.loadSettings(),
             this.loadCandidates(),
             this.loadJobs(),
             this.loadAnalytics(),
           ]);
-          this.$nextTick(this.renderCharts.bind(this));
+          this.scheduleChartRender();
         } finally {
           this.loading = false;
         }
@@ -927,7 +1003,21 @@ document.addEventListener('alpine:init', function () {
           this.loadJobs(),
           this.loadAnalytics(),
         ]);
-        this.$nextTick(this.renderCharts.bind(this));
+        this.scheduleChartRender();
+        // Refresh Recent Rejections only if it's currently visible — the
+        // user is actively looking at it, so the cost is justified.
+        if (this.showRejections) this.loadRecentRejections();
+      },
+
+      scheduleChartRender: function () {
+        var self = this;
+        if (this._chartRenderTimer) clearTimeout(this._chartRenderTimer);
+        this._chartRenderTimer = setTimeout(function () {
+          if (self._chartRenderRaf) cancelAnimationFrame(self._chartRenderRaf);
+          self._chartRenderRaf = requestAnimationFrame(function () {
+            self.renderCharts();
+          });
+        }, 70);
       },
 
       loadSettings: async function () {
@@ -942,10 +1032,18 @@ document.addEventListener('alpine:init', function () {
         local.regions  = shared.regions  = s.regions;
         local.recruiters    = shared.recruiters    = s.recruiters;
         local.refuseReasons = shared.refuseReasons = s.refuseReasons;
+        this._stagesVersion++;
+        this._funnelCacheSig = '';
+      },
+
+      _setCandidates: function (rows) {
+        this.allCandidates = rows || [];
+        this._candidatesVersion++;
+        this._funnelCacheSig = '';
       },
 
       loadCandidates: async function () {
-        this.allCandidates = await gasCall('getCandidates', {});
+        this._setCandidates(await gasCall('getCandidates', {}));
       },
 
       loadJobs: async function () {
@@ -956,8 +1054,9 @@ document.addEventListener('alpine:init', function () {
         Alpine.store('app').jobs = this.jobs;
       },
 
-      loadAnalytics: async function () {
-        var a = await gasCall('getDashboardData', this.buildDashboardFilters());
+      loadAnalytics: async function (filtersOverride, seqToken) {
+        var a = await gasCall('getDashboardData', filtersOverride || this.buildDashboardFilters());
+        if (typeof seqToken === 'number' && seqToken !== this._globalAnalyticsReloadSeq) return;
         // Funnel-primary layout: top-level promoted dashboards have their
         // own state slots so per-section refetches can update them
         // independently. Funnel itself is derived client-side from
@@ -982,7 +1081,7 @@ document.addEventListener('alpine:init', function () {
           sourceId: f.sourceId || null,
           motion: f.motion || null,
           regionId: f.regionId || null,
-          recruiterId: (f.recruiterId && f.recruiterId !== '__unassigned__') ? f.recruiterId : null,
+          recruiterId: f.recruiterId || null,
           status: f.status || null,
           startDate: f.startDate,
           endDate: f.endDate,
@@ -1016,10 +1115,12 @@ document.addEventListener('alpine:init', function () {
       },
 
       _effectiveRecruiterId: function (sectionVal, globalVal) {
-        // '__unassigned__' is a sentinel — preserve it through the merge.
+        // '__unassigned__'/'__assigned__' are sentinels — preserve through merge.
         if (sectionVal === '__unassigned__') return '__unassigned__';
+        if (sectionVal === '__assigned__') return '__assigned__';
         if (sectionVal) return sectionVal;
         if (globalVal === '__unassigned__') return '__unassigned__';
+        if (globalVal === '__assigned__') return '__assigned__';
         return globalVal || null;
       },
 
@@ -1107,8 +1208,10 @@ document.addEventListener('alpine:init', function () {
         }
         if (f[sKey] && f[eKey] && f[sKey] > f[eKey]) {
           var tmp = f[sKey]; f[sKey] = f[eKey]; f[eKey] = tmp;
+          Alpine.store('app').toastInfo('Date range was swapped to keep From ≤ To.');
         }
         this._persistSectionState();
+        this.pruneSelectionToVisible();
         if (section === 'recruiterHires') this.reloadRecruiterPerf();
         else if (section === 'source')    this.reloadSourceEffectiveness();
         else if (section === 'analytics') this.reloadAnalyticsHistorical();
@@ -1118,7 +1221,7 @@ document.addEventListener('alpine:init', function () {
 
       resetSectionFilters: function (section) {
         if (section === 'funnel') {
-          this.funnelFilters = { jobId: '', sourceId: '', recruiterId: '', preset: '', startDate: '', endDate: '' };
+          this.funnelFilters = { jobId: '', sourceId: '', recruiterId: '', preset: '', startDate: '', endDate: '', xdrOnly: false };
           // Symmetric inverse of filterFunnelByRecruiter — entering a recruiter
           // scope auto-expands every stage so the drill-in is one click; leaving
           // the scope collapses them back so the funnel returns to its compact
@@ -1126,6 +1229,7 @@ document.addEventListener('alpine:init', function () {
           // the recruiter-row click did, leaving the user to manually collapse
           // each stage to get back to the default view.
           this.expandedStages = [];
+          this.pruneSelectionToVisible();
           this._persistSectionState();
         } else if (section === 'recruiter') {
           this.recruiterFilters = { jobId: '', sourceId: '', hiresPreset: '', hiresStartDate: '', hiresEndDate: '' };
@@ -1149,17 +1253,87 @@ document.addEventListener('alpine:init', function () {
         var parts = [];
         if (f.recruiterId === '__unassigned__') {
           parts.push('Unassigned candidates');
+        } else if (f.recruiterId === '__assigned__') {
+          parts.push('Assigned candidates');
         } else if (f.recruiterId) {
           var r = this.settings.recruiters.find(function (x) { return String(x.id) === String(f.recruiterId); });
           if (r) parts.push(r.name + "'s pipeline");
         }
-        if (f.jobId) {
+        if (f.jobId === '__unassigned__') {
+          parts.push('No job assigned');
+        } else if (f.jobId) {
           var j = this.jobs.find(function (x) { return String(x.id) === String(f.jobId); });
           if (j) parts.push(j.title);
         }
-        if (f.sourceId) {
+        if (f.sourceId === '__unassigned__') {
+          parts.push('No source assigned');
+        } else if (f.sourceId) {
           var s = this.settings.sources.find(function (x) { return String(x.id) === String(f.sourceId); });
           if (s) parts.push(s.name);
+        }
+        if (f.preset) parts.push(f.preset);
+        return parts.length > 0 ? parts.join(' · ') : '';
+      },
+      recruiterScopeLabel: function () {
+        var f = this.recruiterFilters;
+        var parts = [];
+        if (f.jobId === '__unassigned__') {
+          parts.push('No job assigned');
+        } else if (f.jobId) {
+          var j = this.jobs.find(function (x) { return String(x.id) === String(f.jobId); });
+          if (j) parts.push(j.title);
+        }
+        if (f.sourceId === '__unassigned__') {
+          parts.push('No source assigned');
+        } else if (f.sourceId) {
+          var s = this.settings.sources.find(function (x) { return String(x.id) === String(f.sourceId); });
+          if (s) parts.push(s.name);
+        }
+        if (f.hiresPreset) parts.push('Hires ' + f.hiresPreset);
+        return parts.length > 0 ? parts.join(' · ') : '';
+      },
+      sourceScopeLabel: function () {
+        var f = this.sourceFilters;
+        var parts = [];
+        if (f.jobId === '__unassigned__') {
+          parts.push('No job assigned');
+        } else if (f.jobId) {
+          var j = this.jobs.find(function (x) { return String(x.id) === String(f.jobId); });
+          if (j) parts.push(j.title);
+        }
+        if (f.recruiterId === '__unassigned__') {
+          parts.push('Unassigned');
+        } else if (f.recruiterId === '__assigned__') {
+          parts.push('Assigned');
+        } else if (f.recruiterId) {
+          var r = this.settings.recruiters.find(function (x) { return String(x.id) === String(f.recruiterId); });
+          if (r) parts.push(r.name);
+        }
+        if (f.preset) parts.push(f.preset);
+        return parts.length > 0 ? parts.join(' · ') : '';
+      },
+      analyticsScopeLabel: function () {
+        var f = this.analyticsFilters;
+        var parts = [];
+        if (f.jobId === '__unassigned__') {
+          parts.push('No job assigned');
+        } else if (f.jobId) {
+          var j = this.jobs.find(function (x) { return String(x.id) === String(f.jobId); });
+          if (j) parts.push(j.title);
+        }
+        if (f.sourceId === '__unassigned__') {
+          parts.push('No source assigned');
+        } else if (f.sourceId) {
+          var s = this.settings.sources.find(function (x) { return String(x.id) === String(f.sourceId); });
+          if (s) parts.push(s.name);
+        }
+        if (f.recruiterId === '__unassigned__') {
+          parts.push('Unassigned');
+        } else if (f.recruiterId === '__assigned__') {
+          parts.push('Assigned');
+        } else if (f.recruiterId) {
+          var r = this.settings.recruiters.find(function (x) { return String(x.id) === String(f.recruiterId); });
+          if (r) parts.push(r.name);
         }
         if (f.preset) parts.push(f.preset);
         return parts.length > 0 ? parts.join(' · ') : '';
@@ -1179,13 +1353,25 @@ document.addEventListener('alpine:init', function () {
       // count 0 but the expanded panel lists candidates".
       _funnelMatch: function (c, f) {
         if (c.status !== 'Active') return false;
-        if (f.jobId    && c.job_id    != f.jobId)    return false;
-        if (f.sourceId && c.source_id != f.sourceId) return false;
+        if (f.jobId === '__unassigned__') {
+          if (hasAssignedId(c.job_id)) return false;
+        } else if (f.jobId && c.job_id != f.jobId) return false;
+        if (f.sourceId === '__unassigned__') {
+          if (hasAssignedId(c.source_id)) return false;
+        } else if (f.sourceId && c.source_id != f.sourceId) return false;
         if (f.recruiterId === '__unassigned__') {
-          if (c.recruiter_id != null && c.recruiter_id !== '') return false;
+          if (hasAssignedId(c.recruiter_id)) return false;
+        } else if (f.recruiterId === '__assigned__') {
+          if (!hasAssignedId(c.recruiter_id)) return false;
         } else if (f.recruiterId) {
           if (c.recruiter_id != f.recruiterId) return false;
         }
+        if (f.regionId === '__unassigned__') {
+          if (hasAssignedId(c.region_id)) return false;
+        } else if (f.regionId && c.region_id != f.regionId) return false;
+        if (f.motion === '__unassigned__') {
+          if (c.motion === 'Inbound' || c.motion === 'Outbound') return false;
+        } else if (f.motion && c.motion !== f.motion) return false;
         // Topbar search box \u2014 substring match against name + email.
         // Same semantic as the export-count `filteredCandidates` so
         // the two surfaces always agree on which candidates a search
@@ -1211,32 +1397,104 @@ document.addEventListener('alpine:init', function () {
         return true;
       },
 
-      get pipelineFunnelData() {
+      _funnelSignature: function (f) {
+        return [
+          this._candidatesVersion,
+          this._stagesVersion,
+          f.jobId || '',
+          f.sourceId || '',
+          f.recruiterId || '',
+          f.motion || '',
+          f.regionId || '',
+          f.status || '',
+          f.startDate || '',
+          f.endDate || '',
+          f.search || '',
+          f.xdrOnly ? '1' : '0',
+        ].join('|');
+      },
+
+      _buildFunnelCache: function () {
         var f = this.mergeSectionFilters(this.funnelFilters);
-        var self = this;
-        var inScope = this.allCandidates.filter(function (c) {
-          return self._funnelMatch(c, f);
-        });
-        var counts = {};
-        for (var i = 0; i < inScope.length; i++) {
-          var sid = inScope[i].stage_id;
-          counts[sid] = (counts[sid] || 0) + 1;
+        var sig = this._funnelSignature(f);
+        if (sig === this._funnelCacheSig && this._funnelCacheData) {
+          return this._funnelCacheData;
         }
-        return this.settings.stages
+
+        // Build xDR job ID allowlist when xdrOnly is active.
+        // Matches any job whose title contains "xdr" (case-insensitive).
+        var xdrJobIds = null;
+        if (f.xdrOnly) {
+          xdrJobIds = {};
+          for (var xi = 0; xi < this.jobs.length; xi++) {
+            if ((this.jobs[xi].title || '').toLowerCase().indexOf('xdr') !== -1) {
+              xdrJobIds[this.jobs[xi].id] = true;
+            }
+          }
+        }
+
+        var stageCandidates = {};
+        var inScopeTotal = 0;
+        for (var i = 0; i < this.allCandidates.length; i++) {
+          var c = this.allCandidates[i];
+          if (!this._funnelMatch(c, f)) continue;
+          if (xdrJobIds !== null && !xdrJobIds[c.job_id]) continue;
+          inScopeTotal++;
+          var sid = c.stage_id;
+          if (!stageCandidates[sid]) stageCandidates[sid] = [];
+          stageCandidates[sid].push(c);
+        }
+
+        var stageRows = this.settings.stages
           .filter(function (s) { return s.is_enabled && !s.is_rejected; })
           .sort(function (a, b) { return a.sequence - b.sequence; })
           .map(function (s) {
+            var rows = stageCandidates[s.id] || [];
+            rows.sort(function (a, b) { return (a.last_name || '').localeCompare(b.last_name || ''); });
             return {
               stage_id: s.id,
               stage_name: s.name,
               stage_color: s.color,
-              candidate_count: counts[s.id] || 0,
+              candidate_count: rows.length,
             };
           });
+
+        // Waterfall conversion metrics.
+        // Step-to-step benchmarks from TPG Recruiting Weekly Update sheet,
+        // row 23 "US xDR AVERAGES" (Inbound motion):
+        //   100 → 50 → 40 → 30 → 24 → 19 → 17 → 16 candidates/recruiter/month.
+        // Derived step-to-step rates: 50%, 80%, 75%, 80%, 79%, 89%, 94%.
+        var XDR_BENCH = [50, 80, 75, 80, 79, 89, 94];
+        for (var wi = 0; wi < stageRows.length; wi++) {
+          var wr = stageRows[wi];
+          if (wi === 0) {
+            wr.step_pct    = null;
+            wr.bench_pct   = null;
+            wr.bench_above = null;
+          } else {
+            var prevCnt = stageRows[wi - 1].candidate_count;
+            wr.step_pct = prevCnt > 0 ? Math.round((wr.candidate_count / prevCnt) * 100) : null;
+            var benchVal = (wi - 1) < XDR_BENCH.length ? XDR_BENCH[wi - 1] : null;
+            wr.bench_pct   = benchVal;
+            wr.bench_above = (benchVal !== null && wr.step_pct !== null) ? (wr.step_pct >= benchVal) : null;
+          }
+        }
+
+        this._funnelCacheSig = sig;
+        this._funnelCacheData = {
+          rows: stageRows,
+          total: inScopeTotal,
+          stageCandidates: stageCandidates,
+        };
+        return this._funnelCacheData;
+      },
+
+      get pipelineFunnelData() {
+        return this._buildFunnelCache().rows;
       },
 
       funnelTotalActive: function () {
-        return this.pipelineFunnelData.reduce(function (sum, s) { return sum + s.candidate_count; }, 0);
+        return this._buildFunnelCache().total;
       },
 
       funnelBarWidth: function (stage) {
@@ -1255,14 +1513,7 @@ document.addEventListener('alpine:init', function () {
       },
 
       funnelCandidatesForStage: function (stageId) {
-        var f = this.mergeSectionFilters(this.funnelFilters);
-        var self = this;
-        return this.allCandidates
-          .filter(function (c) {
-            if (c.stage_id !== stageId) return false;
-            return self._funnelMatch(c, f);
-          })
-          .sort(function (a, b) { return (a.last_name || '').localeCompare(b.last_name || ''); });
+        return this._buildFunnelCache().stageCandidates[stageId] || [];
       },
 
       // ── Inline funnel actions ─────────────────────────────
@@ -1389,6 +1640,18 @@ document.addEventListener('alpine:init', function () {
         }
       },
       clearSelection: function () { this.selectedIds = []; },
+      pruneSelectionToVisible: function () {
+        if (!this.selectedIds.length) return;
+        var visible = {};
+        var stages = this.pipelineFunnelData || [];
+        for (var i = 0; i < stages.length; i++) {
+          var rows = this.funnelCandidatesForStage(stages[i].stage_id);
+          for (var j = 0; j < rows.length; j++) visible[rows[j].id] = true;
+        }
+        var stale = this.staleCandidates || [];
+        for (var k = 0; k < stale.length; k++) visible[stale[k].candidate_id] = true;
+        this.selectedIds = this.selectedIds.filter(function (id) { return !!visible[id]; });
+      },
 
       // ── Bulk actions (call backend, show summary toast) ─────────
       _summarizeBulkResult: function (verb, result) {
@@ -1418,7 +1681,7 @@ document.addEventListener('alpine:init', function () {
           // way faster on a 100+ candidate dataset and the funnel
           // re-renders reactively from allCandidates.
           var fresh = await gasCall('getCandidates', {});
-          this.allCandidates = fresh;
+          this._setCandidates(fresh);
           // Drop successfully-moved candidates from selection so the
           // action bar doesn't keep them around as if still pending.
           var done = {};
@@ -1441,7 +1704,7 @@ document.addEventListener('alpine:init', function () {
           var result = await gasCall('bulkAssignRecruiter', ids, rid);
           this._summarizeBulkResult('Assigned', result);
           var fresh = await gasCall('getCandidates', {});
-          this.allCandidates = fresh;
+          this._setCandidates(fresh);
           this.bulkActionRecruiterId = '';
         } catch (e) {
           this.toastError('Bulk assign failed: ' + (e.message || String(e)));
@@ -1455,9 +1718,16 @@ document.addEventListener('alpine:init', function () {
         // on confirm.
         if (this.bulkBusy) return;
         if (this.selectedIds.length === 0) return;
+        var byId = {};
+        (this.allCandidates || []).forEach(function (c) { byId[c.id] = c; });
+        var selectedNames = this.selectedIds.map(function (id) {
+          var c = byId[id];
+          return c ? ((c.first_name || '') + ' ' + (c.last_name || '')).trim() : ('Candidate ' + id);
+        });
         this.openModal('confirmReject', {
           bulk: true,
           ids: this.selectedIds.slice(),
+          names: selectedNames,
         });
       },
 
@@ -1481,38 +1751,61 @@ document.addEventListener('alpine:init', function () {
       // touching the page-wide `loading` state. Persisted filter state
       // is saved AFTER a successful refetch so a failed call doesn't
       // pollute storage with a state that can't be reproduced.
-      reloadRecruiterPerf: async function () {
-        var main  = this.mergeSectionFilters(this.recruiterFilters);
-        var hires = null;
-        if (this.recruiterFilters.hiresPreset) {
-          hires = Object.assign({}, main, {
-            startDate: this.recruiterFilters.hiresStartDate,
-            endDate:   this.recruiterFilters.hiresEndDate,
-          });
-        }
+      // Debounce + race-safe wrappers so rapid dropdown changes within
+      // a section don't queue 4 in-flight requests. Each section has its
+      // own seq counter so cross-section changes don't cancel each other.
+      _recruiterReloadSeq: 0, _recruiterReloadTimer: null,
+      _sourceReloadSeq:    0, _sourceReloadTimer:    null,
+      _analyticsReloadSeq: 0, _analyticsReloadTimer: null,
+
+      reloadRecruiterPerf: function () {
+        var self = this;
+        var seq = ++this._recruiterReloadSeq;
+        if (this._recruiterReloadTimer) clearTimeout(this._recruiterReloadTimer);
         this.recruiterLoading = true;
-        try {
-          this.recruiterPerformance = await gasCall('getRecruiterPerformance', main, hires);
-          this._persistSectionState();
-        } catch (e) {
-          Alpine.store('app').toastError('Recruiter perf reload failed: ' + e.message);
-        } finally {
-          this.recruiterLoading = false;
-        }
+        this._recruiterReloadTimer = setTimeout(async function () {
+          var main  = self.mergeSectionFilters(self.recruiterFilters);
+          var hires = null;
+          if (self.recruiterFilters.hiresPreset) {
+            hires = Object.assign({}, main, {
+              startDate: self.recruiterFilters.hiresStartDate,
+              endDate:   self.recruiterFilters.hiresEndDate,
+            });
+          }
+          try {
+            var rows = await gasCall('getRecruiterPerformance', main, hires);
+            if (seq !== self._recruiterReloadSeq) return;
+            self.recruiterPerformance = rows;
+            self._persistSectionState();
+          } catch (e) {
+            if (seq !== self._recruiterReloadSeq) return;
+            Alpine.store('app').toastError('Recruiter perf reload failed: ' + e.message);
+          } finally {
+            if (seq === self._recruiterReloadSeq) self.recruiterLoading = false;
+          }
+        }, 200);
       },
 
-      reloadSourceEffectiveness: async function () {
-        var f = this.mergeSectionFilters(this.sourceFilters);
+      reloadSourceEffectiveness: function () {
+        var self = this;
+        var seq = ++this._sourceReloadSeq;
+        if (this._sourceReloadTimer) clearTimeout(this._sourceReloadTimer);
         this.sourceLoading = true;
-        try {
-          this.sourceEffectiveness = await gasCall('getSourceEffectiveness', f);
-          this.$nextTick(this.renderSourceChart.bind(this));
-          this._persistSectionState();
-        } catch (e) {
-          Alpine.store('app').toastError('Source ROI reload failed: ' + e.message);
-        } finally {
-          this.sourceLoading = false;
-        }
+        this._sourceReloadTimer = setTimeout(async function () {
+          var f = self.mergeSectionFilters(self.sourceFilters);
+          try {
+            var rows = await gasCall('getSourceEffectiveness', f);
+            if (seq !== self._sourceReloadSeq) return;
+            self.sourceEffectiveness = rows;
+            self.scheduleChartRender();
+            self._persistSectionState();
+          } catch (e) {
+            if (seq !== self._sourceReloadSeq) return;
+            Alpine.store('app').toastError('Source ROI reload failed: ' + e.message);
+          } finally {
+            if (seq === self._sourceReloadSeq) self.sourceLoading = false;
+          }
+        }, 200);
       },
 
       // Bottom-of-page Analytics section refetch. Routes through
@@ -1520,26 +1813,30 @@ document.addEventListener('alpine:init', function () {
       // (funnelConversion, timeToHireTrend, stageVelocity) so we don't
       // churn the recruiter perf / source ROI / SLA / stale state the
       // user may have separately filtered on.
-      reloadAnalyticsHistorical: async function () {
-        var f = this.mergeSectionFilters(this.analyticsFilters);
+      reloadAnalyticsHistorical: function () {
+        var self = this;
+        var seq = ++this._analyticsReloadSeq;
+        if (this._analyticsReloadTimer) clearTimeout(this._analyticsReloadTimer);
         this.analyticsHistoricalLoading = true;
-        try {
-          var a = await gasCall('getAnalyticsHistorical', f);
-          this.analytics = {
-            funnelConversion: a.funnelConversion,
-            timeToHireTrend:  a.timeToHireTrend,
-            stageVelocity:    a.stageVelocity,
-          };
-          // Charts only render when the Analytics section is open.
-          // Defer to next tick so the DOM is stable before Chart.js
-          // recomputes the canvases.
-          this.$nextTick(this.renderCharts.bind(this));
-          this._persistSectionState();
-        } catch (e) {
-          Alpine.store('app').toastError('Analytics reload failed: ' + e.message);
-        } finally {
-          this.analyticsHistoricalLoading = false;
-        }
+        this._analyticsReloadTimer = setTimeout(async function () {
+          var f = self.mergeSectionFilters(self.analyticsFilters);
+          try {
+            var a = await gasCall('getAnalyticsHistorical', f);
+            if (seq !== self._analyticsReloadSeq) return;
+            self.analytics = {
+              funnelConversion: a.funnelConversion,
+              timeToHireTrend:  a.timeToHireTrend,
+              stageVelocity:    a.stageVelocity,
+            };
+            self.scheduleChartRender();
+            self._persistSectionState();
+          } catch (e) {
+            if (seq !== self._analyticsReloadSeq) return;
+            Alpine.store('app').toastError('Analytics reload failed: ' + e.message);
+          } finally {
+            if (seq === self._analyticsReloadSeq) self.analyticsHistoricalLoading = false;
+          }
+        }, 200);
       },
 
       // ── Filter actions ───────────────────────────────────
@@ -1570,6 +1867,7 @@ document.addEventListener('alpine:init', function () {
           var tmp = this.filters.startDate;
           this.filters.startDate = this.filters.endDate;
           this.filters.endDate = tmp;
+          Alpine.store('app').toastInfo('Date range was swapped to keep From ≤ To.');
         }
         this.applyFilters();
       },
@@ -1579,7 +1877,36 @@ document.addEventListener('alpine:init', function () {
         // updates reactively as `filters` mutate. Only the server-side
         // dashboards (Recruiter Performance, Sourcing ROI, historical
         // analytics) need a refetch when global filters change.
-        this.loadAnalytics().then(function () { this.renderCharts(); }.bind(this));
+        //
+        // Wrapped in requestAnimationFrame so the dropdown UI closes
+        // and paints BEFORE we touch the loading flag / queue work.
+        // Without this, every dropdown selection was synchronously
+        // toggling globalAnalyticsLoading, mutating filters reactively,
+        // and re-running the funnel cache predicate before the browser
+        // got a chance to paint the closed select — felt as noticeable
+        // input lag even though no expensive op individually was slow.
+        var self = this;
+        var raf = (typeof requestAnimationFrame === 'function')
+          ? requestAnimationFrame : function (cb) { setTimeout(cb, 0); };
+        raf(function () {
+          var seq = ++self._globalAnalyticsReloadSeq;
+          self.globalAnalyticsLoading = true;
+          if (self._globalAnalyticsReloadTimer) clearTimeout(self._globalAnalyticsReloadTimer);
+          self._globalAnalyticsReloadTimer = setTimeout(function () {
+            self.loadAnalytics(self.buildDashboardFilters(), seq)
+              .then(function () {
+                if (seq !== self._globalAnalyticsReloadSeq) return;
+                self.scheduleChartRender();
+                self.pruneSelectionToVisible();
+                self.globalAnalyticsLoading = false;
+              })
+              .catch(function (e) {
+                if (seq !== self._globalAnalyticsReloadSeq) return;
+                self.globalAnalyticsLoading = false;
+                Alpine.store('app').toastError(userFacingError(e, 'Analytics refresh failed.', 'Try Refresh now.'));
+              });
+          }, 250);
+        });
       },
 
       resetFilters: function () {
@@ -1616,6 +1943,49 @@ document.addEventListener('alpine:init', function () {
       // load for users who don't open it). Reloaded on every open — tiny
       // payload, avoids stale "2 hours ago" labels when the section has
       // been left open.
+      // Lazy-load recent rejections on first expand. Same pattern as
+      // toggleActivityFeed — keeps initial page load light, refresh
+      // on every open to avoid stale rows.
+      toggleRecentRejections: async function () {
+        this.showRejections = !this.showRejections;
+        if (!this.showRejections) return;
+        await this.loadRecentRejections();
+      },
+      loadRecentRejections: async function () {
+        this.rejectionsLoading = true;
+        try {
+          this.recentRejections = await gasCall('getRecentRejections', 30, 100);
+        } catch (e) {
+          Alpine.store('app').toastError('Could not load rejections: ' + e.message);
+        } finally {
+          this.rejectionsLoading = false;
+        }
+      },
+
+      // Restore a rejected candidate to the first active stage, with an
+      // optional confirm so it can't be triggered by a stray click.
+      reactivateCandidate: async function (c) {
+        if (!c || !c.id) return;
+        var name = ((c.first_name || '') + ' ' + (c.last_name || '')).trim() || 'this candidate';
+        if (!window.confirm('Restore ' + name + ' from Rejected?\nThey will move back into the pipeline.')) return;
+        var firstStage = this.settings.stages
+          .filter(function (s) { return s.is_enabled && !s.is_rejected; })
+          .sort(function (a, b) { return a.sequence - b.sequence; })[0];
+        if (!firstStage) {
+          Alpine.store('app').toastError('No active pipeline stage configured.');
+          return;
+        }
+        try {
+          await gasCall('updateCandidateStage', c.id, firstStage.id);
+          await gasCall('updateCandidate', c.id, { refuse_reason_id: null });
+          Alpine.store('app').toastSuccess(name + ' restored to ' + firstStage.name + '.');
+          await this.reloadAll();
+          await this.loadRecentRejections();
+        } catch (e) {
+          Alpine.store('app').toastError(userFacingError(e, 'Restore failed.', 'Try again.'));
+        }
+      },
+
       toggleActivityFeed: async function () {
         this.showActivity = !this.showActivity;
         if (!this.showActivity) return;
@@ -1646,6 +2016,7 @@ document.addEventListener('alpine:init', function () {
         c[field] = value;   // optimistic
 
         var self = this;
+        this.inlineSavingCount++;
         try {
           if (field === 'stage_id') {
             await gasCall('updateCandidateStage', c.id, value, c.date_last_stage_update);
@@ -1663,14 +2034,20 @@ document.addEventListener('alpine:init', function () {
             Alpine.store('app').toastError(
               'Conflict — someone else updated this candidate.',
               {
-                actionLabel: 'Reload',
+                actionLabel: 'Review activity',
                 duration: 8000,
-                onAction: function () { self.refreshCandidate(c.id); },
+                onAction: function () {
+                  self.showActivity = true;
+                  self.toggleActivityFeed();
+                  self.refreshCandidate(c.id);
+                },
               }
             );
           } else {
-            Alpine.store('app').toastError('Save failed: ' + e.message);
+            Alpine.store('app').toastError(userFacingError(e, 'Save failed.', 'Refresh and try again.'));
           }
+        } finally {
+          this.inlineSavingCount = Math.max(0, this.inlineSavingCount - 1);
         }
       },
 
@@ -1686,18 +2063,27 @@ document.addEventListener('alpine:init', function () {
           var r = await gasCall('getCandidateDetail', id);
           var idx = this.allCandidates.findIndex(function (x) { return x.id === id; });
           if (idx >= 0) this.allCandidates[idx] = r.candidate;
+          this._candidatesVersion++;
+          this._funnelCacheSig = '';
           // Keep peek in sync if open
           if (Alpine.store('app').peek.open && Alpine.store('app').peek.candidateId === id) {
             Alpine.store('app').peek.candidate = r.candidate;
             Alpine.store('app').peek.history = r.history;
           }
-        } catch (e) { /* silent */ }
+        } catch (e) {
+          var self = this;
+          Alpine.store('app').toastError(
+            userFacingError(e, 'Could not refresh candidate.', 'Try again.'),
+            { actionLabel: 'Retry', duration: 8000, onAction: function () { self.refreshCandidate(id); } }
+          );
+        }
       },
 
       // ── Inline job field update ──────────────────────────
       updateJobField: async function (j, field, value) {
         var prev = j[field];
         j[field] = value;
+        this.inlineSavingCount++;
         try {
           var updates = {}; updates[field] = value;
           await gasCall('updateJobOpening', j.id, updates);
@@ -1706,14 +2092,16 @@ document.addEventListener('alpine:init', function () {
           this.jobs = await gasCall('getJobOpenings');
         } catch (e) {
           j[field] = prev;
-          Alpine.store('app').toastError('Save failed: ' + e.message);
+          Alpine.store('app').toastError(userFacingError(e, 'Save failed.', 'Refresh and try again.'));
+        } finally {
+          this.inlineSavingCount = Math.max(0, this.inlineSavingCount - 1);
         }
       },
 
       // Undoable job delete — same optimistic-UI + 5s undo pattern as candidate delete.
       // Server-side guard (can't delete jobs with existing candidates) still applies.
       deleteJob: function (j) {
-        if (!confirm('Delete "' + j.title + '"?\n\nHit Undo on the toast within 5s to cancel. Jobs with existing candidates cannot be deleted.')) return;
+        if (!confirm('Delete "' + j.title + '"?\n\nHit Undo on the toast within 8s to cancel. Jobs with existing candidates cannot be deleted.')) return;
         var self = this;
         var idx = this.jobs.findIndex(function (x) { return x.id === j.id; });
         if (idx < 0) return;
@@ -1722,7 +2110,7 @@ document.addEventListener('alpine:init', function () {
         var undone = false;
         Alpine.store('app').toastInfo('Deleted "' + j.title + '"', {
           actionLabel: 'Undo',
-          duration: 5000,
+          duration: 8000,
           onAction: function () {
             undone = true;
             self.jobs.splice(idx, 0, snapshot);
@@ -1741,7 +2129,10 @@ document.addEventListener('alpine:init', function () {
 
       // ── Modals ────────────────────────────────────────────
       openModal: function (type, data) { Alpine.store('app').openModal(type, data); },
-      openSettings: function () { Alpine.store('app').settingsOpen = true; },
+      openSettings: function () {
+        Alpine.store('app').settingsDirty = false;
+        Alpine.store('app').settingsOpen = true;
+      },
       openPeek: function (id) { Alpine.store('app').openPeek(id); },
 
       // ── Expiry helpers ────────────────────────────────────
@@ -1763,7 +2154,8 @@ document.addEventListener('alpine:init', function () {
       // so it MUST run regardless of showAnalytics. The funnel/trend/stage
       // charts only matter when the collapsible Analytics card is open.
       renderCharts: function () {
-        this.renderSourceChart();   // Sourcing ROI (always visible)
+        // Draw only visible sections so hidden panels don't consume paint/CPU.
+        if (this.showSources) this.renderSourceChart();
         if (!this.showAnalytics) return;
         this.renderFunnelChart();
         this.renderTrendChart();
@@ -1777,8 +2169,13 @@ document.addEventListener('alpine:init', function () {
       renderFunnelChart: function () {
         var el = document.getElementById('funnelChart');
         if (!el) return;
-        if (funnelChart) funnelChart.destroy();
         var f = this.analytics.funnelConversion;
+        var sig = JSON.stringify(f.map(function (x) {
+          return [x.stage_id, x.stage_name, x.conversion_rate];
+        }));
+        if (funnelChart && sig === lastFunnelChartSig) return;
+        lastFunnelChartSig = sig;
+        if (funnelChart) funnelChart.destroy();
         funnelChart = new Chart(el, {
           type: 'bar',
           data: {
@@ -1804,13 +2201,19 @@ document.addEventListener('alpine:init', function () {
       },
 
       renderSourceChart: function () {
+        if (!this.showSources) return;
         var el = document.getElementById('sourceDonutChart');
         if (!el) return;
-        if (sourceChart) sourceChart.destroy();
         // Promoted out of the collapsed analytics object — sourceEffectiveness
         // is now a top-level field updated by reloadSourceEffectiveness when
         // the Sourcing ROI section's filters change.
         var s = this.sourceEffectiveness;
+        var sig = JSON.stringify(s.map(function (x) {
+          return [x.source_id, x.source_name, x.total_candidates];
+        }));
+        if (sourceChart && sig === lastSourceChartSig) return;
+        lastSourceChartSig = sig;
+        if (sourceChart) sourceChart.destroy();
         // TPG orange leads, then diverse accents for additional sources
         var colors = ['#F2831F','#239ED8','#3AA76D','#8E5DC9','#E14B4B','#1A1A2E'];
         sourceChart = new Chart(el, {
@@ -1830,8 +2233,13 @@ document.addEventListener('alpine:init', function () {
       renderTrendChart: function () {
         var el = document.getElementById('trendChart');
         if (!el) return;
-        if (trendChart) trendChart.destroy();
         var t = this.analytics.timeToHireTrend;
+        var sig = JSON.stringify(t.map(function (x) {
+          return [x.month_label, x.avg_days_to_hire];
+        }));
+        if (trendChart && sig === lastTrendChartSig) return;
+        lastTrendChartSig = sig;
+        if (trendChart) trendChart.destroy();
         trendChart = new Chart(el, {
           type: 'line',
           data: {
@@ -1857,14 +2265,28 @@ document.addEventListener('alpine:init', function () {
       // (document.hidden) or when the user has a peek panel open.
       startSyncPolling: function () {
         var self = this;
-        syncTimer = setInterval(function () { self.checkSync(); }, 20000);
+        if (syncTimer) clearTimeout(syncTimer);
+        function scheduleSync(delayMs) {
+          syncTimer = setTimeout(async function () {
+            await self.checkSync();
+            scheduleSync(self.syncBackoffMs);
+          }, delayMs);
+        }
+        scheduleSync(self.syncBackoffMs);
         // App-wide presence: ping every 30s so the avatar stack in the
         // topbar reflects who's currently using the app. Faster than
         // we strictly need (60s TTL) but keeps the staleness < 30s
         // even if a tab dies between pings. Skipped while the tab is
         // hidden so backgrounded tabs don't hold their avatar slot.
         self._appPresenceTick();
-        setInterval(function () { self._appPresenceTick(); }, 30000);
+        if (self._presenceTimer) clearTimeout(self._presenceTimer);
+        function schedulePresence(delayMs) {
+          self._presenceTimer = setTimeout(async function () {
+            await self._appPresenceTick();
+            schedulePresence(self.presenceBackoffMs);
+          }, delayMs);
+        }
+        schedulePresence(self.presenceBackoffMs);
       },
       _appPresenceTick: async function () {
         if (document.hidden) return;
@@ -1872,7 +2294,10 @@ document.addEventListener('alpine:init', function () {
           await gasCall('touchAppPresence');
           var viewers = await gasCall('getAppPresence');
           this.appViewers = viewers || [];
-        } catch (_e) { /* network flake — non-fatal */ }
+          this.presenceBackoffMs = 30000;
+        } catch (_e) {
+          this.presenceBackoffMs = Math.min(this.presenceBackoffMs * 2, this.presenceBackoffMaxMs);
+        }
       },
       // Helpers for the topbar avatar stack. otherAppViewers excludes
       // self because the user already knows they're here; the count
@@ -1943,8 +2368,11 @@ document.addEventListener('alpine:init', function () {
             }
           }
           lastSyncSig = fp.sig;
+          this.syncBackoffMs = 20000;
+          this.syncErrorStreak = 0;
         } catch (e) {
-          /* network blip \u2014 ignore */
+          this.syncBackoffMs = Math.min(this.syncBackoffMs * 2, this.syncBackoffMaxMs);
+          this.syncErrorStreak++;
         }
       },
     };
@@ -2266,7 +2694,7 @@ document.addEventListener('alpine:init', function () {
         var undone = false;
         this.$store.app.toastInfo('Deleted ' + name, {
           actionLabel: 'Undo',
-          duration: 5000,
+          duration: 8000,
           onAction: function () {
             undone = true;
             // Restore in place
@@ -2299,6 +2727,11 @@ document.addEventListener('alpine:init', function () {
       init: function () {
         this.reload('stages'); this.reload('sources'); this.reload('regions');
         this.reload('recruiters'); this.reload('refuseReasons');
+        this.$store.app.settingsDirty = false;
+        var self = this;
+        ['stages', 'sources', 'regions', 'recruiters', 'refuseReasons'].forEach(function (k) {
+          self.$watch(k, function () { self.$store.app.settingsDirty = true; }, { deep: true });
+        });
       },
 
       reload: function (kind) {
@@ -2307,6 +2740,7 @@ document.addEventListener('alpine:init', function () {
           recruiters: 'recruiters', refuseReasons: 'refuseReasons',
         };
         this[map[kind]] = clone(this.$store.app.settings[map[kind]] || []);
+        this.$store.app.settingsDirty = false;
       },
 
       removeRow: function (kind, idx) { this[kind].splice(idx, 1); },
@@ -2378,9 +2812,10 @@ document.addEventListener('alpine:init', function () {
             root.settings.refuseReasons = fresh.refuseReasons;
             root.loadCandidates();
           }
+          this.$store.app.settingsDirty = false;
           this.$store.app.toastSuccess('Saved.');
         } catch (e) {
-          this.$store.app.toastError('Save failed: ' + e.message);
+          this.$store.app.toastError(userFacingError(e, 'Save failed.', 'Try again or refresh.'));
         } finally {
           this.saving = false;
         }

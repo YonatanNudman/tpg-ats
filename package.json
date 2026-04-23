@@ -9,6 +9,10 @@
     "qa:bundle": "node qa/build-bundle.js",
     "qa:server": "node qa/build-bundle.js && node qa/server.js",
     "qa": "node qa/build-bundle.js && node qa/qa.spec.mjs",
+    "qa:ux": "node qa/build-bundle.js && node qa/funnel-ux.spec.mjs",
+    "qa:concurrency": "node qa/build-bundle.js && node qa/concurrency.spec.mjs",
+    "qa:filters": "node qa/build-bundle.js && node qa/filter-override.spec.mjs",
+    "qa:reject": "node qa/build-bundle.js && node qa/reject-modal.spec.mjs",
     "build": "clasp push",
     "deploy": "clasp deploy",
     "smoke": "node scripts/smoke.js"

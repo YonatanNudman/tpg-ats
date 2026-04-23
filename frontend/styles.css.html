@@ -126,6 +126,12 @@ html, body {
 }
 .icon-btn:hover { background: var(--primary-light); color: var(--primary); }
 .icon-btn .material-icons { font-size: 20px; }
+.icon-btn-label {
+  display: none;
+  font-size: 11px;
+  margin-left: 4px;
+  font-weight: 600;
+}
 .icon-btn:disabled { opacity: 0.5; cursor: not-allowed; }
 .icon-btn.spinning .material-icons { animation: spin 0.9s linear infinite; }
 @keyframes spin { to { transform: rotate(360deg); } }
@@ -1064,6 +1070,8 @@ html, body {
   .funnel-bar-track   { grid-area: bar; }
   .funnel-stage-pct   { grid-area: pct; }
   .funnel-chevron     { display: none; }
+  .funnel-stage-conv  { display: none; }
+  .funnel-bench-chip  { display: none; }
   /* Job cards: single column */
   .job-grid { grid-template-columns: 1fr; }
   /* Bulk action bar: bottom-pinned, full-width, two-column action grid */
@@ -1080,6 +1088,13 @@ html, body {
   }
   .bulk-action-select { flex: 1 1 calc(50% - 4px); min-width: 0; }
   .bulk-actions .btn { flex: 1 1 calc(50% - 4px); }
+  .icon-btn {
+    width: auto;
+    padding: 0 8px;
+  }
+  .icon-btn-label {
+    display: inline;
+  }
 }
 
 /* ── Skeleton loaders ──────────────────────────────────────
@@ -1355,15 +1370,14 @@ html, body {
   padding-bottom: 4px;
 }
 
-/* Five-column grid: stage name | count | bar | percent | chevron.
-   Pulling the count into its own column lets the bar be a purely
-   visual track. Tabular-nums on the count + percent gives clean
-   columnar scanning regardless of digit width. */
+/* Seven-column grid: name | count | bar | of-total% | step-conv | bench | chevron.
+   step-conv shows step-to-step conversion from the previous stage.
+   bench shows ▲/▼ vs the xDR benchmark (row 23 of TPG Recruiting sheet). */
 .funnel-row {
   display: grid;
-  grid-template-columns: 130px 36px 1fr 44px 18px;
+  grid-template-columns: 130px 36px 1fr 44px 52px 60px 18px;
   align-items: center;
-  gap: 14px;
+  gap: 10px;
   padding: 10px 12px;
   cursor: pointer;
   user-select: none;
@@ -1407,6 +1421,60 @@ html, body {
   color: var(--text-muted);
   font-weight: 500;
 }
+.funnel-stage-conv {
+  font-size: 12px; font-weight: 600;
+  color: var(--text-secondary);
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+.funnel-stage-conv.conv-none {
+  color: var(--text-muted);
+  font-weight: 400;
+}
+.funnel-bench-chip {
+  font-size: 11px; font-weight: 700;
+  text-align: center;
+  border-radius: 4px;
+  padding: 2px 5px;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+.funnel-bench-chip.bench-above {
+  background: #D4F0E0;
+  color: #1E7E45;
+}
+.funnel-bench-chip.bench-below {
+  background: #FAE0E0;
+  color: #C0392B;
+}
+.funnel-bench-chip.bench-none {
+  color: var(--text-muted);
+  background: transparent;
+}
+/* xDR scope toggle chip in the funnel filter row */
+.xdr-scope-chip {
+  padding: 4px 10px;
+  border-radius: 999px;
+  border: 1.5px solid var(--border);
+  background: #fff;
+  color: var(--text-secondary);
+  font-size: 11px; font-weight: 700;
+  cursor: pointer;
+  transition: all 0.15s ease;
+  letter-spacing: 0.04em;
+  white-space: nowrap;
+  line-height: 1.4;
+}
+.xdr-scope-chip:hover {
+  border-color: var(--primary);
+  color: var(--primary);
+}
+.xdr-scope-chip.active {
+  background: var(--primary);
+  border-color: var(--primary);
+  color: #fff;
+}
 .funnel-chevron {
   color: var(--text-muted);
   font-size: 18px !important;
@@ -1414,9 +1482,9 @@ html, body {
 
 .funnel-stage-candidates {
   /* Indent so the candidate list nests visually under the bar track,
-     not under the stage name. New 5-column grid:
-     130 (name) + 14 (gap) + 36 (count) + 14 (gap) = 194 from row start. */
-  margin: 0 12px 4px 194px;
+     not under the stage name. 7-column grid with 10px gaps:
+     130 (name) + 10 (gap) + 36 (count) + 10 (gap) = 186 from row start. */
+  margin: 0 12px 4px 186px;
   border-left: 2px solid rgba(var(--primary-rgb), 0.25);
   padding: 4px 0 4px 12px;
   display: flex; flex-direction: column; gap: 2px;

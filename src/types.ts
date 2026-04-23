@@ -132,12 +132,12 @@ export interface SettingsResult {
 // ============================================================
 
 export interface CandidateFilters {
-  jobId?: number | null;
+  jobId?: number | "__unassigned__" | null;
   stageId?: number | null;
-  recruiterId?: number | null;
-  sourceId?: number | null;
-  regionId?: number | null;
-  motion?: "Inbound" | "Outbound" | null;
+  recruiterId?: number | "__unassigned__" | "__assigned__" | null;
+  sourceId?: number | "__unassigned__" | null;
+  regionId?: number | "__unassigned__" | null;
+  motion?: "Inbound" | "Outbound" | "__unassigned__" | null;
   status?: "Active" | "Hired" | "Rejected" | null;
   search?: string | null;
   startDate?: string | null;
@@ -199,11 +199,11 @@ export interface UpdateJobInput extends Partial<CreateJobInput> {}
 // ============================================================
 
 export interface DashboardFilters {
-  jobId?: number | null;
-  recruiterId?: number | null;
-  sourceId?: number | null;
-  regionId?: number | null;
-  motion?: "Inbound" | "Outbound" | null;
+  jobId?: number | "__unassigned__" | null;
+  recruiterId?: number | "__unassigned__" | "__assigned__" | null;
+  sourceId?: number | "__unassigned__" | null;
+  regionId?: number | "__unassigned__" | null;
+  motion?: "Inbound" | "Outbound" | "__unassigned__" | null;
   status?: "Active" | "Hired" | "Rejected" | null;
   startDate: string;
   endDate: string;
@@ -311,6 +311,56 @@ export interface StaleCandidateItem {
   recruiter_name: string;
   days_in_stage: number;
   severity: "stale" | "abandoned";
+}
+
+/**
+ * Cohort waterfall metrics — different from the snapshot funnel.
+ *
+ * Snapshot funnel: "how many candidates are in each stage RIGHT NOW".
+ * Waterfall: "of the candidates who entered the funnel in the window,
+ *             how many have ever reached each stage".
+ *
+ * The waterfall is what compares directly to TPG Recruiting Weekly Update
+ * row 23 ("US xDR AVERAGES"): 100 → 50 → 40 → 30 → 24 → 19 → 17 → 16 per
+ * recruiter per month, with step-to-step rates of 50, 80, 75, 80, 79, 89, 94%.
+ */
+export interface WaterfallItem {
+  stage_id: number;
+  stage_name: string;
+  stage_color: string;
+  sequence: number;
+  /** Candidates in the cohort whose max-stage-reached ≥ this stage's sequence. */
+  count: number;
+  /** count / previous_stage_count * 100 (null for the first row). */
+  step_pct: number | null;
+  /** xDR benchmark for this transition (null when no benchmark at this position
+   *  or when stage count doesn't match the expected 8-stage shape). */
+  bench_pct: number | null;
+  /** true if step_pct >= bench_pct, false if below, null when either side is null. */
+  bench_above: boolean | null;
+}
+
+export interface WaterfallResult {
+  /** Total unique candidates whose date_applied is in the window and pass scope filters. */
+  cohortSize: number;
+  rows: WaterfallItem[];
+  window: { startDate: string; endDate: string };
+  /** True when the active stage configuration matches the expected 8-stage positional
+   *  shape that XDR_BENCH was built against. When false, bench_pct is null everywhere
+   *  and the UI should show a "—" plus a tooltip explaining why. */
+  benchmarksValid: boolean;
+}
+
+export interface WaterfallFilters {
+  startDate: string;
+  endDate: string;
+  jobId?: number | "__unassigned__" | null;
+  recruiterId?: number | "__unassigned__" | "__assigned__" | null;
+  sourceId?: number | "__unassigned__" | null;
+  regionId?: number | "__unassigned__" | null;
+  motion?: "Inbound" | "Outbound" | "__unassigned__" | null;
+  /** When true, restrict cohort to jobs whose title contains "xdr" (case-insensitive). */
+  xdrOnly?: boolean;
 }
 
 /**

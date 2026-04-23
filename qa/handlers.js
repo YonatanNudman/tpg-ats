@@ -21,6 +21,9 @@ const {
   computeTimeToHireTrend,
   computeStageVelocity,
   computeSlaBreaches,
+  computeStaleCandidates,
+  computeWaterfall,
+  filterCandidates,
 } = require('./.bundle/logic.cjs');
 
 function makeHandlers(db) {
@@ -56,12 +59,34 @@ function makeHandlers(db) {
     filters = filters || {};
     let all = db.getAllCandidates();
 
-    if (filters.jobId)       all = all.filter(c => c.job_id       === filters.jobId);
+    if (filters.jobId === '__unassigned__') {
+      all = all.filter(c => !c.job_id || c.job_id === 0);
+    } else if (filters.jobId) {
+      all = all.filter(c => c.job_id === filters.jobId);
+    }
     if (filters.stageId)     all = all.filter(c => c.stage_id     === filters.stageId);
-    if (filters.recruiterId) all = all.filter(c => c.recruiter_id === filters.recruiterId);
-    if (filters.sourceId)    all = all.filter(c => c.source_id    === filters.sourceId);
-    if (filters.regionId)    all = all.filter(c => c.region_id    === filters.regionId);
-    if (filters.motion)      all = all.filter(c => c.motion       === filters.motion);
+    if (filters.recruiterId === '__unassigned__') {
+      all = all.filter(c => !c.recruiter_id || c.recruiter_id === 0);
+    } else if (filters.recruiterId === '__assigned__') {
+      all = all.filter(c => !!c.recruiter_id && c.recruiter_id !== 0);
+    } else if (filters.recruiterId) {
+      all = all.filter(c => c.recruiter_id === filters.recruiterId);
+    }
+    if (filters.sourceId === '__unassigned__') {
+      all = all.filter(c => !c.source_id || c.source_id === 0);
+    } else if (filters.sourceId) {
+      all = all.filter(c => c.source_id === filters.sourceId);
+    }
+    if (filters.regionId === '__unassigned__') {
+      all = all.filter(c => !c.region_id || c.region_id === 0);
+    } else if (filters.regionId) {
+      all = all.filter(c => c.region_id === filters.regionId);
+    }
+    if (filters.motion === '__unassigned__') {
+      all = all.filter(c => c.motion !== 'Inbound' && c.motion !== 'Outbound');
+    } else if (filters.motion) {
+      all = all.filter(c => c.motion === filters.motion);
+    }
     if (filters.status)      all = all.filter(c => c.status       === filters.status);
 
     if (filters.search) {
@@ -111,6 +136,18 @@ function makeHandlers(db) {
     };
   }
 
+  function findDuplicateCandidatesByEmail(email) {
+    if (!email) return [];
+    const needle = String(email).trim().toLowerCase();
+    if (!needle) return [];
+    const matches = db.getAllCandidates().filter(c => (c.email || '').trim().toLowerCase() === needle);
+    if (matches.length === 0) return [];
+    return matches.map(c => joinCandidate(
+      c, db.getAllStages(), db.getAllJobs(), db.getAllRecruiters(),
+      db.getAllSources(), db.getAllRegions(), db.getAllRefuseReasons(),
+    ));
+  }
+
   function createCandidate(data) {
     const stages = db.getAllStages()
       .filter(s => s.is_enabled)
@@ -134,7 +171,7 @@ function makeHandlers(db) {
       phone:                  data.phone || '',
       job_id:                 data.job_id,
       stage_id:               firstStage.id,
-      recruiter_id:           null,
+      recruiter_id:           data.recruiter_id != null ? data.recruiter_id : null,
       source_id:              data.source_id != null ? data.source_id : null,
       region_id:              data.region_id != null ? data.region_id : null,
       motion,
@@ -233,6 +270,43 @@ function makeHandlers(db) {
 
   function deleteCandidate(id) { db.deleteCandidate(id); }
 
+  function assignRecruiter(id, recruiterId) { db.updateCandidate(id, { recruiter_id: recruiterId }); }
+  function updateKanbanState(id, state) { db.updateCandidate(id, { kanban_state: state }); }
+  function updatePostHireStatus(id, status) { db.updateCandidate(id, { post_hire_status: status }); }
+
+  // ============================================================
+  // Bulk operations
+  // ============================================================
+
+  function _runBulk(ids, perRow) {
+    const successIds = [];
+    const failures = [];
+    for (const rawId of ids || []) {
+      const id = Number(rawId);
+      if (!id || isNaN(id)) { failures.push({ id: rawId, message: 'Invalid id' }); continue; }
+      try { perRow(id); successIds.push(id); }
+      catch (e) { failures.push({ id, message: e.message || String(e) }); }
+    }
+    return { successIds, failures };
+  }
+
+  function bulkAdvanceStage(ids, targetStageId) {
+    const stageId = Number(targetStageId);
+    if (!stageId) throw new Error('targetStageId required');
+    return _runBulk(ids, (id) => updateCandidateStage(id, stageId));
+  }
+
+  function bulkAssignRecruiter(ids, recruiterId) {
+    const rid = recruiterId == null ? null : Number(recruiterId);
+    return _runBulk(ids, (id) => assignRecruiter(id, rid));
+  }
+
+  function bulkRejectCandidates(ids, refuseReasonId) {
+    const rid = Number(refuseReasonId);
+    if (!rid) throw new Error('refuseReasonId required');
+    return _runBulk(ids, (id) => rejectCandidate(id, rid));
+  }
+
   // ============================================================
   // Jobs
   // ============================================================
@@ -324,6 +398,86 @@ function makeHandlers(db) {
     };
   }
 
+  function getRecruiterPerformance(filters, hiresFilters) {
+    return computeRecruiterPerformance(
+      db.getAllCandidates(), db.getAllRecruiters(), filters, hiresFilters,
+    );
+  }
+
+  function getSourceEffectiveness(filters) {
+    return computeSourceEffectiveness(db.getAllCandidates(), db.getAllSources(), filters);
+  }
+
+  function getAnalyticsHistorical(filters) {
+    const candidates = db.getAllCandidates();
+    const stages = db.getAllStages();
+    const allHistory = db.getAllHistory();
+    return {
+      funnelConversion: computeFunnelConversion(allHistory, stages, filters),
+      timeToHireTrend:  computeTimeToHireTrend(filterCandidates(candidates, filters)),
+      stageVelocity:    computeStageVelocity(allHistory, stages, filters),
+    };
+  }
+
+  function getWaterfallMetrics(filters) {
+    return computeWaterfall(
+      db.getAllCandidates(),
+      db.getAllHistory(),
+      db.getAllStages(),
+      db.getAllJobs(),
+      filters,
+    );
+  }
+
+  function getRecentActivity(limit) {
+    const history = db.getAllHistory().slice();
+    history.sort((a, b) => (b.timestamp || '').localeCompare(a.timestamp || ''));
+    return history.slice(0, Math.max(1, Math.min(200, limit | 0)));
+  }
+
+  function getRecentRejections(days, limit) {
+    const cutoffMs = Date.now() - (days || 30) * 86400000;
+    const cutoff = new Date(cutoffMs).toISOString().split('T')[0];
+    return db.getAllCandidates()
+      .filter(c => c.status === 'Rejected' && c.date_last_stage_update >= cutoff)
+      .sort((a, b) => (b.date_last_stage_update || '').localeCompare(a.date_last_stage_update || ''))
+      .slice(0, Math.max(1, Math.min(500, (limit || 100) | 0)))
+      .map(c => joinCandidate(
+        c, db.getAllStages(), db.getAllJobs(), db.getAllRecruiters(),
+        db.getAllSources(), db.getAllRegions(), db.getAllRefuseReasons(),
+      ));
+  }
+
+  function getRecentHires(days) {
+    const cutoffMs = Date.now() - (days || 90) * 86400000;
+    const cutoff = new Date(cutoffMs).toISOString().split('T')[0];
+    return db.getAllCandidates()
+      .filter(c => c.status === 'Hired' && c.date_last_stage_update >= cutoff)
+      .map(c => joinCandidate(
+        c, db.getAllStages(), db.getAllJobs(), db.getAllRecruiters(),
+        db.getAllSources(), db.getAllRegions(), db.getAllRefuseReasons(),
+      ));
+  }
+
+  function touchAppPresence() { return { ok: true }; }
+  function getAppPresence()   { return [{ email: getCurrentUserEmail(), secondsAgo: 0, isSelf: true }]; }
+  function touchPresence(_id) { return { ok: true }; }
+  function getPresence(_id)   { return []; }
+  function logClientError(_p) { return { ok: true }; }
+  function getDebugInfo() {
+    return {
+      version: 'qa', user: getCurrentUserEmail(), serverTime: new Date().toISOString(),
+      schema: { ok: true, errors: [] }, sampleCandidate: null,
+      counts: {
+        candidates: db.getAllCandidates().length, jobs: db.getAllJobs().length,
+        history: db.getAllHistory().length, stages: db.getAllStages().length,
+        sources: db.getAllSources().length, regions: db.getAllRegions().length,
+        recruiters: db.getAllRecruiters().length,
+      },
+      failureCounters: {}, spreadsheetId: 'qa', scriptTimezone: 'UTC',
+    };
+  }
+
   function getSyncFingerprint() {
     const candidates = db.getAllCandidates();
     const jobs = db.getAllJobs();
@@ -359,16 +513,35 @@ function makeHandlers(db) {
     getCurrentUserEmail: getCurrentUserEmailHandler,
     getCandidates,
     getCandidateDetail,
+    findDuplicateCandidatesByEmail,
     createCandidate,
     updateCandidate,
     updateCandidateStage,
     rejectCandidate,
     deleteCandidate,
+    assignRecruiter,
+    updateKanbanState,
+    updatePostHireStatus,
+    bulkAdvanceStage,
+    bulkAssignRecruiter,
+    bulkRejectCandidates,
     getJobOpenings,
     createJobOpening,
     updateJobOpening,
     deleteJobOpening,
     getDashboardData,
+    getRecruiterPerformance,
+    getSourceEffectiveness,
+    getAnalyticsHistorical,
+    getRecentActivity,
+    getRecentHires,
+    getRecentRejections,
+    touchAppPresence,
+    getAppPresence,
+    touchPresence,
+    getPresence,
+    logClientError,
+    getDebugInfo,
     getSyncFingerprint,
   };
 }

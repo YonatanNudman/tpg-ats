@@ -8,6 +8,8 @@ import {
   computeTimeToHireTrend,
   computeStageVelocity,
   computeSlaBreaches,
+  computeWaterfall,
+  XDR_BENCH,
 } from "../src/Analytics";
 import type {
   CandidateRow,
@@ -17,6 +19,7 @@ import type {
   RecruiterRow,
   HistoryRow,
   DashboardFilters,
+  WaterfallFilters,
 } from "../src/types";
 import { DEFAULT_STAGES, DEFAULT_SOURCES } from "../src/SheetDB";
 
@@ -98,6 +101,16 @@ describe("filterCandidates", () => {
     expect(result[0].job_id).toBe(1);
   });
 
+  it("filters by unassigned job", () => {
+    const candidates = [
+      makeCandidate({ id: 1, job_id: 1 }),
+      makeCandidate({ id: 2, job_id: null as any }),
+    ];
+    const result = filterCandidates(candidates, { ...wideFilters, jobId: "__unassigned__" });
+    expect(result).toHaveLength(1);
+    expect(result[0].id).toBe(2);
+  });
+
   it("filters by recruiterId", () => {
     const candidates = [
       makeCandidate({ id: 1, recruiter_id: 10 }),
@@ -135,6 +148,16 @@ describe("filterCandidates", () => {
       makeCandidate({ id: 2, source_id: 2 }),
     ];
     expect(filterCandidates(candidates, { ...wideFilters, sourceId: 1 })).toHaveLength(1);
+  });
+
+  it("filters by unassigned source", () => {
+    const candidates = [
+      makeCandidate({ id: 1, source_id: 1 }),
+      makeCandidate({ id: 2, source_id: null }),
+    ];
+    const result = filterCandidates(candidates, { ...wideFilters, sourceId: "__unassigned__" });
+    expect(result).toHaveLength(1);
+    expect(result[0].id).toBe(2);
   });
 
   it("filters by regionId", () => {
@@ -498,5 +521,234 @@ describe("computeSlaBreaches", () => {
     ];
     const result = computeSlaBreaches(candidates, stages, [], [makeJob()], wideFilters);
     expect(result[0].candidate_id).toBe(2); // more overdue first
+  });
+});
+
+// ============================================================
+// computeWaterfall (cohort waterfall for Janice's exec reporting)
+// ============================================================
+
+describe("computeWaterfall", () => {
+  // Stages mirror the production default: 8 non-rejected + 1 rejected.
+  const stages: StageRow[] = [
+    { id: 1, name: "Applied",         sequence: 100, color: "#1976d2", is_hired: false, is_rejected: false, is_offer: false, target_hours: 48,  is_enabled: true },
+    { id: 2, name: "Reviewed",        sequence: 200, color: "#0288d1", is_hired: false, is_rejected: false, is_offer: false, target_hours: 72,  is_enabled: true },
+    { id: 3, name: "Contacted",       sequence: 300, color: "#0097a7", is_hired: false, is_rejected: false, is_offer: false, target_hours: 48,  is_enabled: true },
+    { id: 4, name: "Pre-screen",      sequence: 400, color: "#00897b", is_hired: false, is_rejected: false, is_offer: false, target_hours: 96,  is_enabled: true },
+    { id: 5, name: "Roleplay/CG",     sequence: 500, color: "#43a047", is_hired: false, is_rejected: false, is_offer: false, target_hours: 120, is_enabled: true },
+    { id: 6, name: "Final Interview", sequence: 600, color: "#fdd835", is_hired: false, is_rejected: false, is_offer: false, target_hours: 96,  is_enabled: true },
+    { id: 7, name: "Offer",           sequence: 700, color: "#fb8c00", is_hired: false, is_rejected: false, is_offer: true,  target_hours: 48,  is_enabled: true },
+    { id: 8, name: "Hired",           sequence: 800, color: "#4caf50", is_hired: true,  is_rejected: false, is_offer: false, target_hours: null, is_enabled: true },
+    { id: 9, name: "Rejected",        sequence: 900, color: "#e53935", is_hired: false, is_rejected: true,  is_offer: false, target_hours: null, is_enabled: true },
+  ];
+
+  const jobs: JobRow[] = [
+    makeJob({ id: 1, title: "xDR - Bay Area" }),
+    makeJob({ id: 2, title: "Account Executive" }),
+  ];
+
+  // Every `logHistory` call on candidate creation records a transition
+  // from null into the first stage. Tests that rely on this invariant
+  // emulate it with a to_stage_id=1 entry.
+  function hist(overrides: Partial<HistoryRow>): HistoryRow {
+    return {
+      id: 0,
+      timestamp: "2026-04-05T00:00:00Z",
+      candidate_id: 1,
+      candidate_name: "",
+      job_id: 1,
+      job_title: "",
+      stage_from_id: null,
+      stage_from_name: "",
+      stage_to_id: 1,
+      stage_to_name: "Applied",
+      changed_by: "test",
+      days_in_previous_stage: 0,
+      ...overrides,
+    };
+  }
+
+  const aprilWindow: WaterfallFilters = {
+    startDate: "2026-04-01",
+    endDate:   "2026-04-30",
+  };
+
+  it("counts a fresh applicant only at the first stage", () => {
+    const candidates = [makeCandidate({ id: 1, stage_id: 1, date_applied: "2026-04-05" })];
+    const history   = [hist({ candidate_id: 1, stage_to_id: 1 })];
+    const result    = computeWaterfall(candidates, history, stages, jobs, aprilWindow);
+
+    expect(result.cohortSize).toBe(1);
+    expect(result.rows).toHaveLength(8);
+    expect(result.rows[0].count).toBe(1); // Applied
+    expect(result.rows.slice(1).every(r => r.count === 0)).toBe(true);
+  });
+
+  it("counts a candidate who progressed to Offer at every stage up to Offer", () => {
+    const candidates = [makeCandidate({ id: 1, stage_id: 7, date_applied: "2026-04-05" })];
+    // Full path: Applied → Reviewed → Contacted → Pre-screen → Roleplay → Final → Offer
+    const history = [
+      hist({ candidate_id: 1, stage_to_id: 1 }),
+      hist({ candidate_id: 1, stage_to_id: 2 }),
+      hist({ candidate_id: 1, stage_to_id: 3 }),
+      hist({ candidate_id: 1, stage_to_id: 4 }),
+      hist({ candidate_id: 1, stage_to_id: 5 }),
+      hist({ candidate_id: 1, stage_to_id: 6 }),
+      hist({ candidate_id: 1, stage_to_id: 7 }),
+    ];
+    const result = computeWaterfall(candidates, history, stages, jobs, aprilWindow);
+
+    // Applied through Offer = 1 each; Hired = 0 (they haven't been hired yet)
+    expect(result.rows.map(r => r.count)).toEqual([1, 1, 1, 1, 1, 1, 1, 0]);
+  });
+
+  it("counts a rejected-mid-funnel candidate at stages they passed through", () => {
+    // Applied Apr 5, pre-screened, then rejected. Current stage = Rejected (id 9).
+    const candidates = [makeCandidate({
+      id: 1,
+      stage_id: 9,
+      status: "Rejected",
+      date_applied: "2026-04-05",
+    })];
+    const history = [
+      hist({ candidate_id: 1, stage_to_id: 1 }),
+      hist({ candidate_id: 1, stage_to_id: 2 }),
+      hist({ candidate_id: 1, stage_to_id: 3 }),
+      hist({ candidate_id: 1, stage_to_id: 4 }),
+      hist({ candidate_id: 1, stage_to_id: 9 }),  // rejected
+    ];
+    const result = computeWaterfall(candidates, history, stages, jobs, aprilWindow);
+
+    // Applied, Reviewed, Contacted, Pre-screen = 1; Roleplay+ = 0
+    expect(result.rows.map(r => r.count)).toEqual([1, 1, 1, 1, 0, 0, 0, 0]);
+  });
+
+  it("excludes candidates whose date_applied is before the window", () => {
+    const candidates = [makeCandidate({ id: 1, stage_id: 3, date_applied: "2026-03-20" })];
+    const history   = [hist({ candidate_id: 1, stage_to_id: 3 })];
+    const result    = computeWaterfall(candidates, history, stages, jobs, aprilWindow);
+    expect(result.cohortSize).toBe(0);
+  });
+
+  it("excludes candidates whose date_applied is after the window", () => {
+    const candidates = [makeCandidate({ id: 1, stage_id: 1, date_applied: "2026-05-03" })];
+    const history   = [hist({ candidate_id: 1, stage_to_id: 1 })];
+    const result    = computeWaterfall(candidates, history, stages, jobs, aprilWindow);
+    expect(result.cohortSize).toBe(0);
+  });
+
+  it("xdrOnly restricts cohort to jobs with 'xdr' in title", () => {
+    const candidates = [
+      makeCandidate({ id: 1, stage_id: 1, job_id: 1, date_applied: "2026-04-05" }), // xDR
+      makeCandidate({ id: 2, stage_id: 1, job_id: 2, date_applied: "2026-04-05" }), // AE
+    ];
+    const history = [
+      hist({ candidate_id: 1, stage_to_id: 1 }),
+      hist({ candidate_id: 2, stage_to_id: 1 }),
+    ];
+    const result = computeWaterfall(candidates, history, stages, jobs, { ...aprilWindow, xdrOnly: true });
+    expect(result.cohortSize).toBe(1);
+    expect(result.rows[0].count).toBe(1);
+  });
+
+  it("respects __unassigned__ jobId sentinel", () => {
+    const candidates = [
+      makeCandidate({ id: 1, stage_id: 1, job_id: 1, date_applied: "2026-04-05" }),
+      makeCandidate({ id: 2, stage_id: 1, job_id: 0 as any, date_applied: "2026-04-05" }),
+    ];
+    const history = [
+      hist({ candidate_id: 1, stage_to_id: 1 }),
+      hist({ candidate_id: 2, stage_to_id: 1 }),
+    ];
+    const result = computeWaterfall(candidates, history, stages, jobs, {
+      ...aprilWindow,
+      jobId: "__unassigned__",
+    });
+    expect(result.cohortSize).toBe(1);
+  });
+
+  it("returns an empty waterfall with cohortSize 0 gracefully", () => {
+    const result = computeWaterfall([], [], stages, jobs, aprilWindow);
+    expect(result.cohortSize).toBe(0);
+    expect(result.rows).toHaveLength(8);
+    expect(result.rows.every(r => r.count === 0)).toBe(true);
+    expect(result.rows[0].step_pct).toBeNull();
+  });
+
+  it("computes step_pct as round(count/prev*100) and null on the first row", () => {
+    // 10 applied → 5 reviewed → 4 contacted → rest zero
+    const candidates = [
+      ...Array.from({ length: 10 }, (_, i) =>
+        makeCandidate({ id: i + 1, stage_id: 1, date_applied: "2026-04-05" })),
+    ];
+    // First 5 reached Reviewed, of which 4 reached Contacted
+    const history: HistoryRow[] = [];
+    for (let i = 1; i <= 10; i++) history.push(hist({ candidate_id: i, stage_to_id: 1 }));
+    for (let i = 1; i <= 5; i++)  history.push(hist({ candidate_id: i, stage_to_id: 2 }));
+    for (let i = 1; i <= 4; i++)  history.push(hist({ candidate_id: i, stage_to_id: 3 }));
+    // Move the ones that reached Reviewed/Contacted to reflect their current stage
+    for (let i = 1; i <= 5; i++) candidates[i - 1].stage_id = i <= 4 ? 3 : 2;
+
+    const result = computeWaterfall(candidates, history, stages, jobs, aprilWindow);
+
+    expect(result.cohortSize).toBe(10);
+    expect(result.rows[0].count).toBe(10);
+    expect(result.rows[0].step_pct).toBeNull();
+    expect(result.rows[1].count).toBe(5);
+    expect(result.rows[1].step_pct).toBe(50);   // 5/10
+    expect(result.rows[2].count).toBe(4);
+    expect(result.rows[2].step_pct).toBe(80);   // 4/5
+  });
+
+  it("marks bench_above true when step_pct meets or beats XDR benchmark, false when it falls short", () => {
+    // Contrive a cohort whose Reviewed step = 60% (> 50% bench = true)
+    // and Contacted step = 50% (< 80% bench = false).
+    //   Applied:  10 → Reviewed: 6 → Contacted: 3
+    const candidates: CandidateRow[] = [];
+    const history: HistoryRow[] = [];
+    for (let i = 1; i <= 10; i++) {
+      candidates.push(makeCandidate({ id: i, stage_id: 1, date_applied: "2026-04-05" }));
+      history.push(hist({ candidate_id: i, stage_to_id: 1 }));
+    }
+    for (let i = 1; i <= 6; i++) {
+      candidates[i - 1].stage_id = 2;
+      history.push(hist({ candidate_id: i, stage_to_id: 2 }));
+    }
+    for (let i = 1; i <= 3; i++) {
+      candidates[i - 1].stage_id = 3;
+      history.push(hist({ candidate_id: i, stage_to_id: 3 }));
+    }
+
+    const result = computeWaterfall(candidates, history, stages, jobs, aprilWindow);
+
+    expect(result.benchmarksValid).toBe(true);
+    expect(result.rows[1].bench_pct).toBe(50);     // XDR_BENCH[0]
+    expect(result.rows[1].step_pct).toBe(60);
+    expect(result.rows[1].bench_above).toBe(true);
+
+    expect(result.rows[2].bench_pct).toBe(80);     // XDR_BENCH[1]
+    expect(result.rows[2].step_pct).toBe(50);
+    expect(result.rows[2].bench_above).toBe(false);
+  });
+
+  it("sets benchmarksValid=false when stage count isn't exactly 8 non-rejected stages", () => {
+    // Drop two stages to get only 6 non-rejected.
+    const trimmedStages = stages.filter(s => s.id !== 2 && s.id !== 5);
+    const candidates = [makeCandidate({ id: 1, stage_id: 1, date_applied: "2026-04-05" })];
+    const history   = [hist({ candidate_id: 1, stage_to_id: 1 })];
+    const result    = computeWaterfall(candidates, history, trimmedStages, jobs, aprilWindow);
+
+    expect(result.benchmarksValid).toBe(false);
+    expect(result.rows.every(r => r.bench_pct === null)).toBe(true);
+    expect(result.rows.every(r => r.bench_above === null)).toBe(true);
+    // Step % still computed — benchmarks just aren't compared
+    expect(result.rows[0].count).toBe(1);
+  });
+
+  it("XDR_BENCH array matches sheet row 23 derivation", () => {
+    // 100 → 50 → 40 → 30 → 24 → 19 → 17 → 16
+    // step pcts = 50, 80, 75, 80, 79.1→79, 89.4→89, 94.1→94
+    expect(Array.from(XDR_BENCH)).toEqual([50, 80, 75, 80, 79, 89, 94]);
+    expect(XDR_BENCH.length).toBe(7); // 7 transitions for 8 stages
   });
 });
