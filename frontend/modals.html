@@ -227,10 +227,18 @@
 
           <div class="modal-footer">
             <button class="btn btn-outline-secondary" @click="$store.app.closeModal()">Cancel</button>
-            <button class="btn btn-danger"
-              :disabled="rejectButtonDisabled()"
+            <!--
+              Always clickable (only locked while submitting). Validation
+              happens inside submit() and surfaces as an inline error so
+              the recruiter can't get into a "is this disabled or just
+              styled weird" loop. The bulk path keeps a separate explicit
+              confirmation checkbox above; that's the destructive guard.
+            -->
+            <button class="btn btn-danger reject-confirm-btn"
+              :disabled="submitting"
+              :class="{ 'reject-ready': !!refuseReasonId && !submitting }"
               @click="submit()">
-              <span x-text="submitting ? 'Rejecting…' : 'Reject'"></span>
+              <span x-text="submitting ? 'Rejecting…' : 'Reject candidate'"></span>
             </button>
           </div>
         </div>
@@ -398,27 +406,19 @@ document.addEventListener('alpine:init', function () {
         this.submitting = false;
       },
 
-      // Centralized so the inline :disabled binding can't accidentally
-      // get mis-evaluated. Single-candidate reject is enabled the moment
-      // a reason is picked. Bulk reject also requires the explicit
-      // confirmation checkbox.
-      rejectButtonDisabled: function () {
-        if (this.submitting) return true;
-        if (!this.refuseReasonId) return true;
-        var data = this.$store.app.modal.data || {};
-        if (data.bulk) return !this.bulkConfirmed;
-        return false;
-      },
-
       submit: async function () {
         var data = this.$store.app.modal.data || {};
         if (!this.refuseReasonId) {
           this.error = 'Pick a reason to reject this candidate.';
+          // Also surface as a toast so the user can't miss it if the
+          // inline error scrolled off-screen on a small viewport.
+          this.$store.app.toastError('Pick a reason to reject this candidate.');
           return;
         }
         this.error = '';
         if (data.bulk && !this.bulkConfirmed) {
           this.error = 'Confirm bulk reject before continuing.';
+          this.$store.app.toastError('Confirm bulk reject before continuing.');
           return;
         }
         this.submitting = true;

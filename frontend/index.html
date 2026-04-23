@@ -190,6 +190,9 @@
     <a class="section-nav-chip" href="#sec-funnel" @click.prevent="scrollToSection('sec-funnel')">
       <span class="material-icons mi-inline">filter_list</span> Funnel
     </a>
+    <a class="section-nav-chip" href="#sec-waterfall" @click.prevent="scrollToSection('sec-waterfall')">
+      <span class="material-icons mi-inline">waterfall_chart</span> Waterfall
+    </a>
     <a class="section-nav-chip" href="#sec-recruiters" @click.prevent="scrollToSection('sec-recruiters')">
       <span class="material-icons mi-inline">groups</span> Recruiters
     </a>
@@ -494,15 +497,14 @@
                   <div class="funnel-stage-pct"
                        :class="{ zero: stage.candidate_count === 0 }"
                        x-text="funnelBarWidth(stage) + '%'"></div>
-                  <!-- Step-to-step conversion from the previous stage -->
+                  <!-- Descriptive "share of previous stage's headcount".
+                       NOT a conversion rate (snapshot numbers, not a cohort).
+                       For real conversion vs. benchmark, see the Waterfall
+                       Report below. -->
                   <div class="funnel-stage-conv"
                        :class="{ 'conv-none': stage.step_pct === null }"
+                       title="Share of previous stage's current headcount. For conversion rates vs. xDR benchmarks, see the Waterfall Report."
                        x-text="stage.step_pct !== null ? '↓ ' + stage.step_pct + '%' : '—'"></div>
-                  <!-- xDR benchmark chip: ▲ green when at/above bench, ▼ red when below -->
-                  <div class="funnel-bench-chip"
-                       :class="{ 'bench-above': stage.bench_above === true, 'bench-below': stage.bench_above === false, 'bench-none': stage.bench_above === null }"
-                       :title="stage.bench_pct !== null ? 'xDR benchmark: ' + stage.bench_pct + '%' : 'No benchmark for this step'"
-                       x-text="stage.bench_pct !== null ? (stage.bench_above ? '▲' : '▼') + stage.bench_pct + '%' : '—'"></div>
                   <span class="material-icons funnel-chevron"
                         x-text="expandedStages.includes(stage.stage_id) ? 'expand_less' : 'chevron_right'"></span>
                 </div>
@@ -688,6 +690,145 @@
         </table>
       </div>
     </template>
+
+    <!--
+      ── Waterfall Report (cohort-based) ────────────────────────────
+      The view Janice shares in executive briefings. Different from the
+      Pipeline Funnel above, which is a snapshot of who's in each stage
+      right now. This section answers a different question:
+
+        "Of the candidates who APPLIED in the selected window, how many
+         have reached each stage?"
+
+      That's the cohort metric that's directly comparable to TPG's xDR
+      benchmarks (row 23 of the Recruiting Weekly Update sheet:
+      100 → 50 → 40 → 30 → 24 → 19 → 17 → 16). For each transition we
+      show the actual % vs. the benchmark with a ▲/▼/▬ chip.
+
+      Scope controls are independent of the snapshot funnel above —
+      intentional, since the two views answer different questions.
+    -->
+    <div class="card section-card waterfall-card" id="sec-waterfall">
+      <div class="card-header section-card-header">
+        <div class="section-card-header-row clickable" @click="showWaterfall = !showWaterfall">
+          <span class="card-title">
+            <span class="material-icons mi-inline">waterfall_chart</span>
+            Waterfall Report
+            <span class="section-title-hint">cohort — by applied-in-window</span>
+            <template x-if="!showWaterfall && waterfallData">
+              <span class="section-badge" x-text="waterfallData.cohortSize + ' in cohort'"></span>
+            </template>
+          </span>
+          <span class="material-icons collapse-icon" x-text="showWaterfall ? 'expand_less' : 'expand_more'"></span>
+        </div>
+        <div class="section-filters" x-show="showWaterfall" @click.stop>
+          <!-- Date range: anchored default of 'since Apr 1, 2026' per the
+               Apr 23 discussion with Janice. User can override. -->
+          <span class="section-date-label">From</span>
+          <input type="date" class="section-filter section-date" x-model="waterfallFilters.startDate"
+                 @change="reloadWaterfall()" aria-label="Cohort start date">
+          <span class="section-date-label">to</span>
+          <input type="date" class="section-filter section-date" x-model="waterfallFilters.endDate"
+                 @change="reloadWaterfall()" aria-label="Cohort end date">
+
+          <select class="section-filter" x-model="waterfallFilters.jobId"
+                  @change="reloadWaterfall()">
+            <option value="">All Jobs</option>
+            <option value="__unassigned__">— Unassigned —</option>
+            <template x-for="j in jobs" :key="j.id">
+              <option :value="j.id" x-text="j.title"></option>
+            </template>
+          </select>
+          <select class="section-filter" x-model="waterfallFilters.recruiterId"
+                  @change="reloadWaterfall()">
+            <option value="">All Recruiters</option>
+            <option value="__assigned__">— Assigned —</option>
+            <option value="__unassigned__">— Unassigned —</option>
+            <template x-for="r in settings.recruiters.filter(x => x.is_active)" :key="r.id">
+              <option :value="r.id" x-text="r.name"></option>
+            </template>
+          </select>
+          <select class="section-filter" x-model="waterfallFilters.sourceId"
+                  @change="reloadWaterfall()">
+            <option value="">All Sources</option>
+            <option value="__unassigned__">— Unassigned —</option>
+            <template x-for="s in settings.sources.filter(x => x.is_enabled)" :key="s.id">
+              <option :value="s.id" x-text="s.name"></option>
+            </template>
+          </select>
+          <button class="xdr-scope-chip"
+                  :class="{ active: waterfallFilters.xdrOnly }"
+                  @click.stop="waterfallFilters.xdrOnly = !waterfallFilters.xdrOnly; reloadWaterfall()"
+                  title="Filter to xDR roles — shows benchmarks with this on">
+            xDR
+          </button>
+          <button class="icon-btn-sm section-filter-reset"
+                  @click.stop="resetWaterfallFilters()"
+                  title="Reset cohort filters">×</button>
+        </div>
+      </div>
+
+      <div class="card-body" x-show="showWaterfall">
+        <!-- Cohort summary header -->
+        <div class="waterfall-cohort-header">
+          <template x-if="waterfallLoading">
+            <span class="text-muted">Computing cohort…</span>
+          </template>
+          <template x-if="!waterfallLoading && waterfallData">
+            <div>
+              <strong><span x-text="waterfallData.cohortSize"></span></strong>
+              <span class="text-muted"> candidates applied </span>
+              <span x-text="formatDateShort(waterfallFilters.startDate)"></span>
+              <span class="text-muted"> – </span>
+              <span x-text="formatDateShort(waterfallFilters.endDate) || 'today'"></span>
+              <template x-if="waterfallFilters.xdrOnly">
+                <span class="text-muted"> (xDR roles only)</span>
+              </template>
+              <template x-if="!waterfallData.benchmarksValid">
+                <span class="bench-disclaimer"
+                      title="xDR benchmarks assume the default 8-stage sequence. Your current stage configuration has a different shape, so benchmark chips are hidden. Step % is still computed.">
+                  (benchmarks disabled — stage config mismatch)
+                </span>
+              </template>
+            </div>
+          </template>
+        </div>
+
+        <!-- Waterfall rows -->
+        <template x-if="!waterfallLoading && waterfallData && waterfallData.cohortSize === 0">
+          <div class="empty-state-mini">
+            No candidates applied in this window. Try widening the dates or clearing scope filters.
+          </div>
+        </template>
+
+        <template x-if="!waterfallLoading && waterfallData && waterfallData.cohortSize > 0">
+          <div class="waterfall-list">
+            <template x-for="row in waterfallData.rows" :key="row.stage_id">
+              <div class="waterfall-row">
+                <div class="waterfall-stage-name" x-text="row.stage_name"></div>
+                <div class="waterfall-count" x-text="row.count"></div>
+                <div class="waterfall-bar-track">
+                  <div class="waterfall-bar"
+                       :style="`width: ${waterfallBarWidth(row)}%; background: ${row.stage_color || 'var(--primary)'};`"></div>
+                </div>
+                <div class="waterfall-step-pct"
+                     :class="{ muted: row.step_pct === null }"
+                     x-text="row.step_pct !== null ? row.step_pct + '%' : '—'"></div>
+                <div class="waterfall-bench-chip"
+                     :class="{
+                        'bench-above': row.bench_pct !== null && row.step_pct !== null && row.step_pct > row.bench_pct,
+                        'bench-match': row.bench_pct !== null && row.step_pct !== null && row.step_pct === row.bench_pct,
+                        'bench-below': row.bench_pct !== null && row.step_pct !== null && row.step_pct < row.bench_pct,
+                        'bench-none':  row.bench_pct === null
+                      }"
+                     :title="row.bench_pct !== null ? 'xDR benchmark: ' + row.bench_pct + '%' : 'No benchmark for this row'"
+                     x-html="waterfallBenchDisplay(row)"></div>
+              </div>
+            </template>
+          </div>
+        </template>
+      </div>
+    </div>
 
     <!--
       ── Recruiter Performance ─────────────────────────────────────

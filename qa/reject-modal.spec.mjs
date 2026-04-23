@@ -64,12 +64,23 @@ async function call(page, fn, ...args) {
   assert(!/\\u[0-9a-fA-F]{4}/.test(headerText),
     `Modal header contains literal unicode escape: ${headerText}`);
 
-  // Reject button must be ENABLED right after a reason is picked (single reject path)
+  // Reject button is always clickable (only locked while submitting).
+  // Validation happens on click as an inline error + toast.
   const rejectBtn = page.locator('.modal-dialog .modal-footer .btn-danger').first();
   let isDisabled = await rejectBtn.isDisabled();
-  assert(isDisabled, 'Reject button should be disabled until a reason is picked');
+  assert(!isDisabled, 'Reject button should be clickable for single reject (validation happens on submit)');
 
-  // Pick a reason via Alpine to avoid select-option fragility across rendered text
+  // Click without picking a reason → expect validation toast, no submission
+  await rejectBtn.click();
+  await settle(page, 400);
+  const stateBefore = await page.evaluate(async () => (await fetch('/__qa/state')).json());
+  const stillActive = stateBefore.candidates.find((c) => /^rejecto-/.test(c.email));
+  assert(stillActive && stillActive.status === 'Active',
+    'Clicking Reject without a reason must NOT submit');
+  const errToast = await page.locator('.toast.toast-error').first().textContent();
+  assert(/reason/i.test(errToast || ''), `Expected reason-required error toast; got: ${errToast}`);
+
+  // Pick a reason and click again — should ready up + brighten + submit
   await page.evaluate(() => {
     const dlg = document.querySelector('.modal-dialog');
     const cmp = Alpine.$data(dlg);
@@ -77,10 +88,9 @@ async function call(page, fn, ...args) {
   });
   await settle(page, 200);
 
-  isDisabled = await rejectBtn.isDisabled();
-  assert(!isDisabled, 'Reject button should be enabled once a reason is picked (single reject)');
+  const isReady = await rejectBtn.evaluate((el) => el.classList.contains('reject-ready'));
+  assert(isReady, 'Reject button should get .reject-ready visual state once a reason is picked');
 
-  // Click the actual button
   await rejectBtn.click();
   await settle(page, 800);
 

@@ -1001,9 +1001,30 @@ html, body {
 .btn-outline-primary:hover { background: var(--primary); color: white; }
 .btn-danger {
   background: var(--danger); border-color: var(--danger); color: white;
+  font-weight: 600;
 }
 .btn-danger:hover, .btn-danger:focus {
   background: #C93E3E; border-color: #C93E3E; color: white;
+}
+.btn-danger:disabled, .btn-danger.disabled {
+  background: #E14B4B; border-color: #E14B4B; opacity: 0.55;
+}
+
+/* Reject confirm button — distinct "ready vs not ready" so the user
+   never wonders if it's clickable. Always enabled (only locked while
+   submitting), but the bright/glowy state appears only after a reason
+   is picked, giving an unmistakable visual cue. */
+.reject-confirm-btn {
+  transition: box-shadow 140ms ease, transform 140ms ease, background 140ms ease;
+}
+.reject-confirm-btn.reject-ready {
+  background: #C93E3E; border-color: #C93E3E;
+  box-shadow: 0 2px 10px rgba(225, 75, 75, 0.35);
+}
+.reject-confirm-btn.reject-ready:hover {
+  background: #B23232; border-color: #B23232;
+  transform: translateY(-1px);
+  box-shadow: 0 4px 14px rgba(225, 75, 75, 0.45);
 }
 .modal-lead {
   margin: 0 0 18px; font-size: 14px; color: var(--text);
@@ -1071,7 +1092,6 @@ html, body {
   .funnel-stage-pct   { grid-area: pct; }
   .funnel-chevron     { display: none; }
   .funnel-stage-conv  { display: none; }
-  .funnel-bench-chip  { display: none; }
   /* Job cards: single column */
   .job-grid { grid-template-columns: 1fr; }
   /* Bulk action bar: bottom-pinned, full-width, two-column action grid */
@@ -1370,12 +1390,13 @@ html, body {
   padding-bottom: 4px;
 }
 
-/* Seven-column grid: name | count | bar | of-total% | step-conv | bench | chevron.
-   step-conv shows step-to-step conversion from the previous stage.
-   bench shows ▲/▼ vs the xDR benchmark (row 23 of TPG Recruiting sheet). */
+/* Six-column grid: name | count | bar | of-total% | step-conv | chevron.
+   step-conv is the descriptive "share of previous stage's headcount" —
+   NOT a conversion rate. Real cohort conversion vs. xDR benchmarks lives
+   in the separate Waterfall Report section. */
 .funnel-row {
   display: grid;
-  grid-template-columns: 130px 36px 1fr 44px 52px 60px 18px;
+  grid-template-columns: 130px 36px 1fr 44px 52px 18px;
   align-items: center;
   gap: 10px;
   padding: 10px 12px;
@@ -1431,26 +1452,6 @@ html, body {
 .funnel-stage-conv.conv-none {
   color: var(--text-muted);
   font-weight: 400;
-}
-.funnel-bench-chip {
-  font-size: 11px; font-weight: 700;
-  text-align: center;
-  border-radius: 4px;
-  padding: 2px 5px;
-  font-variant-numeric: tabular-nums;
-  white-space: nowrap;
-}
-.funnel-bench-chip.bench-above {
-  background: #D4F0E0;
-  color: #1E7E45;
-}
-.funnel-bench-chip.bench-below {
-  background: #FAE0E0;
-  color: #C0392B;
-}
-.funnel-bench-chip.bench-none {
-  color: var(--text-muted);
-  background: transparent;
 }
 /* xDR scope toggle chip in the funnel filter row */
 .xdr-scope-chip {

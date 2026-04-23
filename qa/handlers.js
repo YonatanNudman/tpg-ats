@@ -533,6 +533,7 @@ function makeHandlers(db) {
     getRecruiterPerformance,
     getSourceEffectiveness,
     getAnalyticsHistorical,
+    getWaterfallMetrics,
     getRecentActivity,
     getRecentHires,
     getRecentRejections,

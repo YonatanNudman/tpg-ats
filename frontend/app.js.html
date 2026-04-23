@@ -616,6 +616,7 @@ document.addEventListener('alpine:init', function () {
       // of them when they want to focus on one. State persists via
       // localStorage in _persistSectionState / _restoreSectionState.
       showFunnel: true,
+      showWaterfall: true,
       showRecruiters: true,
       showSources: true,
       activity: [],            // array of HistoryRow, newest first
@@ -662,6 +663,19 @@ document.addEventListener('alpine:init', function () {
       recruiterFilters: { jobId: '', sourceId: '', hiresPreset: '', hiresStartDate: '', hiresEndDate: '' },
       sourceFilters:    { jobId: '', recruiterId: '', preset: '', startDate: '', endDate: '' },
       analyticsFilters: { jobId: '', sourceId: '', recruiterId: '', preset: '', startDate: '', endDate: '' },
+
+      // Waterfall (cohort) — independent of the snapshot funnel above.
+      // Anchored default start: Apr 1, 2026 (per the Apr 23 meeting with
+      // Janice — she wants "candidates who applied since April"). Empty
+      // endDate means "through today" server-side.
+      waterfallFilters: {
+        startDate: '2026-04-01',
+        endDate:   '',
+        jobId: '', sourceId: '', recruiterId: '', regionId: '', motion: '',
+        xdrOnly: false,
+      },
+      waterfallData:    null,
+      waterfallLoading: false,
 
       // ── Funnel-as-primary state ──────────────────────────
       // Stage IDs currently expanded inline (one per stage; we track an
@@ -808,8 +822,10 @@ document.addEventListener('alpine:init', function () {
                 recruiterFilters: self.recruiterFilters,
                 sourceFilters:    self.sourceFilters,
                 analyticsFilters: self.analyticsFilters,
+                waterfallFilters: self.waterfallFilters,
                 expandedStages:   self.expandedStages,
                 showFunnel:     self.showFunnel,
+                showWaterfall:  self.showWaterfall,
                 showRecruiters: self.showRecruiters,
                 showSources:    self.showSources,
               };
@@ -833,8 +849,10 @@ document.addEventListener('alpine:init', function () {
             if (snap.recruiterFilters) Object.assign(this.recruiterFilters, snap.recruiterFilters);
             if (snap.sourceFilters)    Object.assign(this.sourceFilters,    snap.sourceFilters);
             if (snap.analyticsFilters) Object.assign(this.analyticsFilters, snap.analyticsFilters);
+            if (snap.waterfallFilters) Object.assign(this.waterfallFilters, snap.waterfallFilters);
             if (Array.isArray(snap.expandedStages)) this.expandedStages = snap.expandedStages.slice();
             if (typeof snap.showFunnel     === 'boolean') this.showFunnel     = snap.showFunnel;
+            if (typeof snap.showWaterfall  === 'boolean') this.showWaterfall  = snap.showWaterfall;
             if (typeof snap.showRecruiters === 'boolean') this.showRecruiters = snap.showRecruiters;
             if (typeof snap.showSources    === 'boolean') this.showSources    = snap.showSources;
           }
@@ -979,6 +997,10 @@ document.addEventListener('alpine:init', function () {
             this.loadAnalytics(),
           ]);
           this.scheduleChartRender();
+          // Waterfall is server-side (needs allHistory). Kick it off once
+          // initial candidates are loaded — fire-and-forget, the section
+          // shows "Computing cohort…" until the RPC resolves.
+          this.reloadWaterfall();
         } finally {
           this.loading = false;
         }
@@ -1007,6 +1029,9 @@ document.addEventListener('alpine:init', function () {
         // Refresh Recent Rejections only if it's currently visible — the
         // user is actively looking at it, so the cost is justified.
         if (this.showRejections) this.loadRecentRejections();
+        // Silently refresh waterfall too so a teammate's stage-advance
+        // shows up in the cohort without a manual page reload.
+        if (this.showWaterfall) this.reloadWaterfall();
       },
 
       scheduleChartRender: function () {
@@ -1459,24 +1484,19 @@ document.addEventListener('alpine:init', function () {
             };
           });
 
-        // Waterfall conversion metrics.
-        // Step-to-step benchmarks from TPG Recruiting Weekly Update sheet,
-        // row 23 "US xDR AVERAGES" (Inbound motion):
-        //   100 → 50 → 40 → 30 → 24 → 19 → 17 → 16 candidates/recruiter/month.
-        // Derived step-to-step rates: 50%, 80%, 75%, 80%, 79%, 89%, 94%.
-        var XDR_BENCH = [50, 80, 75, 80, 79, 89, 94];
+        // Step-to-step "share of previous stage" — purely descriptive.
+        // NOT a conversion rate: these counts are snapshots, not a cohort,
+        // so the pre-screen / reviewed ratio compares two different groups
+        // of candidates. For real conversion vs. xDR benchmarks, the
+        // Waterfall Report section walks `history` to compute a proper
+        // cohort flow and compares that to row 23's benchmarks.
         for (var wi = 0; wi < stageRows.length; wi++) {
           var wr = stageRows[wi];
           if (wi === 0) {
-            wr.step_pct    = null;
-            wr.bench_pct   = null;
-            wr.bench_above = null;
+            wr.step_pct = null;
           } else {
             var prevCnt = stageRows[wi - 1].candidate_count;
             wr.step_pct = prevCnt > 0 ? Math.round((wr.candidate_count / prevCnt) * 100) : null;
-            var benchVal = (wi - 1) < XDR_BENCH.length ? XDR_BENCH[wi - 1] : null;
-            wr.bench_pct   = benchVal;
-            wr.bench_above = (benchVal !== null && wr.step_pct !== null) ? (wr.step_pct >= benchVal) : null;
           }
         }
 
@@ -1806,6 +1826,78 @@ document.addEventListener('alpine:init', function () {
             if (seq === self._sourceReloadSeq) self.sourceLoading = false;
           }
         }, 200);
+      },
+
+      // ── Waterfall (cohort) reload ─────────────────────────
+      // Independent of reloadFunnel — this one round-trips to the server
+      // because we need allHistory, which isn't loaded on the client.
+      // Debounced the same way as reloadSourceEffectiveness so dragging
+      // the date picker or toggling xDR doesn't fire 20 RPCs.
+      _waterfallReloadSeq: 0,
+      reloadWaterfall: function () {
+        var self = this;
+        var seq = ++this._waterfallReloadSeq;
+        if (this._waterfallReloadTimer) clearTimeout(this._waterfallReloadTimer);
+        this.waterfallLoading = true;
+        this._waterfallReloadTimer = setTimeout(async function () {
+          // Build filter payload. Empty endDate = "through today" — we
+          // normalize here so the server sees a concrete date string.
+          var f = Object.assign({}, self.waterfallFilters);
+          if (!f.endDate) f.endDate = new Date().toISOString().slice(0, 10);
+          try {
+            var result = await gasCall('getWaterfallMetrics', f);
+            if (seq !== self._waterfallReloadSeq) return;
+            self.waterfallData = result;
+            self._persistSectionState();
+          } catch (e) {
+            if (seq !== self._waterfallReloadSeq) return;
+            Alpine.store('app').toastError('Waterfall reload failed: ' + e.message);
+          } finally {
+            if (seq === self._waterfallReloadSeq) self.waterfallLoading = false;
+          }
+        }, 250);
+      },
+
+      resetWaterfallFilters: function () {
+        this.waterfallFilters = {
+          startDate: '2026-04-01',
+          endDate:   '',
+          jobId: '', sourceId: '', recruiterId: '', regionId: '', motion: '',
+          xdrOnly: false,
+        };
+        this.reloadWaterfall();
+      },
+
+      // Bar width: count relative to cohortSize (so the first row is
+      // always 100% wide = everyone in the cohort).
+      waterfallBarWidth: function (row) {
+        if (!this.waterfallData || !this.waterfallData.cohortSize) return 0;
+        return Math.round((row.count / this.waterfallData.cohortSize) * 100);
+      },
+
+      // Render the benchmark chip text. Returns an HTML string so we can
+      // color the arrow separately from the number in a future pass.
+      waterfallBenchDisplay: function (row) {
+        if (row.bench_pct === null) return '—';
+        var arrow;
+        if (row.step_pct === null) arrow = '';
+        else if (row.step_pct > row.bench_pct) arrow = '▲ ';
+        else if (row.step_pct < row.bench_pct) arrow = '▼ ';
+        else arrow = '▬ ';
+        return arrow + row.bench_pct + '%';
+      },
+
+      // Pretty "Apr 1" / "Apr 23" date formatter for the cohort summary.
+      formatDateShort: function (isoStr) {
+        if (!isoStr) return '';
+        var s = String(isoStr).slice(0, 10);
+        var parts = s.split('-');
+        if (parts.length !== 3) return s;
+        var monthNames = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
+        var m = parseInt(parts[1], 10) - 1;
+        var d = parseInt(parts[2], 10);
+        if (isNaN(m) || isNaN(d) || m < 0 || m > 11) return s;
+        return monthNames[m] + ' ' + d;
       },
 
       // Bottom-of-page Analytics section refetch. Routes through
