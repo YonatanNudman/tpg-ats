@@ -15,7 +15,8 @@
     "qa:reject": "node qa/build-bundle.js && node qa/reject-modal.spec.mjs",
     "qa:funnel-rejected": "node qa/build-bundle.js && node qa/funnel-rejected.spec.mjs",
     "build": "clasp push",
-    "deploy": "clasp deploy",
+    "deploy": "clasp deploy --deploymentId AKfycby8Uh4_8Xp0UnLwJIWob7-WRq3brrYQBNav_PHKgR2VFv6Qs_fsWQOYc2SzymX7AFupqA -d \"tpg-ats latest\"",
+    "deploy:new": "clasp deploy",
     "smoke": "node scripts/smoke.js"
   },
   "devDependencies": {
