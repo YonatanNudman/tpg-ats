@@ -163,6 +163,8 @@ export interface UpdateCandidateInput {
   last_name?: string;
   email?: string;
   phone?: string;
+  job_id?: number | null;
+  recruiter_id?: number | null;
   source_id?: number | null;
   region_id?: number | null;
   motion?: "Inbound" | "Outbound";

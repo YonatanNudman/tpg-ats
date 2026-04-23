@@ -772,12 +772,18 @@ export const DEFAULT_REGIONS: RegionRow[] = [
   { id: 2, name: "International",  is_enabled: true },
 ];
 
+// Refuse reasons (the dropdown in the Reject candidate modal). Two
+// new entries added in v57 per the team-review Slack request from
+// Janice: "Candidate Withdrew" and "Disqualified". Both stay
+// enabled by default; the user can disable any via Settings >
+// Refuse Reasons.
 export const DEFAULT_REFUSE_REASONS: RefuseReasonRow[] = [
   { id: 1, name: "Failed Assessment",  is_enabled: true },
   { id: 2, name: "No-Show",            is_enabled: true },
-  { id: 3, name: "Withdrew",           is_enabled: true },
-  { id: 4, name: "Overqualified",      is_enabled: true },
-  { id: 5, name: "Underqualified",     is_enabled: true },
-  { id: 6, name: "Role Filled",        is_enabled: true },
-  { id: 7, name: "Other",              is_enabled: true },
+  { id: 3, name: "Candidate Withdrew", is_enabled: true },
+  { id: 4, name: "Disqualified",       is_enabled: true },
+  { id: 5, name: "Overqualified",      is_enabled: true },
+  { id: 6, name: "Underqualified",     is_enabled: true },
+  { id: 7, name: "Role Filled",        is_enabled: true },
+  { id: 8, name: "Other",              is_enabled: true },
 ];

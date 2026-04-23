@@ -433,6 +433,10 @@ document.addEventListener('alpine:init', function () {
     peek:     { open: false, candidateId: null, candidate: null, history: [], loading: false },
     modal:    { open: false, type: null, data: null },
     settings: { stages: [], sources: [], regions: [], recruiters: [], refuseReasons: [] },
+    // Mirrored from atsApp.jobs by loadJobs() so the peek panel
+    // (a separate Alpine component scope) can render the Job dropdown
+    // without reaching up to the root component for every render.
+    jobs:     [],
     settingsOpen: false,
 
     // Toast — "opts" can include:
@@ -946,6 +950,10 @@ document.addEventListener('alpine:init', function () {
 
       loadJobs: async function () {
         this.jobs = await gasCall('getJobOpenings');
+        // Mirror to the store so the peek panel (its own Alpine
+        // component) can render the Job-assignment dropdown without
+        // reaching back into atsApp via Alpine.$data lookups.
+        Alpine.store('app').jobs = this.jobs;
       },
 
       loadAnalytics: async function () {
@@ -1946,7 +1954,7 @@ document.addEventListener('alpine:init', function () {
   Alpine.data('peekComponent', function () {
     var presenceTimer = null;
     return {
-      editStageId: 0, editRecruiterId: '', editSourceId: '', editRegionId: '',
+      editStageId: 0, editJobId: '', editRecruiterId: '', editSourceId: '', editRegionId: '',
       editMotion: 'Inbound', editKanban: 'Normal', editPostHire: '', editNotes: '',
       lastSavedAt: 0,                       // ms epoch — drives the "Saved · just now" hint
       notesSaving: false,                   // inflight guard — prevents the @blur + @click double-save
@@ -2049,6 +2057,7 @@ document.addEventListener('alpine:init', function () {
         function syncFromCandidate(c) {
           if (!c) return;
           self.editStageId    = c.stage_id;
+          self.editJobId      = c.job_id == null ? '' : String(c.job_id);
           self.editRecruiterId = c.recruiter_id == null ? '' : String(c.recruiter_id);
           self.editSourceId   = c.source_id == null ? '' : String(c.source_id);
           self.editRegionId   = c.region_id == null ? '' : String(c.region_id);

@@ -230,7 +230,10 @@ describe("default seed data", () => {
     expect(DEFAULT_REGIONS.map(r => r.name).sort()).toEqual(["International", "US"]);
   });
 
-  it("has 7 default refuse reasons", () => {
-    expect(DEFAULT_REFUSE_REASONS).toHaveLength(7);
+  it("seeds 8 default refuse reasons including Candidate Withdrew and Disqualified", () => {
+    expect(DEFAULT_REFUSE_REASONS).toHaveLength(8);
+    var names = DEFAULT_REFUSE_REASONS.map(r => r.name);
+    expect(names).toContain("Candidate Withdrew");
+    expect(names).toContain("Disqualified");
   });
 });

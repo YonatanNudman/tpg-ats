@@ -1308,9 +1308,27 @@
                 <div class="peek-section-title">Details</div>
                 <div class="peek-grid">
 
+                  <!--
+                    Job assignment is editable from the peek panel. Was
+                    a read-only display until the team review surfaced
+                    the gap ("we need to assign candidates to different
+                    jobs but the job assignment field does not allow us
+                    to assign the job"). Mirrors the Recruiter / Source /
+                    Region pattern \u2014 plain select, autosaves on @change
+                    via saveField, runs through updateCandidate's
+                    optimistic-conflict-checked write.
+                  -->
                   <div class="peek-field">
                     <div class="peek-field-label">Job</div>
-                    <div class="peek-field-value" x-text="$store.app.peek.candidate.job_title || '—'"></div>
+                    <select class="form-select form-select-sm"
+                      x-model="editJobId"
+                      @change="saveField('job_id', editJobId === '' ? null : parseInt(editJobId))">
+                      <option value="">&mdash; Unassigned &mdash;</option>
+                      <template x-for="j in $store.app.jobs" :key="j.id">
+                        <option :value="j.id"
+                          x-text="j.title + (j.status !== 'Open' ? ' (' + j.status + ')' : '')"></option>
+                      </template>
+                    </select>
                   </div>
 
                   <div class="peek-field">
