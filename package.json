@@ -13,6 +13,7 @@
     "qa:concurrency": "node qa/build-bundle.js && node qa/concurrency.spec.mjs",
     "qa:filters": "node qa/build-bundle.js && node qa/filter-override.spec.mjs",
     "qa:reject": "node qa/build-bundle.js && node qa/reject-modal.spec.mjs",
+    "qa:funnel-rejected": "node qa/build-bundle.js && node qa/funnel-rejected.spec.mjs",
     "build": "clasp push",
     "deploy": "clasp deploy",
     "smoke": "node scripts/smoke.js"

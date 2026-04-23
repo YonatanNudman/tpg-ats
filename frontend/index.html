@@ -476,7 +476,7 @@
           <div class="funnel-list">
             <template x-for="stage in pipelineFunnelData" :key="stage.stage_id">
               <div class="funnel-stage"
-                   :class="{ 'expanded': expandedStages.includes(stage.stage_id) }">
+                   :class="{ 'expanded': expandedStages.includes(stage.stage_id), 'rejected-bucket': stage.is_rejected_bucket }">
                 <div class="funnel-row" @click="toggleFunnelStage(stage.stage_id)">
                   <div class="funnel-stage-name" x-text="stage.stage_name"></div>
                   <!--
@@ -516,7 +516,7 @@
                       is one click away from the candidate rows it controls.
                       Hidden when there are no candidates (nothing to act on).
                     -->
-                    <template x-if="funnelCandidatesForStage(stage.stage_id).length > 0">
+                    <template x-if="funnelCandidatesForStage(stage.stage_id).length > 0 && !stage.is_rejected_bucket">
                       <div class="funnel-stage-bulk-header">
                         <label class="funnel-stage-bulk-label" @click.stop>
                           <input type="checkbox"
@@ -544,7 +544,8 @@
                         :class="{ 'funnel-candidate-row-selected': isSelected(c.id) }"
                         @click="openPeek(c.id)"
                         :title="'Click to open ' + c.first_name + ' ' + c.last_name">
-                        <label class="funnel-cand-check" @click.stop>
+                        <label class="funnel-cand-check" @click.stop
+                          x-show="!stage.is_rejected_bucket">
                           <input type="checkbox" :checked="isSelected(c.id)"
                             @change="toggleSelected(c.id)">
                         </label>
@@ -566,7 +567,12 @@
                             Resets after each pick so the placeholder text
                             stays as the visible label.
                           -->
-                          <template x-if="canAdvance(c)">
+                          <!--
+                            Active stages get the Move-to picker.
+                            Rejected bucket gets a Restore button instead
+                            so the action makes sense for the row's state.
+                          -->
+                          <template x-if="!stage.is_rejected_bucket && canAdvance(c)">
                             <select class="funnel-cand-move-select"
                               @click.stop=""
                               @change.stop="moveCandidateTo(c, $event.target.value); $event.target.value=''"
@@ -577,12 +583,20 @@
                               </template>
                             </select>
                           </template>
+                          <template x-if="stage.is_rejected_bucket">
+                            <button class="btn btn-sm btn-outline-secondary"
+                              @click.stop="reactivateCandidate(c)"
+                              title="Restore this candidate to the active pipeline">Restore</button>
+                          </template>
                         </div>
                         <span class="material-icons funnel-cand-arrow">chevron_right</span>
                       </div>
                     </template>
                     <template x-if="funnelCandidatesForStage(stage.stage_id).length === 0">
-                      <div class="funnel-stage-empty">No candidates in this stage.</div>
+                      <div class="funnel-stage-empty"
+                        x-text="stage.is_rejected_bucket
+                          ? 'No rejected candidates in scope.'
+                          : 'No candidates in this stage.'"></div>
                     </template>
                   </div>
                 </template>

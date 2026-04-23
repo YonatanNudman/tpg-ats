@@ -1389,6 +1389,25 @@ html, body {
      without colliding with the bar above. */
   padding-bottom: 4px;
 }
+/* Synthetic Rejected row at the bottom of the funnel — visually
+   separated from the active pipeline so recruiters read it as a
+   terminal outcome bucket, not the next active stage. */
+.funnel-stage.rejected-bucket {
+  margin-top: 10px;
+  padding-top: 10px;
+  border-top: 1px dashed var(--border, #E5E7EB);
+  background: rgba(225, 75, 75, 0.03);
+}
+.funnel-stage.rejected-bucket .funnel-stage-name {
+  color: var(--danger);
+}
+.funnel-stage.rejected-bucket:hover:not(.expanded) {
+  background: rgba(225, 75, 75, 0.06);
+}
+.funnel-stage.rejected-bucket.expanded {
+  background: rgba(225, 75, 75, 0.05);
+  box-shadow: inset 0 0 0 1px rgba(225, 75, 75, 0.18);
+}
 
 /* Six-column grid: name | count | bar | of-total% | step-conv | chevron.
    step-conv is the descriptive "share of previous stage's headcount" —
@@ -1476,6 +1495,126 @@ html, body {
   border-color: var(--primary);
   color: #fff;
 }
+
+/* ── Waterfall Report section ─────────────────────────────
+   Cohort-based flow metrics. Visually similar to the snapshot funnel
+   (same bar metaphor, same stage color) but intentionally distinct —
+   the row layout adds step-% and benchmark-chip columns because this
+   is where those numbers actually mean something. No inline drilldown
+   (this is a report, not an operational surface). */
+.waterfall-cohort-header {
+  font-size: 13px;
+  color: var(--text-secondary);
+  padding: 4px 4px 12px;
+  border-bottom: 1px solid var(--border);
+  margin-bottom: 10px;
+}
+.waterfall-cohort-header .bench-disclaimer {
+  color: var(--text-muted);
+  font-style: italic;
+  margin-left: 6px;
+}
+.waterfall-list {
+  display: flex; flex-direction: column; gap: 2px;
+}
+/* Five-column grid: stage name | count | bar | step% | benchmark chip. */
+.waterfall-row {
+  display: grid;
+  grid-template-columns: 130px 44px 1fr 56px 72px;
+  align-items: center;
+  gap: 10px;
+  padding: 10px 12px;
+  border-radius: var(--radius-sm);
+}
+.waterfall-row:hover {
+  background: rgba(var(--primary-rgb), 0.04);
+}
+.waterfall-stage-name {
+  font-size: 13px; font-weight: 600;
+  color: var(--text);
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+.waterfall-count {
+  font-size: 14px; font-weight: 700;
+  color: var(--text);
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+}
+.waterfall-bar-track {
+  position: relative;
+  height: 12px;
+  background: #EEF0F6;
+  border-radius: 999px;
+  overflow: hidden;
+}
+.waterfall-bar {
+  height: 100%;
+  border-radius: 999px;
+  transition: width 0.3s cubic-bezier(0.4,0,0.2,1), background 0.2s ease;
+}
+.waterfall-step-pct {
+  font-size: 12px; font-weight: 700;
+  color: var(--text-secondary);
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+}
+.waterfall-step-pct.muted {
+  color: var(--text-muted);
+  font-weight: 400;
+}
+.waterfall-bench-chip {
+  font-size: 11px; font-weight: 700;
+  text-align: center;
+  border-radius: 4px;
+  padding: 3px 6px;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+.waterfall-bench-chip.bench-above {
+  background: #D4F0E0;
+  color: #1E7E45;
+}
+.waterfall-bench-chip.bench-match {
+  background: #F0F0F6;
+  color: var(--text-secondary);
+}
+.waterfall-bench-chip.bench-below {
+  background: #FAE0E0;
+  color: #C0392B;
+}
+.waterfall-bench-chip.bench-none {
+  color: var(--text-muted);
+  background: transparent;
+}
+.empty-state-mini {
+  padding: 20px; text-align: center;
+  color: var(--text-muted);
+  font-size: 13px;
+}
+.section-title-hint {
+  font-size: 11px; font-weight: 500;
+  color: var(--text-muted);
+  margin-left: 6px;
+  letter-spacing: 0.02em;
+}
+.section-date-label {
+  font-size: 11px;
+  color: var(--text-muted);
+  font-weight: 500;
+  margin: 0 2px;
+}
+.section-date {
+  min-width: 132px;
+}
+@media (max-width: 768px) {
+  .waterfall-row {
+    grid-template-columns: 110px 40px 1fr 52px;
+    gap: 8px;
+    padding: 8px;
+  }
+  .waterfall-bench-chip { display: none; }
+}
+
 .funnel-chevron {
   color: var(--text-muted);
   font-size: 18px !important;

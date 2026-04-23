@@ -1376,6 +1376,49 @@ document.addEventListener('alpine:init', function () {
       // filter logic — pipelineFunnelData applied a date filter that the
       // expanded list ignored, producing the visible bug "stage shows
       // count 0 but the expanded panel lists candidates".
+      // Same scope predicate as _funnelMatch but ignores the implicit
+      // status='Active' check. Used for the synthetic Rejected bucket
+      // at the bottom of the funnel so rejections honor job/source/
+      // recruiter/date filters without being filtered out for not
+      // being Active.
+      _funnelMatchExcludingStatus: function (c, f) {
+        if (f.jobId === '__unassigned__') {
+          if (hasAssignedId(c.job_id)) return false;
+        } else if (f.jobId && c.job_id != f.jobId) return false;
+        if (f.sourceId === '__unassigned__') {
+          if (hasAssignedId(c.source_id)) return false;
+        } else if (f.sourceId && c.source_id != f.sourceId) return false;
+        if (f.recruiterId === '__unassigned__') {
+          if (hasAssignedId(c.recruiter_id)) return false;
+        } else if (f.recruiterId === '__assigned__') {
+          if (!hasAssignedId(c.recruiter_id)) return false;
+        } else if (f.recruiterId) {
+          if (c.recruiter_id != f.recruiterId) return false;
+        }
+        if (f.regionId === '__unassigned__') {
+          if (hasAssignedId(c.region_id)) return false;
+        } else if (f.regionId && c.region_id != f.regionId) return false;
+        if (f.motion === '__unassigned__') {
+          if (c.motion === 'Inbound' || c.motion === 'Outbound') return false;
+        } else if (f.motion && c.motion !== f.motion) return false;
+        if (f.search) {
+          var q = String(f.search).toLowerCase();
+          var hay = ((c.first_name || '') + ' ' + (c.last_name || '') + ' ' + (c.email || '')).toLowerCase();
+          if (hay.indexOf(q) === -1) return false;
+        }
+        // For rejections, scope by date_last_stage_update (when they were
+        // rejected) instead of date_applied — recruiters thinking
+        // "rejections this month" mean "rejected this month", not
+        // "applied this month and later rejected".
+        var rejDate = c.date_last_stage_update || c.date_applied;
+        if (rejDate && (f.startDate || f.endDate)) {
+          var d = String(rejDate).slice(0, 10);
+          if (f.startDate && d < String(f.startDate).slice(0, 10)) return false;
+          if (f.endDate   && d > String(f.endDate).slice(0, 10))   return false;
+        }
+        return true;
+      },
+
       _funnelMatch: function (c, f) {
         if (c.status !== 'Active') return false;
         if (f.jobId === '__unassigned__') {
@@ -1458,17 +1501,35 @@ document.addEventListener('alpine:init', function () {
           }
         }
 
+        // Active candidates feed the active stage rows. Rejected candidates
+        // also bucket into a synthetic "rejected" row at the bottom of the
+        // funnel — same job/source/recruiter/date scope, but ignoring the
+        // implicit Active status filter so rejected candidates from the
+        // selected period stay visible. Without this, recruiters report
+        // candidates "disappearing" with no terminal landing place.
         var stageCandidates = {};
-        var inScopeTotal = 0;
+        var rejectedCandidates = [];
+        var rejectedFilters = Object.assign({}, f);
+        delete rejectedFilters.status;
         for (var i = 0; i < this.allCandidates.length; i++) {
           var c = this.allCandidates[i];
-          if (!this._funnelMatch(c, f)) continue;
           if (xdrJobIds !== null && !xdrJobIds[c.job_id]) continue;
-          inScopeTotal++;
+          if (c.status === 'Rejected') {
+            if (this._funnelMatchExcludingStatus(c, rejectedFilters)) {
+              rejectedCandidates.push(c);
+            }
+            continue;
+          }
+          if (!this._funnelMatch(c, f)) continue;
           var sid = c.stage_id;
           if (!stageCandidates[sid]) stageCandidates[sid] = [];
           stageCandidates[sid].push(c);
         }
+        rejectedCandidates.sort(function (a, b) {
+          return (b.date_last_stage_update || '').localeCompare(a.date_last_stage_update || '');
+        });
+        var inScopeTotal = 0;
+        for (var sk in stageCandidates) inScopeTotal += stageCandidates[sk].length;
 
         var stageRows = this.settings.stages
           .filter(function (s) { return s.is_enabled && !s.is_rejected; })
@@ -1481,8 +1542,24 @@ document.addEventListener('alpine:init', function () {
               stage_name: s.name,
               stage_color: s.color,
               candidate_count: rows.length,
+              is_rejected_bucket: false,
             };
           });
+
+        // Synthetic Rejected row pinned to the bottom of the funnel.
+        // Reuses stage_id = -1 as a sentinel so funnelCandidatesForStage
+        // and the inline drilldown can look it up the same way they do
+        // for real stages (no special-case rendering branch needed).
+        var rejectedStage = this.settings.stages.find(function (s) { return s.is_rejected; });
+        var REJECTED_BUCKET_ID = -1;
+        stageCandidates[REJECTED_BUCKET_ID] = rejectedCandidates;
+        stageRows.push({
+          stage_id: REJECTED_BUCKET_ID,
+          stage_name: 'Rejected',
+          stage_color: (rejectedStage && rejectedStage.color) || '#E14B4B',
+          candidate_count: rejectedCandidates.length,
+          is_rejected_bucket: true,
+        });
 
         // Step-to-step "share of previous stage" — purely descriptive.
         // NOT a conversion rate: these counts are snapshots, not a cohort,
@@ -1492,6 +1569,13 @@ document.addEventListener('alpine:init', function () {
         // cohort flow and compares that to row 23's benchmarks.
         for (var wi = 0; wi < stageRows.length; wi++) {
           var wr = stageRows[wi];
+          if (wr.is_rejected_bucket) {
+            // Rejected isn't part of the active pipeline progression —
+            // showing a "▼50%" next to it would imply a rejection rate
+            // that this number doesn't actually represent. Leave blank.
+            wr.step_pct = null;
+            continue;
+          }
           if (wi === 0) {
             wr.step_pct = null;
           } else {
