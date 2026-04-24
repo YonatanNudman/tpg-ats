@@ -24,11 +24,13 @@ function makeMockDB(overrides: Partial<ISheetDB> = {}): ISheetDB {
     getAllRegions: jest.fn(() => []),
     getAllRecruiters: jest.fn(() => []),
     getAllRefuseReasons: jest.fn(() => []),
+    getAllWaterfallBenchmarks: jest.fn(() => []),
     replaceStages: jest.fn(),
     replaceSources: jest.fn(),
     replaceRegions: jest.fn(),
     replaceRecruiters: jest.fn(),
     replaceRefuseReasons: jest.fn(),
+    replaceWaterfallBenchmarks: jest.fn(),
     seedDefaultData: jest.fn(),
     ...overrides,
   };

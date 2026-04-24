@@ -79,13 +79,13 @@
           <div class="app-presence-avatar app-presence-self"
             :style="'background: ' + presenceColor(userEmail) + ';'"
             x-text="initials(userEmail.split('@')[0])"
-            title="You"></div>
+            :title="'You · ' + emailDisplayName(userEmail)"></div>
         </template>
         <template x-for="v in otherAppViewers().slice(0, 4)" :key="v.email">
           <div class="app-presence-avatar"
             :style="'background: ' + presenceColor(v.email) + ';'"
             x-text="initials(v.email.split('@')[0])"
-            :title="v.email"></div>
+            :title="emailDisplayName(v.email)"></div>
         </template>
         <template x-if="otherAppViewers().length > 4">
           <div class="app-presence-avatar app-presence-more"
@@ -131,6 +131,40 @@
     </template>
 
     <!--
+      Topbar search — navigator, not filter. Type → dropdown of up to 8
+      matching candidates; click a result → peek panel opens. Doesn't
+      narrow any dashboard, so hopping to a specific person never
+      silently re-scopes the funnel someone else is looking at.
+    -->
+    <div class="topbar-search" @click.outside="searchOpen = false">
+      <span class="material-icons topbar-search-icon">search</span>
+      <input type="text" class="topbar-search-input"
+             x-model.debounce.150ms="searchQuery"
+             @input.debounce.150ms="runSearch()"
+             @focus="runSearch()"
+             @keydown.escape="clearSearch()"
+             @keydown.enter="if (searchResults.length > 0) selectSearchResult(searchResults[0].id)"
+             placeholder="Find candidate…"
+             aria-label="Find candidate">
+      <button class="topbar-search-clear" x-show="searchQuery" @click="clearSearch()"
+              aria-label="Clear search">×</button>
+      <div class="topbar-search-popover" x-show="searchOpen && searchResults.length > 0" x-transition x-cloak>
+        <template x-for="r in searchResults" :key="r.id">
+          <button type="button" class="topbar-search-result"
+                  @click="selectSearchResult(r.id)">
+            <span class="topbar-search-name" x-text="(r.first_name || '') + ' ' + (r.last_name || '')"></span>
+            <span class="topbar-search-meta">
+              <span class="topbar-search-email" x-text="r.email || ''"></span>
+              <template x-if="r.status !== 'Active'">
+                <span class="topbar-search-status" x-text="r.status"></span>
+              </template>
+            </span>
+          </button>
+        </template>
+      </div>
+    </div>
+
+    <!--
       Action hierarchy (left → right): primary daily action, secondary
       occasional, tertiary monthly, settings as icon. Add Candidate stays
       filled-primary so it visually anchors the topbar; Add Job demotes to
@@ -168,6 +202,13 @@
       <span class="material-icons">download</span>
       <span class="icon-btn-label">Export</span>
     </button>
+    <button class="icon-btn has-tooltip activity-topbar-btn" @click="openActivityPanel()"
+      data-tooltip="Open team activity"
+      aria-label="Open team activity">
+      <span class="material-icons">history</span>
+      <span class="icon-btn-label">Activity</span>
+      <span class="icon-btn-count" x-show="activity.length > 0" x-text="activity.length"></span>
+    </button>
     <button class="icon-btn has-tooltip" @click="openSettings()"
       data-tooltip="Settings (recruiters, stages, sources, regions, refuse reasons)"
       aria-label="Settings">
@@ -193,17 +234,15 @@
     <a class="section-nav-chip" href="#sec-waterfall" @click.prevent="scrollToSection('sec-waterfall')">
       <span class="material-icons mi-inline">waterfall_chart</span> Waterfall
     </a>
-    <a class="section-nav-chip" href="#sec-recruiters" @click.prevent="scrollToSection('sec-recruiters')">
-      <span class="material-icons mi-inline">groups</span> Recruiters
-    </a>
-    <a class="section-nav-chip" href="#sec-sources" @click.prevent="scrollToSection('sec-sources')">
+    <a class="section-nav-chip" href="#sec-analytics" @click.prevent="setAnalyticsView('source'); scrollToSection('sec-analytics')">
       <span class="material-icons mi-inline">trending_up</span> Sources
     </a>
     <a class="section-nav-chip" href="#sec-jobs" @click.prevent="scrollToSection('sec-jobs')">
       <span class="material-icons mi-inline">work</span> Jobs
       <span class="section-nav-count" x-text="jobs.length" x-show="jobs.length > 0"></span>
     </a>
-    <a class="section-nav-chip" href="#sec-activity" @click.prevent="scrollToSection('sec-activity')">
+    <a class="section-nav-chip" href="#"
+      @click.prevent="openActivityPanel()">
       <span class="material-icons mi-inline">history</span> Activity
     </a>
     <a class="section-nav-chip" href="#sec-analytics" @click.prevent="scrollToSection('sec-analytics')">
@@ -214,132 +253,12 @@
   <!-- ── Main content column ────────────────────────────── -->
   <main class="page-content">
 
-    <!-- ── Global Filter Bar ───────────────────────────── -->
-    <div class="card filter-card">
-      <div class="filter-row">
-
-        <div class="filter-group">
-          <label>Period</label>
-          <select x-model="filters.preset" @change="onPresetChange()">
-            <option value="7d">Last 7 Days</option>
-            <option value="30d">Last 30 Days</option>
-            <option value="90d">Last 90 Days</option>
-            <option value="6m">Last 6 Months</option>
-            <option value="1y">Last Year</option>
-            <option value="all">All Time</option>
-            <option value="custom">Custom range&hellip;</option>
-          </select>
-          <!--
-            Custom date inputs slot in directly under the preset dropdown
-            when the user picks "Custom range…". They share the filter-group
-            so the visual relationship is obvious; the .custom-date-row
-            CSS arranges them side-by-side and full-width in the parent.
-          -->
-          <template x-if="filters.preset === 'custom'">
-            <div class="custom-date-row">
-              <input type="date" class="custom-date-input"
-                x-model="filters.startDate"
-                @change="onCustomDateChange()"
-                aria-label="From date">
-              <span class="custom-date-sep">&ndash;</span>
-              <input type="date" class="custom-date-input"
-                x-model="filters.endDate"
-                @change="onCustomDateChange()"
-                aria-label="To date">
-            </div>
-          </template>
-        </div>
-
-        <div class="filter-group">
-          <label>Job Opening</label>
-          <select x-model="filters.jobId" @change="applyFilters()">
-            <option value="">All Jobs</option>
-            <option value="__unassigned__">— Unassigned —</option>
-            <template x-for="j in jobs" :key="j.id">
-              <option :value="j.id" x-text="j.title"></option>
-            </template>
-          </select>
-        </div>
-
-        <div class="filter-group">
-          <label>Source</label>
-          <select x-model="filters.sourceId" @change="applyFilters()">
-            <option value="">All</option>
-            <option value="__unassigned__">— Unassigned —</option>
-            <template x-for="s in settings.sources.filter(x => x.is_enabled)" :key="s.id">
-              <option :value="s.id" x-text="s.name"></option>
-            </template>
-          </select>
-        </div>
-
-        <div class="filter-group">
-          <label>Motion</label>
-          <select x-model="filters.motion" @change="applyFilters()">
-            <option value="">All</option>
-            <option value="__unassigned__">— Unassigned —</option>
-            <option value="Inbound">Inbound</option>
-            <option value="Outbound">Outbound</option>
-          </select>
-        </div>
-
-        <div class="filter-group">
-          <label>Region</label>
-          <select x-model="filters.regionId" @change="applyFilters()">
-            <option value="">All</option>
-            <option value="__unassigned__">— Unassigned —</option>
-            <template x-for="r in settings.regions.filter(x => x.is_enabled)" :key="r.id">
-              <option :value="r.id" x-text="r.name"></option>
-            </template>
-          </select>
-        </div>
-
-        <div class="filter-group">
-          <label>Recruiter</label>
-          <select x-model="filters.recruiterId" @change="applyFilters()">
-            <option value="">All</option>
-            <option value="__assigned__">— Assigned —</option>
-            <option value="__unassigned__">— Unassigned —</option>
-            <template x-for="r in settings.recruiters.filter(x => x.is_active)" :key="r.id">
-              <option :value="r.id" x-text="r.name"></option>
-            </template>
-          </select>
-        </div>
-
-        <div class="filter-group">
-          <label>Status</label>
-          <select x-model="filters.status" @change="applyFilters()">
-            <option value="">All</option>
-            <option value="Active">Active</option>
-            <option value="Hired">Hired</option>
-            <option value="Rejected">Rejected</option>
-          </select>
-        </div>
-
-        <div class="filter-group filter-search">
-          <label>Search</label>
-          <!--
-            Debounced model binding so `filteredCandidates` (a computed
-            getter that scans every candidate on every dependency change)
-            doesn't recompute per keystroke. The @input.debounce on
-            applyFilters covered the server-side reload but x-model still
-            wrote synchronously, so typing "janice" was triggering 6
-            client-side re-filters of the whole list. 200ms feels instant
-            to a typist and collapses bursts to a single recompute.
-          -->
-          <input type="text" x-model.debounce.200ms="filters.search"
-            @input.debounce.300ms="applyFilters()"
-            placeholder="Name, email…">
-        </div>
-
-        <div class="filter-actions">
-          <!-- Export moved to the topbar (icon-only) since it's used <1x/week. -->
-          <button class="btn btn-sm btn-outline-secondary"
-            @click="resetFilters()">Reset</button>
-          <span class="section-loading-pip" x-show="globalAnalyticsLoading"
-            title="Applying global filters…" aria-hidden="true"></span>
-        </div>
-      </div>
-    </div>
+    <!--
+      Global filter bar was removed in the Apr 2026 redesign in favor of
+      per-section filters that own their own scope end-to-end. Search
+      moved to the topbar as a navigator (click a result → peek panel),
+      so the page content now starts directly with the Funnel.
+    -->
 
     <!--
       ── Pipeline Funnel — primary work surface ─────────────────────
@@ -368,44 +287,178 @@
           <span class="card-title">
             <span class="material-icons mi-inline">filter_list</span>
             Pipeline Funnel
-            <template x-if="!showFunnel && funnelTotalActive() > 0">
-              <span class="section-badge" x-text="funnelTotalActive() + ' active'"></span>
+            <span class="section-title-hint">where everyone is right now</span>
+            <template x-if="!showFunnel && funnelTotalEverywhere() > 0">
+              <span class="section-badge"
+                    :title="funnelTotalActive() + ' active or hired, plus ' + Math.max(0, funnelTotalEverywhere() - funnelTotalActive()) + ' rejected'"
+                    x-text="funnelTotalEverywhere() + ' candidates'"></span>
             </template>
           </span>
           <span class="material-icons collapse-icon" x-text="showFunnel ? 'expand_less' : 'expand_more'"></span>
         </div>
         <div class="section-filters" x-show="showFunnel" @click.stop>
-          <select class="section-filter" x-model="funnelFilters.jobId">
-            <option value="">Job (global)</option>
-            <option value="__unassigned__">— Unassigned —</option>
-            <template x-for="j in jobs" :key="j.id">
-              <option :value="j.id" x-text="j.title"></option>
-            </template>
-          </select>
-          <select class="section-filter" x-model="funnelFilters.sourceId">
-            <option value="">Source (global)</option>
-            <option value="__unassigned__">— Unassigned —</option>
-            <template x-for="s in settings.sources.filter(x => x.is_enabled)" :key="s.id">
-              <option :value="s.id" x-text="s.name"></option>
-            </template>
-          </select>
-          <select class="section-filter" x-model="funnelFilters.recruiterId">
-            <option value="">Recruiter (global)</option>
-            <option value="__assigned__">— Assigned —</option>
-            <option value="__unassigned__">— Unassigned —</option>
-            <template x-for="r in settings.recruiters.filter(x => x.is_active)" :key="r.id">
-              <option :value="r.id" x-text="r.name"></option>
-            </template>
-          </select>
+          <div class="mselect" x-data="mselect({
+              label: 'Job', allowUnassigned: true,
+              options: () => jobs,
+              get: () => funnelFilters.jobIds,
+              set: (v) => { funnelFilters.jobIds = v; }
+            })">
+            <button type="button" class="mselect-trigger"
+                    :class="{ 'is-active': selected().length > 0, 'is-open': open }"
+                    @click="toggleOpen()">
+              <span class="mselect-label" x-text="label"></span>
+              <span class="mselect-value" x-text="triggerText()"></span>
+              <span class="material-icons mselect-chevron">expand_more</span>
+            </button>
+            <div class="mselect-popover" x-show="open" @click.outside="open = false" x-transition x-cloak>
+              <input x-ref="mselectSearch" class="mselect-search" x-model="query"
+                     placeholder="Search jobs…"
+                     @keydown.escape="open = false">
+              <div class="mselect-actions">
+                <button type="button" class="mselect-action-btn" @click="clearAll()" x-show="selected().length > 0">Clear all</button>
+                <span class="mselect-hint" x-show="selected().length === 0">No filter — showing all</span>
+              </div>
+              <div class="mselect-list">
+                <template x-for="opt in visibleOptions()" :key="opt.id">
+                  <label class="mselect-option">
+                    <input type="checkbox" :checked="isChecked(opt.id)" @change="toggle(opt.id)">
+                    <span :class="{ 'sentinel': opt.italic }" x-text="opt.name"></span>
+                  </label>
+                </template>
+                <template x-if="visibleOptions().length === 0">
+                  <div class="mselect-empty">No matches</div>
+                </template>
+              </div>
+            </div>
+          </div>
+
+          <div class="mselect" x-data="mselect({
+              label: 'Source', allowUnassigned: true,
+              options: () => settings.sources.filter(x => x.is_enabled),
+              get: () => funnelFilters.sourceIds,
+              set: (v) => { funnelFilters.sourceIds = v; }
+            })">
+            <button type="button" class="mselect-trigger"
+                    :class="{ 'is-active': selected().length > 0, 'is-open': open }"
+                    @click="toggleOpen()">
+              <span class="mselect-label" x-text="label"></span>
+              <span class="mselect-value" x-text="triggerText()"></span>
+              <span class="material-icons mselect-chevron">expand_more</span>
+            </button>
+            <div class="mselect-popover" x-show="open" @click.outside="open = false" x-transition x-cloak>
+              <input x-ref="mselectSearch" class="mselect-search" x-model="query" placeholder="Search sources…" @keydown.escape="open = false">
+              <div class="mselect-actions">
+                <button type="button" class="mselect-action-btn" @click="clearAll()" x-show="selected().length > 0">Clear all</button>
+                <span class="mselect-hint" x-show="selected().length === 0">No filter — showing all</span>
+              </div>
+              <div class="mselect-list">
+                <template x-for="opt in visibleOptions()" :key="opt.id">
+                  <label class="mselect-option">
+                    <input type="checkbox" :checked="isChecked(opt.id)" @change="toggle(opt.id)">
+                    <span :class="{ 'sentinel': opt.italic }" x-text="opt.name"></span>
+                  </label>
+                </template>
+              </div>
+            </div>
+          </div>
+
+          <div class="mselect" x-data="mselect({
+              label: 'Recruiter', allowUnassigned: true, allowAssigned: true,
+              options: () => settings.recruiters.filter(x => x.is_active),
+              get: () => funnelFilters.recruiterIds,
+              set: (v) => { funnelFilters.recruiterIds = v; }
+            })">
+            <button type="button" class="mselect-trigger"
+                    :class="{ 'is-active': selected().length > 0, 'is-open': open }"
+                    @click="toggleOpen()">
+              <span class="mselect-label" x-text="label"></span>
+              <span class="mselect-value" x-text="triggerText()"></span>
+              <span class="material-icons mselect-chevron">expand_more</span>
+            </button>
+            <div class="mselect-popover" x-show="open" @click.outside="open = false" x-transition x-cloak>
+              <input x-ref="mselectSearch" class="mselect-search" x-model="query" placeholder="Search recruiters…" @keydown.escape="open = false">
+              <div class="mselect-actions">
+                <button type="button" class="mselect-action-btn" @click="clearAll()" x-show="selected().length > 0">Clear all</button>
+                <span class="mselect-hint" x-show="selected().length === 0">No filter — showing all</span>
+              </div>
+              <div class="mselect-list">
+                <template x-for="opt in visibleOptions()" :key="opt.id">
+                  <label class="mselect-option">
+                    <input type="checkbox" :checked="isChecked(opt.id)" @change="toggle(opt.id)">
+                    <span :class="{ 'sentinel': opt.italic }" x-text="opt.name"></span>
+                  </label>
+                </template>
+              </div>
+            </div>
+          </div>
+
+          <div class="mselect" x-data="mselect({
+              label: 'Motion', allowUnassigned: true, searchable: false,
+              options: () => [{id:'Inbound',name:'Inbound'},{id:'Outbound',name:'Outbound'}],
+              get: () => funnelFilters.motions,
+              set: (v) => { funnelFilters.motions = v; }
+            })">
+            <button type="button" class="mselect-trigger"
+                    :class="{ 'is-active': selected().length > 0, 'is-open': open }"
+                    @click="toggleOpen()">
+              <span class="mselect-label" x-text="label"></span>
+              <span class="mselect-value" x-text="triggerText()"></span>
+              <span class="material-icons mselect-chevron">expand_more</span>
+            </button>
+            <div class="mselect-popover" x-show="open" @click.outside="open = false" x-transition x-cloak>
+              <div class="mselect-actions">
+                <button type="button" class="mselect-action-btn" @click="clearAll()" x-show="selected().length > 0">Clear all</button>
+                <span class="mselect-hint" x-show="selected().length === 0">No filter — showing all</span>
+              </div>
+              <div class="mselect-list">
+                <template x-for="opt in visibleOptions()" :key="opt.id">
+                  <label class="mselect-option">
+                    <input type="checkbox" :checked="isChecked(opt.id)" @change="toggle(opt.id)">
+                    <span :class="{ 'sentinel': opt.italic }" x-text="opt.name"></span>
+                  </label>
+                </template>
+              </div>
+            </div>
+          </div>
+
+          <div class="mselect" x-data="mselect({
+              label: 'Region', allowUnassigned: true,
+              options: () => settings.regions.filter(x => x.is_enabled),
+              get: () => funnelFilters.regionIds,
+              set: (v) => { funnelFilters.regionIds = v; }
+            })">
+            <button type="button" class="mselect-trigger"
+                    :class="{ 'is-active': selected().length > 0, 'is-open': open }"
+                    @click="toggleOpen()">
+              <span class="mselect-label" x-text="label"></span>
+              <span class="mselect-value" x-text="triggerText()"></span>
+              <span class="material-icons mselect-chevron">expand_more</span>
+            </button>
+            <div class="mselect-popover" x-show="open" @click.outside="open = false" x-transition x-cloak>
+              <input x-ref="mselectSearch" class="mselect-search" x-model="query" placeholder="Search regions…" @keydown.escape="open = false">
+              <div class="mselect-actions">
+                <button type="button" class="mselect-action-btn" @click="clearAll()" x-show="selected().length > 0">Clear all</button>
+                <span class="mselect-hint" x-show="selected().length === 0">No filter — showing all</span>
+              </div>
+              <div class="mselect-list">
+                <template x-for="opt in visibleOptions()" :key="opt.id">
+                  <label class="mselect-option">
+                    <input type="checkbox" :checked="isChecked(opt.id)" @change="toggle(opt.id)">
+                    <span :class="{ 'sentinel': opt.italic }" x-text="opt.name"></span>
+                  </label>
+                </template>
+              </div>
+            </div>
+          </div>
+
           <select class="section-filter" x-model="funnelFilters.preset"
                   @change="onSectionPresetChange('funnel')">
-            <option value="">Period (global)</option>
+            <option value="all">All Time</option>
             <option value="7d">Last 7 Days</option>
             <option value="30d">Last 30 Days</option>
             <option value="90d">Last 90 Days</option>
             <option value="6m">Last 6 Months</option>
             <option value="1y">Last Year</option>
-            <option value="all">All Time</option>
             <option value="custom">Custom range&hellip;</option>
           </select>
           <template x-if="funnelFilters.preset === 'custom'">
@@ -421,15 +474,9 @@
                 aria-label="To date">
             </span>
           </template>
-          <button class="xdr-scope-chip"
-                  :class="{ active: funnelFilters.xdrOnly }"
-                  @click.stop="funnelFilters.xdrOnly = !funnelFilters.xdrOnly"
-                  title="Filter to xDR roles and show conversion benchmarks">
-            xDR
-          </button>
           <button class="icon-btn-sm section-filter-reset"
                   @click="resetSectionFilters('funnel')"
-                  title="Reset section filters to global defaults">×</button>
+                  title="Reset funnel filters">×</button>
         </div>
       </div>
 
@@ -476,9 +523,22 @@
           <div class="funnel-list">
             <template x-for="stage in pipelineFunnelData" :key="stage.stage_id">
               <div class="funnel-stage"
-                   :class="{ 'expanded': expandedStages.includes(stage.stage_id), 'rejected-bucket': stage.is_rejected_bucket }">
+                   :class="{
+                     'expanded': expandedStages.includes(stage.stage_id),
+                     'rejected-bucket': stage.is_rejected_bucket,
+                     'orphan-stage': stage.is_orphan
+                   }">
                 <div class="funnel-row" @click="toggleFunnelStage(stage.stage_id)">
-                  <div class="funnel-stage-name" x-text="stage.stage_name"></div>
+                  <div class="funnel-stage-name">
+                    <template x-if="stage.is_orphan">
+                      <span class="material-icons orphan-warn-icon"
+                            :title="stage.orphan_reason">warning_amber</span>
+                    </template>
+                    <span x-text="stage.stage_name"></span>
+                    <template x-if="stage.is_orphan">
+                      <span class="orphan-badge" :title="stage.orphan_reason">needs attention</span>
+                    </template>
+                  </div>
                   <!--
                     Count moved out of the bar into its own column. Old design
                     had a dark-pill badge sitting on top of the colored bar
@@ -494,22 +554,24 @@
                     <div class="funnel-bar"
                          :style="`width: ${funnelBarWidth(stage)}%; background: ${stage.stage_color || 'var(--primary)'};`"></div>
                   </div>
-                  <div class="funnel-stage-pct"
-                       :class="{ zero: stage.candidate_count === 0 }"
-                       x-text="funnelBarWidth(stage) + '%'"></div>
-                  <!-- Descriptive "share of previous stage's headcount".
-                       NOT a conversion rate (snapshot numbers, not a cohort).
-                       For real conversion vs. benchmark, see the Waterfall
-                       Report below. -->
-                  <div class="funnel-stage-conv"
-                       :class="{ 'conv-none': stage.step_pct === null }"
-                       title="Share of previous stage's current headcount. For conversion rates vs. xDR benchmarks, see the Waterfall Report."
-                       x-text="stage.step_pct !== null ? '↓ ' + stage.step_pct + '%' : '—'"></div>
                   <span class="material-icons funnel-chevron"
                         x-text="expandedStages.includes(stage.stage_id) ? 'expand_less' : 'chevron_right'"></span>
                 </div>
                 <template x-if="expandedStages.includes(stage.stage_id)">
                   <div class="funnel-stage-candidates">
+                    <!-- Orphan-stage explainer: why these candidates are in a
+                         disabled/unknown stage, and what the user can do about
+                         it. Pinned to the top of the drilldown so the next
+                         thing the user sees after expanding is "here's why
+                         + here's how to fix." -->
+                    <template x-if="stage.is_orphan">
+                      <div class="orphan-explainer">
+                        <span class="material-icons mi-inline">info</span>
+                        <span x-text="stage.orphan_reason"></span>
+                        <button class="btn btn-sm btn-link orphan-settings-link"
+                                @click.stop="openSettings()">Open Pipeline Stages &rsaquo;</button>
+                      </div>
+                    </template>
                     <!--
                       Bulk-select header. Appears as soon as a stage is
                       expanded so the "select all in this stage" checkbox
@@ -602,8 +664,15 @@
                 </template>
               </div>
             </template>
-            <div class="funnel-footer"
-                 x-text="funnelTotalActive() + ' total active candidates across ' + pipelineFunnelData.length + ' stages'"></div>
+            <div class="funnel-footer">
+              <!-- Total is mathematically the sum of the rendered rows —
+                   including any "disabled-stage" orphan rows that surface
+                   candidates who'd otherwise be invisible. No separate
+                   "N with missing pipeline stage" footer anymore; the
+                   orphan rows themselves carry a warning badge and are
+                   directly clickable to drill into their candidates. -->
+              <span x-text="funnelTotalEverywhere() + ' total candidate' + (funnelTotalEverywhere() === 1 ? '' : 's') + ' across ' + pipelineFunnelData.length + ' stages'"></span>
+            </div>
           </div>
         </template>
       </div>
@@ -728,302 +797,828 @@
           <span class="card-title">
             <span class="material-icons mi-inline">waterfall_chart</span>
             Waterfall Report
-            <span class="section-title-hint">cohort — by applied-in-window</span>
+            <!--
+              Subtle "Updating…" pip during any in-flight refetch so the
+              user has feedback that a filter change is still processing,
+              WITHOUT blanking the table beneath it. Only shown when
+              waterfallRevalidating is true AND there's already data to
+              keep visible (first-load shows the "Loading…" text below).
+            -->
+            <span class="section-loading-pip"
+                  x-show="waterfallRevalidating && waterfallData"
+                  title="Refreshing\u2026" aria-hidden="true"></span>
+            <span class="section-title-hint">where applicants ended up (cohort flow)</span>
             <template x-if="!showWaterfall && waterfallData">
               <span class="section-badge" x-text="waterfallData.cohortSize + ' in cohort'"></span>
             </template>
           </span>
           <span class="material-icons collapse-icon" x-text="showWaterfall ? 'expand_less' : 'expand_more'"></span>
         </div>
-        <div class="section-filters" x-show="showWaterfall" @click.stop>
-          <!-- Date range: anchored default of 'since Apr 1, 2026' per the
-               Apr 23 discussion with Janice. User can override. -->
-          <span class="section-date-label">From</span>
-          <input type="date" class="section-filter section-date" x-model="waterfallFilters.startDate"
-                 @change="reloadWaterfall()" aria-label="Cohort start date">
-          <span class="section-date-label">to</span>
-          <input type="date" class="section-filter section-date" x-model="waterfallFilters.endDate"
-                 @change="reloadWaterfall()" aria-label="Cohort end date">
-
-          <select class="section-filter" x-model="waterfallFilters.jobId"
-                  @change="reloadWaterfall()">
-            <option value="">All Jobs</option>
-            <option value="__unassigned__">— Unassigned —</option>
-            <template x-for="j in jobs" :key="j.id">
-              <option :value="j.id" x-text="j.title"></option>
-            </template>
-          </select>
-          <select class="section-filter" x-model="waterfallFilters.recruiterId"
-                  @change="reloadWaterfall()">
-            <option value="">All Recruiters</option>
-            <option value="__assigned__">— Assigned —</option>
-            <option value="__unassigned__">— Unassigned —</option>
-            <template x-for="r in settings.recruiters.filter(x => x.is_active)" :key="r.id">
-              <option :value="r.id" x-text="r.name"></option>
-            </template>
-          </select>
-          <select class="section-filter" x-model="waterfallFilters.sourceId"
-                  @change="reloadWaterfall()">
-            <option value="">All Sources</option>
-            <option value="__unassigned__">— Unassigned —</option>
-            <template x-for="s in settings.sources.filter(x => x.is_enabled)" :key="s.id">
-              <option :value="s.id" x-text="s.name"></option>
-            </template>
-          </select>
-          <button class="xdr-scope-chip"
-                  :class="{ active: waterfallFilters.xdrOnly }"
-                  @click.stop="waterfallFilters.xdrOnly = !waterfallFilters.xdrOnly; reloadWaterfall()"
-                  title="Filter to xDR roles — shows benchmarks with this on">
-            xDR
-          </button>
-          <button class="icon-btn-sm section-filter-reset"
-                  @click.stop="resetWaterfallFilters()"
-                  title="Reset cohort filters">×</button>
-        </div>
-      </div>
-
-      <div class="card-body" x-show="showWaterfall">
-        <!-- Cohort summary header -->
-        <div class="waterfall-cohort-header">
-          <template x-if="waterfallLoading">
-            <span class="text-muted">Computing cohort…</span>
-          </template>
-          <template x-if="!waterfallLoading && waterfallData">
-            <div>
-              <strong><span x-text="waterfallData.cohortSize"></span></strong>
-              <span class="text-muted"> candidates applied </span>
-              <span x-text="formatDateShort(waterfallFilters.startDate)"></span>
-              <span class="text-muted"> – </span>
-              <span x-text="formatDateShort(waterfallFilters.endDate) || 'today'"></span>
-              <template x-if="waterfallFilters.xdrOnly">
-                <span class="text-muted"> (xDR roles only)</span>
-              </template>
-              <template x-if="!waterfallData.benchmarksValid">
-                <span class="bench-disclaimer"
-                      title="xDR benchmarks assume the default 8-stage sequence. Your current stage configuration has a different shape, so benchmark chips are hidden. Step % is still computed.">
-                  (benchmarks disabled — stage config mismatch)
-                </span>
-              </template>
-            </div>
-          </template>
-        </div>
-
-        <!-- Waterfall rows -->
-        <template x-if="!waterfallLoading && waterfallData && waterfallData.cohortSize === 0">
-          <div class="empty-state-mini">
-            No candidates applied in this window. Try widening the dates or clearing scope filters.
-          </div>
-        </template>
-
-        <template x-if="!waterfallLoading && waterfallData && waterfallData.cohortSize > 0">
-          <div class="waterfall-list">
-            <template x-for="row in waterfallData.rows" :key="row.stage_id">
-              <div class="waterfall-row">
-                <div class="waterfall-stage-name" x-text="row.stage_name"></div>
-                <div class="waterfall-count" x-text="row.count"></div>
-                <div class="waterfall-bar-track">
-                  <div class="waterfall-bar"
-                       :style="`width: ${waterfallBarWidth(row)}%; background: ${row.stage_color || 'var(--primary)'};`"></div>
-                </div>
-                <div class="waterfall-step-pct"
-                     :class="{ muted: row.step_pct === null }"
-                     x-text="row.step_pct !== null ? row.step_pct + '%' : '—'"></div>
-                <div class="waterfall-bench-chip"
-                     :class="{
-                        'bench-above': row.bench_pct !== null && row.step_pct !== null && row.step_pct > row.bench_pct,
-                        'bench-match': row.bench_pct !== null && row.step_pct !== null && row.step_pct === row.bench_pct,
-                        'bench-below': row.bench_pct !== null && row.step_pct !== null && row.step_pct < row.bench_pct,
-                        'bench-none':  row.bench_pct === null
-                      }"
-                     :title="row.bench_pct !== null ? 'xDR benchmark: ' + row.bench_pct + '%' : 'No benchmark for this row'"
-                     x-html="waterfallBenchDisplay(row)"></div>
+        <!-- Filter row: Job + Period only. Strict cohort semantics mean
+             changing the period only counts candidates who ENTERED during
+             that window (rollover-safe). Default period = All Time. -->
+        <div class="section-filters waterfall-filter-row" x-show="showWaterfall" @click.stop>
+          <div class="mselect" x-data="mselect({
+              label: 'Job', allowUnassigned: true,
+              options: () => jobs,
+              get: () => waterfallFilters.jobIds,
+              set: (v) => { waterfallFilters.jobIds = v; reloadWaterfall(); }
+            })">
+            <button type="button" class="mselect-trigger"
+                    :class="{ 'is-active': selected().length > 0, 'is-open': open }"
+                    @click="toggleOpen()">
+              <span class="mselect-label" x-text="label"></span>
+              <span class="mselect-value" x-text="triggerText()"></span>
+              <span class="material-icons mselect-chevron">expand_more</span>
+            </button>
+            <div class="mselect-popover" x-show="open" @click.outside="open = false" x-transition x-cloak>
+              <input x-ref="mselectSearch" class="mselect-search" x-model="query" placeholder="Search jobs…" @keydown.escape="open = false">
+              <div class="mselect-actions">
+                <button type="button" class="mselect-action-btn" @click="clearAll()" x-show="selected().length > 0">Clear all</button>
+                <span class="mselect-hint" x-show="selected().length === 0">No filter — showing all</span>
               </div>
-            </template>
+              <div class="mselect-list">
+                <template x-for="opt in visibleOptions()" :key="opt.id">
+                  <label class="mselect-option">
+                    <input type="checkbox" :checked="isChecked(opt.id)" @change="toggle(opt.id)">
+                    <span :class="{ 'sentinel': opt.italic }" x-text="opt.name"></span>
+                  </label>
+                </template>
+              </div>
+            </div>
           </div>
-        </template>
-      </div>
-    </div>
 
-    <!--
-      ── Recruiter Performance ─────────────────────────────────────
-      Promoted out of the collapsible Analytics card to the primary view.
-      Shows the entire active team (including recruiters with empty queues)
-      so an idle teammate is its own actionable signal.
-
-      Click a recruiter row → scopes the Pipeline Funnel section above to
-      that recruiter and auto-expands every stage so their pipeline
-      distribution is immediately visible.
-
-      The "Hires period" section filter scopes only the Hires column
-      independently of the rest of the table — recruiters care about
-      "this month's hires" while their queue/rejection numbers usually
-      span a wider window.
-    -->
-    <div class="card section-card recruiter-perf-card" id="sec-recruiters">
-      <div class="card-header section-card-header">
-        <div class="section-card-header-row clickable" @click="showRecruiters = !showRecruiters">
-          <span class="card-title">
-            <span class="material-icons mi-inline">groups</span>
-            Recruiter Performance
-            <span class="section-loading-pip" x-show="recruiterLoading"
-                  title="Refreshing…" aria-hidden="true"></span>
-            <template x-if="!showRecruiters && recruiterPerformance.length > 0">
-              <span class="section-badge" x-text="recruiterPerformance.length + ' recruiter' + (recruiterPerformance.length === 1 ? '' : 's')"></span>
-            </template>
-          </span>
-          <span class="material-icons collapse-icon" x-text="showRecruiters ? 'expand_less' : 'expand_more'"></span>
-        </div>
-        <div class="section-filters" x-show="showRecruiters" @click.stop>
-          <select class="section-filter" x-model="recruiterFilters.jobId"
-                  @change="reloadRecruiterPerf()">
-            <option value="">Job (global)</option>
-            <option value="__unassigned__">— Unassigned —</option>
-            <template x-for="j in jobs" :key="j.id">
-              <option :value="j.id" x-text="j.title"></option>
-            </template>
-          </select>
-          <select class="section-filter" x-model="recruiterFilters.sourceId"
-                  @change="reloadRecruiterPerf()">
-            <option value="">Source (global)</option>
-            <option value="__unassigned__">— Unassigned —</option>
-            <template x-for="s in settings.sources.filter(x => x.is_enabled)" :key="s.id">
-              <option :value="s.id" x-text="s.name"></option>
-            </template>
-          </select>
-          <select class="section-filter" x-model="recruiterFilters.hiresPreset"
-                  @change="onSectionPresetChange('recruiterHires'); reloadRecruiterPerf()"
-                  title="Date window for the Hires column only">
-            <option value="">Hires period (global)</option>
-            <option value="7d">Hires: Last 7 Days</option>
-            <option value="30d">Hires: Last 30 Days</option>
-            <option value="90d">Hires: Last 90 Days</option>
-            <option value="6m">Hires: Last 6 Months</option>
-            <option value="1y">Hires: Last Year</option>
-            <option value="all">Hires: All Time</option>
-            <option value="custom">Hires: Custom range&hellip;</option>
-          </select>
-          <template x-if="recruiterFilters.hiresPreset === 'custom'">
-            <span class="section-custom-date-row">
-              <input type="date" class="section-custom-date-input"
-                x-model="recruiterFilters.hiresStartDate"
-                @change="onSectionCustomDateChange('recruiterHires')"
-                aria-label="Hires from date">
-              <span class="section-custom-date-sep">&ndash;</span>
-              <input type="date" class="section-custom-date-input"
-                x-model="recruiterFilters.hiresEndDate"
-                @change="onSectionCustomDateChange('recruiterHires')"
-                aria-label="Hires to date">
-            </span>
-          </template>
-          <button class="icon-btn-sm section-filter-reset"
-                  @click="resetSectionFilters('recruiter')"
-                  title="Reset section filters to global defaults">×</button>
-        </div>
-      </div>
-
-      <div class="card-body p-0" x-show="showRecruiters">
-        <template x-if="recruiterScopeLabel()">
-          <div class="scope-banner">
-            <span class="material-icons mi-inline">filter_alt</span>
-            <span>Scoped to: <strong x-text="recruiterScopeLabel()"></strong></span>
-            <button class="scope-banner-clear" @click="resetSectionFilters('recruiter')">Clear scope</button>
+          <div class="mselect" x-data="mselect({
+              label: 'Source', allowUnassigned: true,
+              options: () => settings.sources.filter(x => x.is_enabled),
+              get: () => waterfallFilters.sourceIds,
+              set: (v) => { waterfallFilters.sourceIds = v; reloadWaterfall(); }
+            })">
+            <button type="button" class="mselect-trigger"
+                    :class="{ 'is-active': selected().length > 0, 'is-open': open }"
+                    @click="toggleOpen()">
+              <span class="mselect-label" x-text="label"></span>
+              <span class="mselect-value" x-text="triggerText()"></span>
+              <span class="material-icons mselect-chevron">expand_more</span>
+            </button>
+            <div class="mselect-popover" x-show="open" @click.outside="open = false" x-transition x-cloak>
+              <input x-ref="mselectSearch" class="mselect-search" x-model="query" placeholder="Search sources…" @keydown.escape="open = false">
+              <div class="mselect-actions">
+                <button type="button" class="mselect-action-btn" @click="clearAll()" x-show="selected().length > 0">Clear all</button>
+                <span class="mselect-hint" x-show="selected().length === 0">No filter — showing all</span>
+              </div>
+              <div class="mselect-list">
+                <template x-for="opt in visibleOptions()" :key="opt.id">
+                  <label class="mselect-option">
+                    <input type="checkbox" :checked="isChecked(opt.id)" @change="toggle(opt.id)">
+                    <span :class="{ 'sentinel': opt.italic }" x-text="opt.name"></span>
+                  </label>
+                </template>
+              </div>
+            </div>
           </div>
-        </template>
-        <table class="data-table recruiter-perf-table">
-          <thead>
-            <tr>
-              <th>Recruiter</th>
-              <th class="num">Queue</th>
-              <th class="num">
-                Hires<template x-if="recruiterFilters.hiresPreset"><span class="th-sub" x-text="' (' + recruiterFilters.hiresPreset + ')'"></span></template>
-              </th>
-              <th class="num">Rejections</th>
-              <th class="num">Total</th>
-              <th class="num">Avg Days</th>
-            </tr>
-          </thead>
-          <tbody>
-            <template x-for="r in recruiterPerformance" :key="r.recruiter_id">
-              <tr class="clickable"
-                  @click="filterFunnelByRecruiter(r.recruiter_id)"
-                  :title="'Filter funnel above to show only ' + r.recruiter_name + '\'s candidates'">
-                <td>
-                  <span class="recruiter-avatar" x-text="initials(r.recruiter_name)"></span>
-                  <span class="recruiter-name" x-text="r.recruiter_name"></span>
-                </td>
-                <td class="num">
-                  <span class="metric-strong" x-text="r.queue"></span>
-                </td>
-                <td class="num">
-                  <span class="metric-strong" x-text="r.hires_in_period"></span>
-                  <template x-if="r.hires !== r.hires_in_period">
-                    <span class="metric-secondary" x-text="' / ' + r.hires"></span>
-                  </template>
-                </td>
-                <td class="num" x-text="r.rejections"></td>
-                <td class="num" x-text="r.total_candidates"></td>
-                <td class="num" x-text="r.avg_days_to_hire || '—'"></td>
-              </tr>
-            </template>
-            <template x-if="recruiterPerformance.length === 0 && !loading">
-              <tr><td colspan="6" class="empty-state-row">
-                No active recruiters configured.
-                <button class="btn btn-sm btn-link" @click="openSettings()">Open Settings</button>
-                to add your team.
-              </td></tr>
-            </template>
-          </tbody>
-        </table>
-      </div>
-    </div>
 
-    <!--
-      ── Sourcing ROI ──────────────────────────────────────────────
-      Promoted from the collapsible Analytics card. Shows where hires
-      actually come from so recruiters can double down on the productive
-      sources and de-prioritize the dead ones.
-    -->
-    <div class="card section-card source-roi-card" id="sec-sources">
-      <div class="card-header section-card-header">
-        <div class="section-card-header-row clickable" @click="showSources = !showSources">
-          <span class="card-title">
-            <span class="material-icons mi-inline">trending_up</span>
-            Sourcing ROI
-            <span class="section-loading-pip" x-show="sourceLoading"
-                  title="Refreshing…" aria-hidden="true"></span>
-            <template x-if="!showSources && sourceEffectiveness.length > 0">
-              <span class="section-badge" x-text="sourceEffectiveness.length + ' source' + (sourceEffectiveness.length === 1 ? '' : 's')"></span>
-            </template>
-          </span>
-          <span class="material-icons collapse-icon" x-text="showSources ? 'expand_less' : 'expand_more'"></span>
-        </div>
-        <div class="section-filters" x-show="showSources" @click.stop>
-          <select class="section-filter" x-model="sourceFilters.jobId"
-                  @change="reloadSourceEffectiveness()">
-            <option value="">Job (global)</option>
-            <option value="__unassigned__">— Unassigned —</option>
-            <template x-for="j in jobs" :key="j.id">
-              <option :value="j.id" x-text="j.title"></option>
-            </template>
-          </select>
-          <select class="section-filter" x-model="sourceFilters.recruiterId"
-                  @change="reloadSourceEffectiveness()">
-            <option value="">Recruiter (global)</option>
-            <option value="__assigned__">— Assigned —</option>
-            <option value="__unassigned__">— Unassigned —</option>
-            <template x-for="r in settings.recruiters.filter(x => x.is_active)" :key="r.id">
-              <option :value="r.id" x-text="r.name"></option>
-            </template>
-          </select>
-          <select class="section-filter" x-model="sourceFilters.preset"
-                  @change="onSectionPresetChange('source'); reloadSourceEffectiveness()">
-            <option value="">Period (global)</option>
+          <div class="mselect" x-data="mselect({
+              label: 'Recruiter', allowUnassigned: true, allowAssigned: true,
+              options: () => settings.recruiters.filter(x => x.is_active),
+              get: () => waterfallFilters.recruiterIds,
+              set: (v) => { waterfallFilters.recruiterIds = v; reloadWaterfall(); }
+            })">
+            <button type="button" class="mselect-trigger"
+                    :class="{ 'is-active': selected().length > 0, 'is-open': open }"
+                    @click="toggleOpen()">
+              <span class="mselect-label" x-text="label"></span>
+              <span class="mselect-value" x-text="triggerText()"></span>
+              <span class="material-icons mselect-chevron">expand_more</span>
+            </button>
+            <div class="mselect-popover" x-show="open" @click.outside="open = false" x-transition x-cloak>
+              <input x-ref="mselectSearch" class="mselect-search" x-model="query" placeholder="Search recruiters…" @keydown.escape="open = false">
+              <div class="mselect-actions">
+                <button type="button" class="mselect-action-btn" @click="clearAll()" x-show="selected().length > 0">Clear all</button>
+                <span class="mselect-hint" x-show="selected().length === 0">No filter — showing all</span>
+              </div>
+              <div class="mselect-list">
+                <template x-for="opt in visibleOptions()" :key="opt.id">
+                  <label class="mselect-option">
+                    <input type="checkbox" :checked="isChecked(opt.id)" @change="toggle(opt.id)">
+                    <span :class="{ 'sentinel': opt.italic }" x-text="opt.name"></span>
+                  </label>
+                </template>
+              </div>
+            </div>
+          </div>
+
+          <div class="mselect" x-data="mselect({
+              label: 'Motion', allowUnassigned: true, searchable: false,
+              options: () => [{id:'Inbound',name:'Inbound'},{id:'Outbound',name:'Outbound'}],
+              get: () => waterfallFilters.motions,
+              set: (v) => { waterfallFilters.motions = v; reloadWaterfall(); }
+            })">
+            <button type="button" class="mselect-trigger"
+                    :class="{ 'is-active': selected().length > 0, 'is-open': open }"
+                    @click="toggleOpen()">
+              <span class="mselect-label" x-text="label"></span>
+              <span class="mselect-value" x-text="triggerText()"></span>
+              <span class="material-icons mselect-chevron">expand_more</span>
+            </button>
+            <div class="mselect-popover" x-show="open" @click.outside="open = false" x-transition x-cloak>
+              <div class="mselect-actions">
+                <button type="button" class="mselect-action-btn" @click="clearAll()" x-show="selected().length > 0">Clear all</button>
+                <span class="mselect-hint" x-show="selected().length === 0">No filter — showing all</span>
+              </div>
+              <div class="mselect-list">
+                <template x-for="opt in visibleOptions()" :key="opt.id">
+                  <label class="mselect-option">
+                    <input type="checkbox" :checked="isChecked(opt.id)" @change="toggle(opt.id)">
+                    <span :class="{ 'sentinel': opt.italic }" x-text="opt.name"></span>
+                  </label>
+                </template>
+              </div>
+            </div>
+          </div>
+
+          <div class="mselect" x-data="mselect({
+              label: 'Region', allowUnassigned: true,
+              options: () => settings.regions.filter(x => x.is_enabled),
+              get: () => waterfallFilters.regionIds,
+              set: (v) => { waterfallFilters.regionIds = v; reloadWaterfall(); }
+            })">
+            <button type="button" class="mselect-trigger"
+                    :class="{ 'is-active': selected().length > 0, 'is-open': open }"
+                    @click="toggleOpen()">
+              <span class="mselect-label" x-text="label"></span>
+              <span class="mselect-value" x-text="triggerText()"></span>
+              <span class="material-icons mselect-chevron">expand_more</span>
+            </button>
+            <div class="mselect-popover" x-show="open" @click.outside="open = false" x-transition x-cloak>
+              <input x-ref="mselectSearch" class="mselect-search" x-model="query" placeholder="Search regions…" @keydown.escape="open = false">
+              <div class="mselect-actions">
+                <button type="button" class="mselect-action-btn" @click="clearAll()" x-show="selected().length > 0">Clear all</button>
+                <span class="mselect-hint" x-show="selected().length === 0">No filter — showing all</span>
+              </div>
+              <div class="mselect-list">
+                <template x-for="opt in visibleOptions()" :key="opt.id">
+                  <label class="mselect-option">
+                    <input type="checkbox" :checked="isChecked(opt.id)" @change="toggle(opt.id)">
+                    <span :class="{ 'sentinel': opt.italic }" x-text="opt.name"></span>
+                  </label>
+                </template>
+              </div>
+            </div>
+          </div>
+
+          <select class="section-filter" x-model="waterfallFilters.preset"
+                  @change="onSectionPresetChange('waterfall')">
+            <option value="all">All Time</option>
             <option value="7d">Last 7 Days</option>
             <option value="30d">Last 30 Days</option>
             <option value="90d">Last 90 Days</option>
             <option value="6m">Last 6 Months</option>
             <option value="1y">Last Year</option>
+            <option value="custom">Custom range…</option>
+          </select>
+          <template x-if="waterfallFilters.preset === 'custom'">
+            <span class="section-custom-date-row">
+              <input type="date" class="section-custom-date-input" x-model="waterfallFilters.startDate"
+                     @change="reloadWaterfall()" aria-label="From date">
+              <span class="section-custom-date-sep">–</span>
+              <input type="date" class="section-custom-date-input" x-model="waterfallFilters.endDate"
+                     @change="reloadWaterfall()" aria-label="To date">
+            </span>
+          </template>
+          <div class="filter-spacer"></div>
+        </div>
+      </div>
+
+      <div class="card-body" x-show="showWaterfall">
+        <!-- Cohort summary: single clear line. Guarded fallbacks so the
+             literal word "undefined" never leaks during initial load. -->
+        <div class="waterfall-cohort-header">
+          <div class="waterfall-cohort-line">
+            <template x-if="waterfallLoading && !waterfallData">
+              <span class="text-muted">Loading…</span>
+            </template>
+            <template x-if="waterfallData">
+              <div class="cohort-summary">
+                <strong x-text="(waterfallData.cohortSize || 0)"></strong>
+                <span class="text-muted"> candidate<span x-show="(waterfallData.cohortSize || 0) !== 1">s</span> ·
+                  <template x-if="waterfallActiveJob()">
+                    <span><strong x-text="waterfallActiveJob().title"></strong> <span class="text-muted">·</span> </span>
+                  </template>
+                  <template x-if="!waterfallActiveJob()">
+                    <span><strong>All jobs</strong> <span class="text-muted">·</span> </span>
+                  </template>
+                  <span x-text="waterfallWindowLabel()"></span>
+                </span>
+                <!-- Transparency when a date window excludes candidates.
+                     Only appears when >0 candidates were dropped for missing
+                     date_applied, so the user understands why the total
+                     looks smaller than Pipeline Funnel's. -->
+                <template x-if="waterfallData.excludedNoDate > 0">
+                  <span class="waterfall-excluded-note"
+                        :title="waterfallData.excludedNoDate + ' candidates passed the scope filters but have no application date on file, so they can\'t be placed in this time window. Switch to All Time to include them.'">
+                    · <span x-text="waterfallData.excludedNoDate"></span>
+                    excluded (no application date)
+                  </span>
+                </template>
+              </div>
+            </template>
+          </div>
+        </div>
+
+        <!--
+          STALE-WHILE-REVALIDATE: these templates previously also checked
+          `!waterfallLoading`, which meant every filter change blanked the
+          entire table for the ~300-1500ms it took the RPC to return.
+          Dropping that guard lets the last-known data stay visible while
+          the new data is fetched; the "Refreshing…" pip in the header
+          tells the user something IS happening.
+        -->
+        <!-- Column headers. Plain English. Hover gives the long explanation. -->
+        <template x-if="waterfallData && waterfallData.cohortSize > 0">
+          <div class="waterfall-row waterfall-header-row">
+            <div class="col-stage">Stage</div>
+            <div class="col-total" title="Candidates in this cohort who reached this stage or beyond.">Count</div>
+            <div class="col-bar" title="Share of cohort — % of the whole cohort currently at or past this stage."></div>
+            <div class="col-converted" title="Step % = % that moved here from the previous stage.">Step %</div>
+            <div class="col-goal" title="Goal % = target Step % for this stage.">Goal %</div>
+          </div>
+        </template>
+
+        <!-- Empty state (no cohort) -->
+        <template x-if="waterfallData && waterfallData.cohortSize === 0 && !waterfallRevalidating">
+          <div class="empty-state-mini">
+            No candidates match the current filters.
+            <button class="btn-link" @click="resetWaterfallFilters()">Reset filters</button>
+            or pick a different job / period above.
+          </div>
+        </template>
+
+        <!-- Waterfall rows -->
+        <template x-if="waterfallData && waterfallData.cohortSize > 0">
+          <div class="waterfall-list">
+            <template x-for="row in waterfallData.rows" :key="row.stage_id">
+              <div class="waterfall-row-wrap">
+                <div class="waterfall-row clickable-row"
+                     :class="{ 'row-expanded': waterfallExpanded === row.stage_id }"
+                     @click="toggleWaterfallRow(row.stage_id)">
+                  <!-- STAGE -->
+                  <div class="col-stage waterfall-stage-name"
+                       x-text="row.stage_name || ''"
+                       :title="row.stage_name || ''"></div>
+
+                  <!-- TOTAL -->
+                  <div class="col-total">
+                    <span class="waterfall-count"
+                          x-text="row.count != null ? row.count : 0"></span>
+                  </div>
+
+                  <!-- BAR -->
+                  <div class="col-bar waterfall-bar-track">
+                    <div class="waterfall-bar"
+                         :style="`width: ${waterfallBarWidth(row)}%; background: ${row.stage_color || 'var(--primary)'};`"
+                         :title="waterfallBarWidth(row) + '% of cohort'"></div>
+                  </div>
+
+                  <!-- CONVERTED (% from prev) with arrow attached to the actual -->
+                  <div class="col-converted waterfall-converted"
+                       :class="{ muted: row.step_pct == null }"
+                       :title="waterfallStepTitle(row)">
+                    <template x-if="row.step_pct != null">
+                      <span>
+                        <span class="converted-arrow"
+                              :class="{
+                                'arrow-above': row.bench_pct != null && row.step_pct > row.bench_pct,
+                                'arrow-match': row.bench_pct != null && row.step_pct === row.bench_pct,
+                                'arrow-below': row.bench_pct != null && row.step_pct < row.bench_pct
+                              }"
+                              x-text="row.bench_pct == null
+                                ? ''
+                                : (row.step_pct > row.bench_pct ? '▲ '
+                                 : row.step_pct < row.bench_pct ? '▼ '
+                                 : '▬ ')"></span><span
+                              x-text="row.step_pct + '%'"></span>
+                      </span>
+                    </template>
+                    <template x-if="row.step_pct == null">
+                      <span>—</span>
+                    </template>
+                  </div>
+
+                  <!-- GOAL (plain text, click to edit) -->
+                  <div class="col-goal waterfall-goal"
+                       :class="{ muted: row.bench_pct == null }"
+                       :title="waterfallBenchTitle(row)"
+                       @click.stop="openBenchmarkEditor(row)"
+                       x-text="row.bench_pct != null ? row.bench_pct + '%' : '—'"></div>
+                </div>
+
+                <!-- Drilldown: candidates at or past this stage -->
+                <template x-if="waterfallExpanded === row.stage_id && row.count > 0">
+                  <div class="waterfall-drilldown">
+                    <div class="waterfall-drilldown-header">
+                      <strong x-text="row.count"></strong>
+                      <span> candidate<span x-show="row.count !== 1">s</span> at or past
+                      <strong x-text="row.stage_name"></strong></span>
+                    </div>
+                    <div class="waterfall-drilldown-list">
+                      <template x-for="c in waterfallRowCandidates(row)" :key="c.id">
+                        <button class="waterfall-drilldown-item"
+                                @click.stop="openPeek(c.id)">
+                          <span class="drilldown-name" x-text="c.first_name + ' ' + c.last_name"></span>
+                          <span class="drilldown-meta"
+                                x-text="(c.job_title || '—') + ' · ' + (c.stage_name || '—')"></span>
+                        </button>
+                      </template>
+                    </div>
+                  </div>
+                </template>
+              </div>
+            </template>
+          </div>
+        </template>
+
+        <!-- Per-recruiter breakdown. Matches Janice's row-23 sheet
+             ("US xDR AVERAGES" is per-recruiter-per-month). Always rendered
+             below the waterfall rows — this is the accountability view that
+             replaced the separate Recruiter Performance section. -->
+        <template x-if="waterfallData && waterfallData.cohortSize > 0">
+          <div class="waterfall-by-recruiter">
+            <div class="waterfall-by-recruiter-header">
+              <strong>By recruiter</strong>
+              <span class="text-muted"> — count of each recruiter's candidates at or past each stage</span>
+            </div>
+            <div class="waterfall-recruiter-table-wrap">
+              <table class="waterfall-recruiter-table">
+                <thead>
+                  <tr>
+                    <th class="recruiter-col">Recruiter</th>
+                    <template x-for="(col, i) in waterfallData.rows" :key="col.stage_id">
+                      <th class="recruiter-stage-col"
+                          :title="col.stage_name"
+                          x-text="col.stage_name"></th>
+                    </template>
+                  </tr>
+                </thead>
+                <tbody>
+                  <template x-for="b in waterfallByRecruiter" :key="b.id ?? 'unassigned'">
+                    <tr>
+                      <td class="recruiter-name">
+                        <span class="recruiter-avatar"
+                              :style="'background:' + (b.id ? presenceColor(b.name) : '#AAB0B9')"
+                              x-text="(b.name || '?').trim().charAt(0).toUpperCase()"></span>
+                        <span x-text="b.name"></span>
+                      </td>
+                      <template x-for="(n, si) in b.perStage" :key="si">
+                        <td class="recruiter-cell"
+                            :class="{ zero: n === 0 }"
+                            x-text="n"></td>
+                      </template>
+                    </tr>
+                  </template>
+                </tbody>
+              </table>
+            </div>
+          </div>
+        </template>
+      </div>
+    </div>
+
+    <!--
+      Recruiter Performance was removed in Apr 2026 — its queue / hires /
+      rejections breakdown has been superseded by the "By recruiter" table
+      that now always renders inside the Waterfall Report above, which
+      shows each recruiter's candidates at every stage of the current
+      cohort (a more accountability-useful view than static totals).
+    -->
+
+    <!-- (List view + Kanban view + view-toggle + pagination removed —
+         funnel-primary layout uses the inline candidate lists per stage
+         expansion, see Pipeline Funnel section above.) -->
+
+    <!-- ── Jobs section (collapsible) ─────────────────────── -->
+    <div class="card section-card" id="sec-jobs">
+      <div class="card-header section-card-header">
+        <div class="section-card-header-row clickable" @click="showJobs = !showJobs">
+          <span class="card-title">
+            <span class="material-icons mi-inline">work</span>
+            Job Openings (<span x-text="jobs.length"></span>)
+          </span>
+          <div class="d-flex align-items-center gap-2">
+            <button class="btn btn-sm btn-outline-primary"
+              @click.stop="openModal('addJob')">
+              <span class="material-icons mi-inline">add</span>
+              Add Job
+            </button>
+            <span class="material-icons collapse-icon" x-text="showJobs ? 'expand_less' : 'expand_more'"></span>
+          </div>
+        </div>
+      </div>
+
+      <div class="card-body" x-show="showJobs">
+        <div class="job-grid">
+          <template x-for="j in jobs" :key="j.id">
+            <div class="job-card">
+              <div class="job-card-head">
+                <div class="job-card-title-block" @click="openModal('editJob', { job: j })"
+                  title="Click to edit this job">
+                  <div class="job-card-title" x-text="j.title"></div>
+                  <div class="job-card-dept" x-text="[j.department, j.location].filter(Boolean).join(' · ')"></div>
+                </div>
+
+                <div class="job-head-actions">
+                  <!-- Inline STATUS dropdown -->
+                  <select class="inline-select job-status" :class="'job-status-' + (j.status || '').toLowerCase().replace(' ','-')"
+                    @change="updateJobField(j, 'status', $event.target.value)">
+                    <option value="Open" :selected="j.status === 'Open'">Open</option>
+                    <option value="On Hold" :selected="j.status === 'On Hold'">On Hold</option>
+                    <option value="Closed" :selected="j.status === 'Closed'">Closed</option>
+                  </select>
+                  <button class="icon-btn-sm job-action-icon" title="Edit job"
+                    @click.stop="openModal('editJob', { job: j })">
+                    <span class="material-icons">edit</span>
+                  </button>
+                  <button class="icon-btn-sm job-action-icon danger" title="Delete job"
+                    @click.stop="deleteJob(j)">
+                    <span class="material-icons">delete</span>
+                  </button>
+                </div>
+              </div>
+
+              <div class="job-card-body">
+                <div class="job-meta-row">
+                  <div class="job-meta">
+                    <span class="material-icons mi-inline">group</span>
+                    <template x-if="(j.filled || 0) > 0">
+                      <span>
+                        <strong x-text="j.filled"></strong>/<span x-text="j.head_count"></span> filled
+                      </span>
+                    </template>
+                    <template x-if="!(j.filled || 0)">
+                      <span x-text="j.head_count + ' position' + (j.head_count === 1 ? '' : 's')"></span>
+                    </template>
+                  </div>
+                  <div class="job-meta" x-text="'Candidates: ' + (j.candidate_count || 0)"></div>
+                </div>
+
+                <!-- Inline RECRUITER dropdown -->
+                <div class="job-meta-row">
+                  <div class="job-meta">
+                    <span class="material-icons mi-inline">person</span>
+                    <select class="inline-select job-inline-recruiter"
+                      @change="updateJobField(j, 'recruiter_id', $event.target.value === '' ? null : parseInt($event.target.value))">
+                      <option value="" :selected="j.recruiter_id === null">— Unassigned —</option>
+                      <template x-for="r in settings.recruiters.filter(x => x.is_active)" :key="r.id">
+                        <option :value="r.id" :selected="r.id === j.recruiter_id" x-text="r.name"></option>
+                      </template>
+                    </select>
+                  </div>
+                  <template x-if="j.salary_range">
+                    <div class="job-meta">
+                      <span class="material-icons mi-inline">payments</span>
+                      <span x-text="formatSalaryDisplay(j.salary_range)"></span>
+                    </div>
+                  </template>
+                </div>
+
+                <div class="job-meta-row">
+                  <!-- Expiry warning -->
+                  <template x-if="j.posting_expires && isExpired(j.posting_expires)">
+                    <div class="expiry-warning expired">✕ Expired <span x-text="fmtDate(j.posting_expires)"></span></div>
+                  </template>
+                  <template x-if="j.posting_expires && !isExpired(j.posting_expires) && isExpiringSoon(j.posting_expires)">
+                    <div class="expiry-warning soon">⚠ Expires <span x-text="fmtDate(j.posting_expires)"></span></div>
+                  </template>
+                </div>
+              </div>
+            </div>
+          </template>
+          <template x-if="jobs.length === 0">
+            <div class="empty-state">
+              <div class="empty-state-icon">💼</div>
+              <div class="empty-state-text">No job openings yet.</div>
+              <button class="btn btn-primary btn-sm" @click="openModal('addJob')">Add Your First Job</button>
+            </div>
+          </template>
+        </div>
+      </div>
+    </div>
+
+    <!-- ── Analytics sections (collapsible) ─────────────── -->
+    <div class="card section-card" id="sec-analytics">
+      <div class="card-header section-card-header">
+        <div class="section-card-header-row clickable" @click="showAnalytics = !showAnalytics">
+          <span class="card-title">
+            <span class="material-icons mi-inline">insights</span>
+            Analytics
+            <span class="section-loading-pip" x-show="analyticsView === 'source' ? sourceLoading : analyticsHistoricalLoading"
+                  title="Refreshing\u2026" aria-hidden="true"></span>
+          </span>
+          <span class="material-icons collapse-icon" x-text="showAnalytics ? 'expand_less' : 'expand_more'"></span>
+        </div>
+        <!--
+          Per-section filter row \u2014 mirrors the funnel / recruiter / source
+          pattern. Each blank value = inherit from the global filter bar;
+          non-empty overrides for this section only. timeToHireTrend now
+          honors the merged filter (it was previously unfiltered) so all
+          three panels respond consistently.
+        -->
+        <div class="section-filters" x-show="showAnalytics && analyticsView === 'historical'" @click.stop>
+          <div class="mselect" x-data="mselect({
+              label: 'Job', allowUnassigned: true,
+              options: () => jobs,
+              get: () => analyticsFilters.jobIds,
+              set: (v) => { analyticsFilters.jobIds = v; reloadAnalyticsHistorical(); applyFilters(); }
+            })">
+            <button type="button" class="mselect-trigger"
+                    :class="{ 'is-active': selected().length > 0, 'is-open': open }"
+                    @click="toggleOpen()">
+              <span class="mselect-label" x-text="label"></span>
+              <span class="mselect-value" x-text="triggerText()"></span>
+              <span class="material-icons mselect-chevron">expand_more</span>
+            </button>
+            <div class="mselect-popover" x-show="open" @click.outside="open = false" x-transition x-cloak>
+              <input x-ref="mselectSearch" class="mselect-search" x-model="query" placeholder="Search jobs…" @keydown.escape="open = false">
+              <div class="mselect-actions">
+                <button type="button" class="mselect-action-btn" @click="clearAll()" x-show="selected().length > 0">Clear all</button>
+                <span class="mselect-hint" x-show="selected().length === 0">No filter — showing all</span>
+              </div>
+              <div class="mselect-list">
+                <template x-for="opt in visibleOptions()" :key="opt.id">
+                  <label class="mselect-option">
+                    <input type="checkbox" :checked="isChecked(opt.id)" @change="toggle(opt.id)">
+                    <span :class="{ 'sentinel': opt.italic }" x-text="opt.name"></span>
+                  </label>
+                </template>
+              </div>
+            </div>
+          </div>
+          <div class="mselect" x-data="mselect({
+              label: 'Source', allowUnassigned: true,
+              options: () => settings.sources.filter(x => x.is_enabled),
+              get: () => analyticsFilters.sourceIds,
+              set: (v) => { analyticsFilters.sourceIds = v; reloadAnalyticsHistorical(); applyFilters(); }
+            })">
+            <button type="button" class="mselect-trigger"
+                    :class="{ 'is-active': selected().length > 0, 'is-open': open }"
+                    @click="toggleOpen()">
+              <span class="mselect-label" x-text="label"></span>
+              <span class="mselect-value" x-text="triggerText()"></span>
+              <span class="material-icons mselect-chevron">expand_more</span>
+            </button>
+            <div class="mselect-popover" x-show="open" @click.outside="open = false" x-transition x-cloak>
+              <input x-ref="mselectSearch" class="mselect-search" x-model="query" placeholder="Search sources…" @keydown.escape="open = false">
+              <div class="mselect-actions">
+                <button type="button" class="mselect-action-btn" @click="clearAll()" x-show="selected().length > 0">Clear all</button>
+                <span class="mselect-hint" x-show="selected().length === 0">No filter — showing all</span>
+              </div>
+              <div class="mselect-list">
+                <template x-for="opt in visibleOptions()" :key="opt.id">
+                  <label class="mselect-option">
+                    <input type="checkbox" :checked="isChecked(opt.id)" @change="toggle(opt.id)">
+                    <span :class="{ 'sentinel': opt.italic }" x-text="opt.name"></span>
+                  </label>
+                </template>
+              </div>
+            </div>
+          </div>
+          <div class="mselect" x-data="mselect({
+              label: 'Recruiter', allowUnassigned: true, allowAssigned: true,
+              options: () => settings.recruiters.filter(x => x.is_active),
+              get: () => analyticsFilters.recruiterIds,
+              set: (v) => { analyticsFilters.recruiterIds = v; reloadAnalyticsHistorical(); applyFilters(); }
+            })">
+            <button type="button" class="mselect-trigger"
+                    :class="{ 'is-active': selected().length > 0, 'is-open': open }"
+                    @click="toggleOpen()">
+              <span class="mselect-label" x-text="label"></span>
+              <span class="mselect-value" x-text="triggerText()"></span>
+              <span class="material-icons mselect-chevron">expand_more</span>
+            </button>
+            <div class="mselect-popover" x-show="open" @click.outside="open = false" x-transition x-cloak>
+              <input x-ref="mselectSearch" class="mselect-search" x-model="query" placeholder="Search recruiters…" @keydown.escape="open = false">
+              <div class="mselect-actions">
+                <button type="button" class="mselect-action-btn" @click="clearAll()" x-show="selected().length > 0">Clear all</button>
+                <span class="mselect-hint" x-show="selected().length === 0">No filter — showing all</span>
+              </div>
+              <div class="mselect-list">
+                <template x-for="opt in visibleOptions()" :key="opt.id">
+                  <label class="mselect-option">
+                    <input type="checkbox" :checked="isChecked(opt.id)" @change="toggle(opt.id)">
+                    <span :class="{ 'sentinel': opt.italic }" x-text="opt.name"></span>
+                  </label>
+                </template>
+              </div>
+            </div>
+          </div>
+          <div class="mselect" x-data="mselect({
+              label: 'Motion', allowUnassigned: true, searchable: false,
+              options: () => [{id:'Inbound',name:'Inbound'},{id:'Outbound',name:'Outbound'}],
+              get: () => analyticsFilters.motions,
+              set: (v) => { analyticsFilters.motions = v; reloadAnalyticsHistorical(); applyFilters(); }
+            })">
+            <button type="button" class="mselect-trigger"
+                    :class="{ 'is-active': selected().length > 0, 'is-open': open }"
+                    @click="toggleOpen()">
+              <span class="mselect-label" x-text="label"></span>
+              <span class="mselect-value" x-text="triggerText()"></span>
+              <span class="material-icons mselect-chevron">expand_more</span>
+            </button>
+            <div class="mselect-popover" x-show="open" @click.outside="open = false" x-transition x-cloak>
+              <div class="mselect-actions">
+                <button type="button" class="mselect-action-btn" @click="clearAll()" x-show="selected().length > 0">Clear all</button>
+                <span class="mselect-hint" x-show="selected().length === 0">No filter — showing all</span>
+              </div>
+              <div class="mselect-list">
+                <template x-for="opt in visibleOptions()" :key="opt.id">
+                  <label class="mselect-option">
+                    <input type="checkbox" :checked="isChecked(opt.id)" @change="toggle(opt.id)">
+                    <span :class="{ 'sentinel': opt.italic }" x-text="opt.name"></span>
+                  </label>
+                </template>
+              </div>
+            </div>
+          </div>
+          <div class="mselect" x-data="mselect({
+              label: 'Region', allowUnassigned: true,
+              options: () => settings.regions.filter(x => x.is_enabled),
+              get: () => analyticsFilters.regionIds,
+              set: (v) => { analyticsFilters.regionIds = v; reloadAnalyticsHistorical(); applyFilters(); }
+            })">
+            <button type="button" class="mselect-trigger"
+                    :class="{ 'is-active': selected().length > 0, 'is-open': open }"
+                    @click="toggleOpen()">
+              <span class="mselect-label" x-text="label"></span>
+              <span class="mselect-value" x-text="triggerText()"></span>
+              <span class="material-icons mselect-chevron">expand_more</span>
+            </button>
+            <div class="mselect-popover" x-show="open" @click.outside="open = false" x-transition x-cloak>
+              <input x-ref="mselectSearch" class="mselect-search" x-model="query" placeholder="Search regions…" @keydown.escape="open = false">
+              <div class="mselect-actions">
+                <button type="button" class="mselect-action-btn" @click="clearAll()" x-show="selected().length > 0">Clear all</button>
+                <span class="mselect-hint" x-show="selected().length === 0">No filter — showing all</span>
+              </div>
+              <div class="mselect-list">
+                <template x-for="opt in visibleOptions()" :key="opt.id">
+                  <label class="mselect-option">
+                    <input type="checkbox" :checked="isChecked(opt.id)" @change="toggle(opt.id)">
+                    <span :class="{ 'sentinel': opt.italic }" x-text="opt.name"></span>
+                  </label>
+                </template>
+              </div>
+            </div>
+          </div>
+          <select class="section-filter" x-model="analyticsFilters.preset"
+                  @change="onSectionPresetChange('analytics'); reloadAnalyticsHistorical(); applyFilters()">
             <option value="all">All Time</option>
+            <option value="7d">Last 7 Days</option>
+            <option value="30d">Last 30 Days</option>
+            <option value="90d">Last 90 Days</option>
+            <option value="6m">Last 6 Months</option>
+            <option value="1y">Last Year</option>
+            <option value="custom">Custom range&hellip;</option>
+          </select>
+          <template x-if="analyticsFilters.preset === 'custom'">
+            <span class="section-custom-date-row">
+              <input type="date" class="section-custom-date-input"
+                x-model="analyticsFilters.startDate"
+                @change="onSectionCustomDateChange('analytics'); applyFilters()"
+                aria-label="From date">
+              <span class="section-custom-date-sep">&ndash;</span>
+              <input type="date" class="section-custom-date-input"
+                x-model="analyticsFilters.endDate"
+                @change="onSectionCustomDateChange('analytics'); applyFilters()"
+                aria-label="To date">
+            </span>
+          </template>
+          <button class="icon-btn-sm section-filter-reset"
+                  @click="resetSectionFilters('analytics')"
+                  title="Reset Analytics filters">&times;</button>
+        </div>
+        <div class="section-filters" x-show="showAnalytics && analyticsView === 'source'" @click.stop>
+          <div class="mselect" x-data="mselect({
+              label: 'Job', allowUnassigned: true,
+              options: () => jobs,
+              get: () => sourceFilters.jobIds,
+              set: (v) => { sourceFilters.jobIds = v; reloadSourceEffectiveness(); }
+            })">
+            <button type="button" class="mselect-trigger"
+                    :class="{ 'is-active': selected().length > 0, 'is-open': open }"
+                    @click="toggleOpen()">
+              <span class="mselect-label" x-text="label"></span>
+              <span class="mselect-value" x-text="triggerText()"></span>
+              <span class="material-icons mselect-chevron">expand_more</span>
+            </button>
+            <div class="mselect-popover" x-show="open" @click.outside="open = false" x-transition x-cloak>
+              <input x-ref="mselectSearch" class="mselect-search" x-model="query" placeholder="Search jobs…" @keydown.escape="open = false">
+              <div class="mselect-actions">
+                <button type="button" class="mselect-action-btn" @click="clearAll()" x-show="selected().length > 0">Clear all</button>
+                <span class="mselect-hint" x-show="selected().length === 0">No filter — showing all</span>
+              </div>
+              <div class="mselect-list">
+                <template x-for="opt in visibleOptions()" :key="opt.id">
+                  <label class="mselect-option">
+                    <input type="checkbox" :checked="isChecked(opt.id)" @change="toggle(opt.id)">
+                    <span :class="{ 'sentinel': opt.italic }" x-text="opt.name"></span>
+                  </label>
+                </template>
+              </div>
+            </div>
+          </div>
+          <div class="mselect" x-data="mselect({
+              label: 'Recruiter', allowUnassigned: true, allowAssigned: true,
+              options: () => settings.recruiters.filter(x => x.is_active),
+              get: () => sourceFilters.recruiterIds,
+              set: (v) => { sourceFilters.recruiterIds = v; reloadSourceEffectiveness(); }
+            })">
+            <button type="button" class="mselect-trigger"
+                    :class="{ 'is-active': selected().length > 0, 'is-open': open }"
+                    @click="toggleOpen()">
+              <span class="mselect-label" x-text="label"></span>
+              <span class="mselect-value" x-text="triggerText()"></span>
+              <span class="material-icons mselect-chevron">expand_more</span>
+            </button>
+            <div class="mselect-popover" x-show="open" @click.outside="open = false" x-transition x-cloak>
+              <input x-ref="mselectSearch" class="mselect-search" x-model="query" placeholder="Search recruiters…" @keydown.escape="open = false">
+              <div class="mselect-actions">
+                <button type="button" class="mselect-action-btn" @click="clearAll()" x-show="selected().length > 0">Clear all</button>
+                <span class="mselect-hint" x-show="selected().length === 0">No filter — showing all</span>
+              </div>
+              <div class="mselect-list">
+                <template x-for="opt in visibleOptions()" :key="opt.id">
+                  <label class="mselect-option">
+                    <input type="checkbox" :checked="isChecked(opt.id)" @change="toggle(opt.id)">
+                    <span :class="{ 'sentinel': opt.italic }" x-text="opt.name"></span>
+                  </label>
+                </template>
+              </div>
+            </div>
+          </div>
+          <div class="mselect" x-data="mselect({
+              label: 'Motion', allowUnassigned: true, searchable: false,
+              options: () => [{id:'Inbound',name:'Inbound'},{id:'Outbound',name:'Outbound'}],
+              get: () => sourceFilters.motions,
+              set: (v) => { sourceFilters.motions = v; reloadSourceEffectiveness(); }
+            })">
+            <button type="button" class="mselect-trigger"
+                    :class="{ 'is-active': selected().length > 0, 'is-open': open }"
+                    @click="toggleOpen()">
+              <span class="mselect-label" x-text="label"></span>
+              <span class="mselect-value" x-text="triggerText()"></span>
+              <span class="material-icons mselect-chevron">expand_more</span>
+            </button>
+            <div class="mselect-popover" x-show="open" @click.outside="open = false" x-transition x-cloak>
+              <div class="mselect-actions">
+                <button type="button" class="mselect-action-btn" @click="clearAll()" x-show="selected().length > 0">Clear all</button>
+                <span class="mselect-hint" x-show="selected().length === 0">No filter — showing all</span>
+              </div>
+              <div class="mselect-list">
+                <template x-for="opt in visibleOptions()" :key="opt.id">
+                  <label class="mselect-option">
+                    <input type="checkbox" :checked="isChecked(opt.id)" @change="toggle(opt.id)">
+                    <span :class="{ 'sentinel': opt.italic }" x-text="opt.name"></span>
+                  </label>
+                </template>
+              </div>
+            </div>
+          </div>
+          <div class="mselect" x-data="mselect({
+              label: 'Region', allowUnassigned: true,
+              options: () => settings.regions.filter(x => x.is_enabled),
+              get: () => sourceFilters.regionIds,
+              set: (v) => { sourceFilters.regionIds = v; reloadSourceEffectiveness(); }
+            })">
+            <button type="button" class="mselect-trigger"
+                    :class="{ 'is-active': selected().length > 0, 'is-open': open }"
+                    @click="toggleOpen()">
+              <span class="mselect-label" x-text="label"></span>
+              <span class="mselect-value" x-text="triggerText()"></span>
+              <span class="material-icons mselect-chevron">expand_more</span>
+            </button>
+            <div class="mselect-popover" x-show="open" @click.outside="open = false" x-transition x-cloak>
+              <input x-ref="mselectSearch" class="mselect-search" x-model="query" placeholder="Search regions…" @keydown.escape="open = false">
+              <div class="mselect-actions">
+                <button type="button" class="mselect-action-btn" @click="clearAll()" x-show="selected().length > 0">Clear all</button>
+                <span class="mselect-hint" x-show="selected().length === 0">No filter — showing all</span>
+              </div>
+              <div class="mselect-list">
+                <template x-for="opt in visibleOptions()" :key="opt.id">
+                  <label class="mselect-option">
+                    <input type="checkbox" :checked="isChecked(opt.id)" @change="toggle(opt.id)">
+                    <span :class="{ 'sentinel': opt.italic }" x-text="opt.name"></span>
+                  </label>
+                </template>
+              </div>
+            </div>
+          </div>
+          <select class="section-filter" x-model="sourceFilters.preset"
+                  @change="onSectionPresetChange('source'); reloadSourceEffectiveness()">
+            <option value="all">All Time</option>
+            <option value="7d">Last 7 Days</option>
+            <option value="30d">Last 30 Days</option>
+            <option value="90d">Last 90 Days</option>
+            <option value="6m">Last 6 Months</option>
+            <option value="1y">Last Year</option>
             <option value="custom">Custom range&hellip;</option>
           </select>
           <template x-if="sourceFilters.preset === 'custom'">
@@ -1041,448 +1636,178 @@
           </template>
           <button class="icon-btn-sm section-filter-reset"
                   @click="resetSectionFilters('source')"
-                  title="Reset section filters to global defaults">×</button>
-        </div>
-      </div>
-
-      <div class="card-body source-roi-body" x-show="showSources">
-        <template x-if="sourceScopeLabel()">
-          <div class="scope-banner">
-            <span class="material-icons mi-inline">filter_alt</span>
-            <span>Scoped to: <strong x-text="sourceScopeLabel()"></strong></span>
-            <button class="scope-banner-clear" @click="resetSectionFilters('source')">Clear scope</button>
-          </div>
-        </template>
-        <!--
-          Two states:
-            - Have data → donut + table side-by-side (the original layout).
-            - Empty → centered empty-state with a clear next step. The
-              previous "No source data yet…" line on its own row was easy
-              to miss because it sat between an empty donut and an empty
-              table — both filling space without communicating "nothing
-              here yet". Splitting them surfaces the empty case clearly.
-        -->
-        <template x-if="sourceEffectiveness.length === 0 && !loading">
-          <div class="empty-state">
-            <div class="empty-state-icon">📈</div>
-            <div class="empty-state-text">No source data yet</div>
-            <div class="empty-state-hint">
-              Sources populate automatically as candidates are added with
-              a source assigned. Make sure your sources are configured
-              and that new candidates pick one.
-            </div>
-            <div class="empty-state-actions">
-              <button class="btn btn-sm btn-outline-primary" @click="openSettings()">
-                <span class="material-icons mi-inline">settings</span>
-                Configure sources
-              </button>
-              <button class="btn btn-sm btn-primary" @click="openModal('addCandidate')">
-                <span class="material-icons mi-inline">person_add</span>
-                Add a candidate
-              </button>
-            </div>
-          </div>
-        </template>
-
-        <template x-if="sourceEffectiveness.length > 0">
-          <div class="source-row">
-            <div class="source-donut"><canvas id="sourceDonutChart"></canvas></div>
-            <table class="data-table compact source-table">
-              <thead>
-                <tr><th>Source</th><th class="num">Total</th><th class="num">Hired</th><th class="num">Rate</th></tr>
-              </thead>
-              <tbody>
-                <template x-for="s in sourceEffectiveness" :key="s.source_id">
-                  <tr>
-                    <td x-text="s.source_name"></td>
-                    <td class="num" x-text="s.total_candidates"></td>
-                    <td class="num" x-text="s.hired_candidates"></td>
-                    <td class="num metric-strong" x-text="s.hire_rate + '%'"></td>
-                  </tr>
-                </template>
-              </tbody>
-            </table>
-          </div>
-        </template>
-      </div>
-    </div>
-
-    <!-- (List view + Kanban view + view-toggle + pagination removed —
-         funnel-primary layout uses the inline candidate lists per stage
-         expansion, see Pipeline Funnel section above.) -->
-
-    <!-- ── Jobs section (collapsible) ─────────────────────── -->
-    <div class="card section-card" id="sec-jobs">
-      <div class="card-header clickable" @click="showJobs = !showJobs">
-        <span class="card-title">
-          <span class="material-icons mi-inline">work</span>
-          Job Openings (<span x-text="jobs.length"></span>)
-        </span>
-        <span class="material-icons collapse-icon" x-text="showJobs ? 'expand_less' : 'expand_more'"></span>
-      </div>
-
-      <div class="card-body" x-show="showJobs">
-        <div class="job-grid">
-          <template x-for="j in jobs" :key="j.id">
-            <div class="job-card">
-              <div class="job-card-head">
-                <div class="job-card-title-block" @click="openModal('editJob', { job: j })"
-                  title="Click to edit this job">
-                  <div class="job-card-title" x-text="j.title"></div>
-                  <div class="job-card-dept" x-text="[j.department, j.location].filter(Boolean).join(' · ')"></div>
-                </div>
-
-                <!-- Inline STATUS dropdown -->
-                <select class="inline-select job-status" :class="'job-status-' + (j.status || '').toLowerCase().replace(' ','-')"
-                  @change="updateJobField(j, 'status', $event.target.value)">
-                  <option value="Open" :selected="j.status === 'Open'">Open</option>
-                  <option value="On Hold" :selected="j.status === 'On Hold'">On Hold</option>
-                  <option value="Closed" :selected="j.status === 'Closed'">Closed</option>
-                </select>
-              </div>
-
-              <div class="job-card-body">
-                <!--
-                  Headcount line shows fill ratio when partially filled so a
-                  recruiter can see "1 of 3 hired" at a glance without opening
-                  the job. The (filled) field was added per the 2026/04/22
-                  product call so closing a partial requisition keeps the
-                  history (originally needed 3, descoped after 1 hire).
-                -->
-                <div class="job-meta">
-                  <span class="material-icons mi-inline">group</span>
-                  <template x-if="(j.filled || 0) > 0">
-                    <span>
-                      <strong x-text="j.filled"></strong> of
-                      <span x-text="j.head_count"></span> filled
-                      <span class="job-meta-sub"
-                        x-text="'(' + Math.max(0, j.head_count - (j.filled || 0)) + ' open)'"></span>
-                    </span>
-                  </template>
-                  <template x-if="!(j.filled || 0)">
-                    <span x-text="j.head_count + ' position' + (j.head_count === 1 ? '' : 's')"></span>
-                  </template>
-                </div>
-
-                <!-- Inline RECRUITER dropdown -->
-                <div class="job-meta">
-                  <span class="material-icons mi-inline">person</span>
-                  <select class="inline-select"
-                    @change="updateJobField(j, 'recruiter_id', $event.target.value === '' ? null : parseInt($event.target.value))">
-                    <option value="" :selected="j.recruiter_id === null">— Unassigned —</option>
-                    <template x-for="r in settings.recruiters.filter(x => x.is_active)" :key="r.id">
-                      <option :value="r.id" :selected="r.id === j.recruiter_id" x-text="r.name"></option>
-                    </template>
-                  </select>
-                </div>
-
-                <template x-if="j.salary_range">
-                  <div class="job-meta">
-                    <span class="material-icons mi-inline">payments</span>
-                    <span x-text="formatSalaryDisplay(j.salary_range)"></span>
-                  </div>
-                </template>
-
-                <div class="job-meta" x-text="'Candidates: ' + (j.candidate_count || 0)"></div>
-
-                <!-- Expiry warning -->
-                <template x-if="j.posting_expires && isExpired(j.posting_expires)">
-                  <div class="expiry-warning expired">✕ Expired <span x-text="fmtDate(j.posting_expires)"></span></div>
-                </template>
-                <template x-if="j.posting_expires && !isExpired(j.posting_expires) && isExpiringSoon(j.posting_expires)">
-                  <div class="expiry-warning soon">⚠ Expires <span x-text="fmtDate(j.posting_expires)"></span></div>
-                </template>
-              </div>
-
-              <!--
-                Edit promoted to a primary-style button (was outline-secondary
-                and visually got lost) per the 2026/04/22 design call where
-                Janice asked "How do I edit a job?" before noticing it. The
-                title is also clickable as a redundant affordance so the
-                most natural "click the thing I want to edit" interaction
-                works without scanning for buttons.
-              -->
-              <div class="job-card-actions">
-                <button class="btn btn-sm btn-primary" @click="openModal('editJob', { job: j })">
-                  <span class="material-icons mi-inline">edit</span>
-                  Edit job
-                </button>
-                <button class="btn btn-sm btn-outline-primary" @click="filters.jobId = j.id; applyFilters(); scrollTop()">
-                  View pipeline
-                </button>
-                <button class="btn btn-sm btn-outline-danger" @click="deleteJob(j)">Delete</button>
-              </div>
-            </div>
-          </template>
-
-          <template x-if="jobs.length === 0">
-            <div class="empty-state">
-              <div class="empty-state-icon">💼</div>
-              <div class="empty-state-text">No job openings yet.</div>
-              <button class="btn btn-primary btn-sm" @click="openModal('addJob')">Add Your First Job</button>
-            </div>
-          </template>
-        </div>
-      </div>
-    </div>
-
-    <!-- ── Activity Feed (collapsible) ──────────────────── -->
-    <!--
-      Team activity timeline — derived from the history sheet. Shows the
-      50 most recent stage transitions with who/what/when, newest first.
-      Click any entry to open the peek panel for that candidate.
-      Data refreshes on every reloadAll() (which fires after every local
-      mutation + every 20s sync poll that detected a teammate's change).
-    -->
-    <!--
-      Recent Rejections section.
-      Without this, rejecting a candidate from the peek panel makes them
-      vanish from the funnel (which only renders non-rejected stages) and
-      the recruiter has no way to confirm the action took or to find /
-      reverse a mistake.
-    -->
-    <div class="card section-card" id="sec-rejections">
-      <div class="card-header clickable" @click="toggleRecentRejections()">
-        <span class="card-title">
-          <span class="material-icons mi-inline">block</span>
-          Recent Rejections
-          <template x-if="recentRejections.length > 0 && !showRejections">
-            <span class="section-badge" x-text="recentRejections.length + ' in last 30d'"></span>
-          </template>
-        </span>
-        <span class="material-icons collapse-icon" x-text="showRejections ? 'expand_less' : 'expand_more'"></span>
-      </div>
-      <div class="card-body p-0" x-show="showRejections" x-transition>
-        <template x-if="recentRejections.length === 0 && !rejectionsLoading">
-          <div class="empty-state">
-            <div class="empty-state-text">
-              No rejections in the last 30 days.
-            </div>
-          </div>
-        </template>
-        <template x-if="rejectionsLoading">
-          <div class="section-loading"><div class="spinner"></div><span>Loading rejections…</span></div>
-        </template>
-        <table class="data-table" x-show="recentRejections.length > 0">
-          <thead>
-            <tr>
-              <th>Candidate</th>
-              <th>Job</th>
-              <th>Recruiter</th>
-              <th>Reason</th>
-              <th>Rejected</th>
-              <th></th>
-            </tr>
-          </thead>
-          <tbody>
-            <template x-for="r in recentRejections" :key="r.id">
-              <tr class="clickable" @click="openPeek(r.id)">
-                <td>
-                  <strong x-text="(r.first_name || '') + ' ' + (r.last_name || '')"></strong>
-                  <div class="text-muted" style="font-size:12px;" x-text="r.email"></div>
-                </td>
-                <td x-text="r.job_title || '—'"></td>
-                <td x-text="r.recruiter_name || '—'"></td>
-                <td x-text="r.refuse_reason_name || '—'"></td>
-                <td x-text="r.date_last_stage_update || '—'"></td>
-                <td>
-                  <button class="btn btn-sm btn-outline-secondary"
-                    @click.stop="reactivateCandidate(r)">Restore</button>
-                </td>
-              </tr>
-            </template>
-          </tbody>
-        </table>
-      </div>
-    </div>
-
-    <div class="card section-card" id="sec-activity">
-      <div class="card-header clickable" @click="toggleActivityFeed()">
-        <span class="card-title">
-          <span class="material-icons mi-inline">history</span>
-          Team Activity
-          <template x-if="activity.length > 0 && !showActivity">
-            <span class="section-badge" x-text="activity.length"></span>
-          </template>
-        </span>
-        <span class="material-icons collapse-icon" x-text="showActivity ? 'expand_less' : 'expand_more'"></span>
-      </div>
-      <div class="card-body p-0" x-show="showActivity" x-transition>
-        <template x-if="activity.length === 0 && !activityLoading">
-          <div class="empty-state">
-            <div class="empty-state-icon">📋</div>
-            <div class="empty-state-text">
-              No activity yet. Add a candidate or change someone's stage to see history appear here.
-            </div>
-          </div>
-        </template>
-        <template x-if="activityLoading">
-          <div class="section-loading"><div class="spinner"></div><span>Loading activity…</span></div>
-        </template>
-        <ul class="activity-list" x-show="activity.length > 0">
-          <template x-for="a in activity" :key="a.id">
-            <li class="activity-item" @click="openPeek(a.candidate_id)">
-              <div class="activity-dot" :style="stageChipStyle(a.stage_to_color || '#6c757d')"></div>
-              <div class="activity-body">
-                <div class="activity-text">
-                  <strong x-text="a.changed_by ? a.changed_by.split('@')[0] : 'Someone'"></strong>
-                  <template x-if="!a.stage_from_id || a.stage_from_id === a.stage_to_id">
-                    <span>
-                      added <strong x-text="a.candidate_name"></strong>
-                      to <span x-text="a.stage_to_name"></span>
-                    </span>
-                  </template>
-                  <template x-if="a.stage_from_id && a.stage_from_id !== a.stage_to_id">
-                    <span>
-                      moved <strong x-text="a.candidate_name"></strong>
-                      <span class="text-muted">
-                        from <span x-text="a.stage_from_name"></span>
-                      </span>
-                      <span class="activity-arrow">→</span>
-                      <span x-text="a.stage_to_name"></span>
-                    </span>
-                  </template>
-                  <template x-if="a.job_title">
-                    <span class="activity-meta">
-                      · <span x-text="a.job_title"></span>
-                    </span>
-                  </template>
-                </div>
-                <div class="activity-time" x-text="relativeTime(a.timestamp)"
-                  :title="fmtDate(a.timestamp.split('T')[0]) + ' ' + a.timestamp.split('T')[1].slice(0,5)"></div>
-              </div>
-            </li>
-          </template>
-        </ul>
-      </div>
-    </div>
-
-    <!-- ── Analytics sections (collapsible) ─────────────── -->
-    <div class="card section-card" id="sec-analytics">
-      <div class="card-header section-card-header">
-        <div class="section-card-header-row clickable" @click="showAnalytics = !showAnalytics">
-          <span class="card-title">
-            <span class="material-icons mi-inline">insights</span>
-            Analytics
-            <span class="section-loading-pip" x-show="analyticsHistoricalLoading"
-                  title="Refreshing\u2026" aria-hidden="true"></span>
-          </span>
-          <span class="material-icons collapse-icon" x-text="showAnalytics ? 'expand_less' : 'expand_more'"></span>
-        </div>
-        <!--
-          Per-section filter row \u2014 mirrors the funnel / recruiter / source
-          pattern. Each blank value = inherit from the global filter bar;
-          non-empty overrides for this section only. timeToHireTrend now
-          honors the merged filter (it was previously unfiltered) so all
-          three panels respond consistently.
-        -->
-        <div class="section-filters" x-show="showAnalytics" @click.stop>
-          <select class="section-filter" x-model="analyticsFilters.jobId"
-                  @change="reloadAnalyticsHistorical()">
-            <option value="">Job (global)</option>
-            <option value="__unassigned__">&mdash; Unassigned &mdash;</option>
-            <template x-for="j in jobs" :key="j.id">
-              <option :value="j.id" x-text="j.title"></option>
-            </template>
-          </select>
-          <select class="section-filter" x-model="analyticsFilters.sourceId"
-                  @change="reloadAnalyticsHistorical()">
-            <option value="">Source (global)</option>
-            <option value="__unassigned__">&mdash; Unassigned &mdash;</option>
-            <template x-for="s in settings.sources.filter(x => x.is_enabled)" :key="s.id">
-              <option :value="s.id" x-text="s.name"></option>
-            </template>
-          </select>
-          <select class="section-filter" x-model="analyticsFilters.recruiterId"
-                  @change="reloadAnalyticsHistorical()">
-            <option value="">Recruiter (global)</option>
-            <option value="__assigned__">&mdash; Assigned &mdash;</option>
-            <option value="__unassigned__">&mdash; Unassigned &mdash;</option>
-            <template x-for="r in settings.recruiters.filter(x => x.is_active)" :key="r.id">
-              <option :value="r.id" x-text="r.name"></option>
-            </template>
-          </select>
-          <select class="section-filter" x-model="analyticsFilters.preset"
-                  @change="onSectionPresetChange('analytics'); reloadAnalyticsHistorical()">
-            <option value="">Period (global)</option>
-            <option value="7d">Last 7 Days</option>
-            <option value="30d">Last 30 Days</option>
-            <option value="90d">Last 90 Days</option>
-            <option value="6m">Last 6 Months</option>
-            <option value="1y">Last Year</option>
-            <option value="all">All Time</option>
-            <option value="custom">Custom range&hellip;</option>
-          </select>
-          <template x-if="analyticsFilters.preset === 'custom'">
-            <span class="section-custom-date-row">
-              <input type="date" class="section-custom-date-input"
-                x-model="analyticsFilters.startDate"
-                @change="onSectionCustomDateChange('analytics')"
-                aria-label="From date">
-              <span class="section-custom-date-sep">&ndash;</span>
-              <input type="date" class="section-custom-date-input"
-                x-model="analyticsFilters.endDate"
-                @change="onSectionCustomDateChange('analytics')"
-                aria-label="To date">
-            </span>
-          </template>
-          <button class="icon-btn-sm section-filter-reset"
-                  @click="resetSectionFilters('analytics')"
-                  title="Reset Analytics filters to global defaults">&times;</button>
+                  title="Reset source filters">&times;</button>
         </div>
       </div>
 
       <div class="card-body" x-show="showAnalytics">
-        <template x-if="analyticsScopeLabel()">
-          <div class="scope-banner">
-            <span class="material-icons mi-inline">filter_alt</span>
-            <span>Scoped to: <strong x-text="analyticsScopeLabel()"></strong></span>
-            <button class="scope-banner-clear" @click="resetSectionFilters('analytics')">Clear scope</button>
-          </div>
-        </template>
-
-        <!--
-          Trimmed analytics — the panels that became their own primary
-          dashboards above (Pipeline Snapshot, Source Effectiveness,
-          Team Performance) are removed here to avoid duplicate UI.
-          What's left is purely historical context that complements the
-          live dashboards: stage-to-stage conversion over the period,
-          monthly time-to-hire trend, and per-stage average dwell time.
-        -->
-        <div class="analytics-grid">
-          <div class="analytics-panel">
-            <div class="panel-header">Funnel Conversion (historical)</div>
-            <div class="chart-container"><canvas id="funnelChart"></canvas></div>
-          </div>
-
-          <div class="analytics-panel">
-            <div class="panel-header">Time to Hire Trend</div>
-            <div class="chart-container"><canvas id="trendChart"></canvas></div>
-          </div>
+        <div class="analytics-view-switch">
+          <button class="analytics-view-btn"
+                  :class="{ 'active': analyticsView === 'historical' }"
+                  @click="setAnalyticsView('historical')">Historical</button>
+          <button class="analytics-view-btn"
+                  :class="{ 'active': analyticsView === 'source' }"
+                  @click="setAnalyticsView('source')">Sourcing ROI</button>
         </div>
+        <template x-if="analyticsView === 'historical'">
+          <div>
+            <template x-if="analyticsScopeLabel()">
+              <div class="scope-banner">
+                <span class="material-icons mi-inline">filter_alt</span>
+                <span>Scoped to: <strong x-text="analyticsScopeLabel()"></strong></span>
+                <button class="scope-banner-clear" @click="resetSectionFilters('analytics')">Clear scope</button>
+              </div>
+            </template>
 
-        <div class="analytics-grid">
-          <div class="analytics-panel">
-            <div class="panel-header">Stage Velocity</div>
-            <table class="data-table compact">
-              <thead><tr><th>Stage</th><th>Avg Days</th><th>Candidates</th></tr></thead>
+            <!--
+              Trimmed analytics — the panels that became their own primary
+              dashboards above (Pipeline Snapshot, Source Effectiveness,
+              Team Performance) are removed here to avoid duplicate UI.
+              What's left is purely historical context that complements the
+              live dashboards: stage-to-stage conversion over the period,
+              monthly time-to-hire trend, and per-stage average dwell time.
+            -->
+            <div class="analytics-grid">
+              <div class="analytics-panel">
+                <div class="panel-header">Funnel Conversion (historical)</div>
+                <div class="chart-container"><canvas id="funnelChart"></canvas></div>
+              </div>
+
+              <div class="analytics-panel">
+                <div class="panel-header">Time to Hire Trend</div>
+                <div class="chart-container"><canvas id="trendChart"></canvas></div>
+              </div>
+            </div>
+
+            <div class="analytics-grid">
+              <div class="analytics-panel">
+                <div class="panel-header">Stage Velocity</div>
+            <!--
+              Rejected column added so recruiters can see "where do we lose
+              people" alongside dwell time. The two together answer "this
+              stage is slow AND it's where most people get cut" — actionable
+              in a way either column alone isn't.
+            -->
+                <table class="data-table compact">
+              <thead><tr><th>Stage</th><th>Avg Days</th><th>Candidates</th><th>Rejected</th></tr></thead>
               <tbody>
                 <template x-for="v in analytics.stageVelocity" :key="v.stage_id">
                   <tr>
                     <td><span class="stage-chip" :style="stageChipStyle(v.stage_color)" x-text="v.stage_name"></span></td>
                     <td x-text="v.avg_days_in_stage"></td>
                     <td x-text="v.candidate_count"></td>
+                    <td x-text="v.rejected_count || 0"></td>
                   </tr>
                 </template>
                 <template x-if="analytics.stageVelocity.length === 0">
-                  <tr><td colspan="3" class="empty-state-row">
+                  <tr><td colspan="4" class="empty-state-row">
                     Stage velocity populates after candidates move through stages. Move a few candidates to see it fill in.
                   </td></tr>
                 </template>
               </tbody>
-            </table>
+                </table>
+              </div>
+
+          <!--
+            Rejection Reasons panel — paired with Stage Velocity in the
+            same row so the team can scan "where" (stage) and "why" (reason)
+            side by side. Period filter applies to rejection date (when the
+            candidate moved to Rejected), not application date.
+          -->
+              <div class="analytics-panel">
+            <!--
+              Header total = sum of all reason counts in scope. Lives in the
+              header so the at-a-glance "how many rejections this period?"
+              answer is visible without having to scan the table or do
+              column-add math. Footer row in the table shows the same total
+              anchored to the table reading flow.
+            -->
+                <div class="panel-header">
+                  Rejection Reasons
+                  <span class="panel-header-meta"
+                        x-text="'(' + (analytics.rejectionReasons || []).reduce(function (s, r) { return s + (r.count || 0); }, 0) + ' total)'"></span>
+                </div>
+                <table class="data-table compact">
+              <thead><tr><th>Reason</th><th>Count</th></tr></thead>
+              <tbody>
+                <template x-for="r in analytics.rejectionReasons" :key="r.reason_id">
+                  <tr>
+                    <td x-text="r.reason_name"></td>
+                    <td x-text="r.count"></td>
+                  </tr>
+                </template>
+                <template x-if="analytics.rejectionReasons.length === 0">
+                  <tr><td colspan="2" class="empty-state-row">
+                    No rejections with a recorded reason in this period.
+                  </td></tr>
+                </template>
+              </tbody>
+                  <template x-if="analytics.rejectionReasons.length > 0">
+                    <tfoot>
+                      <tr class="data-table-total-row">
+                        <td><strong>Total</strong></td>
+                        <td><strong x-text="(analytics.rejectionReasons || []).reduce(function (s, r) { return s + (r.count || 0); }, 0)"></strong></td>
+                      </tr>
+                    </tfoot>
+                  </template>
+                </table>
+              </div>
+            </div>
           </div>
-        </div>
+        </template>
+        <template x-if="analyticsView === 'source'">
+          <div class="source-roi-body">
+            <template x-if="sourceScopeLabel()">
+              <div class="scope-banner">
+                <span class="material-icons mi-inline">filter_alt</span>
+                <span>Scoped to: <strong x-text="sourceScopeLabel()"></strong></span>
+                <button class="scope-banner-clear" @click="resetSectionFilters('source')">Clear scope</button>
+              </div>
+            </template>
+            <template x-if="sourceEffectiveness.length === 0 && !sourceLoading">
+              <div class="empty-state">
+                <div class="empty-state-icon">📈</div>
+                <div class="empty-state-text">No source data yet</div>
+                <div class="empty-state-hint">
+                  Sources populate automatically as candidates are added with
+                  a source assigned. Make sure your sources are configured
+                  and that new candidates pick one.
+                </div>
+                <div class="empty-state-actions">
+                  <button class="btn btn-sm btn-outline-primary" @click="openSettings()">
+                    <span class="material-icons mi-inline">settings</span>
+                    Configure sources
+                  </button>
+                  <button class="btn btn-sm btn-primary" @click="openModal('addCandidate')">
+                    <span class="material-icons mi-inline">person_add</span>
+                    Add a candidate
+                  </button>
+                </div>
+              </div>
+            </template>
+
+            <template x-if="sourceEffectiveness.length > 0">
+              <div class="source-row">
+                <div class="source-donut"><canvas id="sourceDonutChart"></canvas></div>
+                <table class="data-table compact source-table">
+                  <thead>
+                    <tr><th>Source</th><th class="num">Total</th><th class="num">Hired</th><th class="num">Rate</th></tr>
+                  </thead>
+                  <tbody>
+                    <template x-for="s in sourceEffectiveness" :key="s.source_id">
+                      <tr>
+                        <td x-text="s.source_name"></td>
+                        <td class="num" x-text="s.total_candidates"></td>
+                        <td class="num" x-text="s.hired_candidates"></td>
+                        <td class="num metric-strong" x-text="s.hire_rate + '%'"></td>
+                      </tr>
+                    </template>
+                  </tbody>
+                </table>
+              </div>
+            </template>
+          </div>
+        </template>
 
       </div>
     </div>
@@ -1559,6 +1884,7 @@
                     <template x-for="v in otherViewers.slice(0, 3)" :key="v.email">
                       <div class="presence-avatar"
                         :style="'background: ' + presenceColor(v.email) + ';'"
+                        :title="emailDisplayName(v.email)"
                         x-text="initials(v.email.split('@')[0])"></div>
                     </template>
                     <template x-if="otherViewers.length > 3">
@@ -1824,6 +2150,74 @@
   </div>
 </template>
 
+<!-- ── Team Activity Panel (slide-in from right) ────────── -->
+<template x-teleport="body">
+  <div x-data x-cloak>
+    <template x-if="activityPanelOpen">
+      <div>
+        <div class="peek-backdrop" @click="closeActivityPanel()"></div>
+        <div class="activity-panel">
+          <div class="peek-header">
+            <div class="peek-head-info" style="flex:1;">
+              <div class="peek-name">Team Activity</div>
+              <div class="peek-email">Latest candidate moves and updates</div>
+            </div>
+            <button class="icon-btn-sm" @click="closeActivityPanel()">✕</button>
+          </div>
+          <div class="peek-body p-0">
+            <template x-if="activity.length === 0 && !activityLoading">
+              <div class="empty-state">
+                <div class="empty-state-icon">📋</div>
+                <div class="empty-state-text">
+                  No activity yet. Add a candidate or change someone's stage to see history appear here.
+                </div>
+              </div>
+            </template>
+            <template x-if="activityLoading">
+              <div class="section-loading"><div class="spinner"></div><span>Loading activity…</span></div>
+            </template>
+            <ul class="activity-list" x-show="activity.length > 0">
+              <template x-for="a in activity" :key="a.id">
+                <li class="activity-item" @click="openPeek(a.candidate_id); closeActivityPanel()">
+                  <div class="activity-dot" :style="stageChipStyle(a.stage_to_color || '#6c757d')"></div>
+                  <div class="activity-body">
+                    <div class="activity-text">
+                      <strong x-text="a.changed_by ? a.changed_by.split('@')[0] : 'Someone'"></strong>
+                      <template x-if="!a.stage_from_id || a.stage_from_id === a.stage_to_id">
+                        <span>
+                          added <strong x-text="a.candidate_name"></strong>
+                          to <span x-text="a.stage_to_name"></span>
+                        </span>
+                      </template>
+                      <template x-if="a.stage_from_id && a.stage_from_id !== a.stage_to_id">
+                        <span>
+                          moved <strong x-text="a.candidate_name"></strong>
+                          <span class="text-muted">
+                            from <span x-text="a.stage_from_name"></span>
+                          </span>
+                          <span class="activity-arrow">→</span>
+                          <span x-text="a.stage_to_name"></span>
+                        </span>
+                      </template>
+                      <template x-if="a.job_title">
+                        <span class="activity-meta">
+                          · <span x-text="a.job_title"></span>
+                        </span>
+                      </template>
+                    </div>
+                    <div class="activity-time" x-text="relativeTime(a.timestamp)"
+                      :title="fmtDate(a.timestamp.split('T')[0]) + ' ' + a.timestamp.split('T')[1].slice(0,5)"></div>
+                  </div>
+                </li>
+              </template>
+            </ul>
+          </div>
+        </div>
+      </div>
+    </template>
+  </div>
+</template>
+
 <!-- ── Settings Panel (slide-in from right) ─────────────── -->
 <template x-teleport="body">
   <div x-data x-cloak>
@@ -1841,6 +2235,7 @@
 
           <div class="settings-tabs">
             <button class="settings-tab" :class="{ 'active': tab === 'stages' }" @click="tab = 'stages'">Stages</button>
+            <button class="settings-tab" :class="{ 'active': tab === 'goals' }" @click="tab = 'goals'">Waterfall Goals</button>
             <button class="settings-tab" :class="{ 'active': tab === 'recruiters' }" @click="tab = 'recruiters'">Recruiters</button>
             <button class="settings-tab" :class="{ 'active': tab === 'sources' }" @click="tab = 'sources'">Sources</button>
             <button class="settings-tab" :class="{ 'active': tab === 'regions' }" @click="tab = 'regions'">Regions</button>
@@ -1852,11 +2247,29 @@
             <!-- Stages -->
             <template x-if="tab === 'stages'">
               <div>
+                <p class="settings-stages-intro">
+                  These are the <strong>default benchmarks</strong> used by the
+                  Waterfall Report for all jobs. Manage defaults and overrides in
+                  <strong>Settings → Waterfall Goals</strong>.
+                </p>
                 <template x-for="(s, idx) in stages" :key="idx">
-                  <div class="settings-row">
+                  <div class="settings-row settings-stages-row" :data-stage-id="s.id">
                     <input type="text" class="form-control form-control-sm" x-model="s.name" placeholder="Stage name" style="flex:2;">
                     <input type="color" class="color-input" x-model="s.color" style="width:40px;">
-                    <input type="number" class="form-control form-control-sm" x-model.number="s.target_hours" placeholder="SLA hrs" style="width:80px;" min="0">
+                    <input type="number" class="form-control form-control-sm" x-model.number="s.target_hours"
+                           placeholder="SLA hrs" style="width:70px;" min="0"
+                           title="SLA target in hours — candidates past this trigger breach flags">
+                    <!-- Default benchmark (applies to all jobs unless overridden).
+                         Bound via a getter/setter so the input parses empty as
+                         "no benchmark" rather than storing 0. -->
+                    <input type="number"
+                           class="form-control form-control-sm benchmark-input"
+                           :value="benchForStage(s.id)"
+                           @input="setBenchForStage(s.id, $event.target.value)"
+                           placeholder="Goal %"
+                           style="width:74px;"
+                           min="0" max="100"
+                           title="Default conversion goal — target % of the previous stage that should advance into this stage. Shown in the Waterfall Report's Goal column.">
                     <label class="chk"><input type="checkbox" x-model="s.is_hired"> Hired</label>
                     <label class="chk"><input type="checkbox" x-model="s.is_rejected"> Rej</label>
                     <label class="chk"><input type="checkbox" x-model="s.is_offer"> Offer</label>
@@ -1864,10 +2277,97 @@
                     <button class="icon-btn-sm" @click="removeRow('stages', idx)">✕</button>
                   </div>
                 </template>
+                <div class="settings-stages-legend">
+                  <strong>SLA hrs</strong> = hours a candidate can sit in a stage before it's flagged as breached.
+                  <strong>Goal %</strong> = default conversion target — % of the previous stage that should advance into this one.
+                </div>
                 <button class="btn btn-sm btn-outline-primary mt-2" @click="addStage()">+ Add Stage</button>
                 <div class="settings-save-row">
-                  <button class="btn btn-primary btn-sm" :disabled="saving" @click="save('stages')">Save Stages</button>
+                  <button class="btn btn-primary btn-sm" :disabled="saving" @click="save('stages')">Save Stages &amp; Goals</button>
                   <button class="btn btn-outline-secondary btn-sm ms-2" @click="reload('stages')">Discard</button>
+                </div>
+              </div>
+            </template>
+
+            <!-- Waterfall Goals: single-matrix editor for all benchmarks.
+                 Rows = stages (skipping the first, which has no prior
+                 stage to convert from). Columns = Default + selected job
+                 override via the job filter. Empty cell means "use default."
+                 This is THE place to edit benchmarks; everything else links here. -->
+            <template x-if="tab === 'goals'">
+              <div>
+                <p class="settings-stages-intro">
+                  Set stage-to-stage targets in 3 steps:
+                  <strong>1)</strong> pick a job,
+                  <strong>2)</strong> choose a % for each stage,
+                  <strong>3)</strong> keep <strong>Use all-jobs target</strong>
+                  if that job should follow the default.
+                </p>
+                <div class="goals-job-filter-row">
+                  <label class="goals-job-filter-label" for="goals-job-filter">Job:</label>
+                  <select id="goals-job-filter"
+                          class="form-select form-select-sm goals-job-filter"
+                          x-model="selectedGoalJobId">
+                    <template x-for="j in allJobsForGoals()" :key="j.id">
+                      <option :value="String(j.id)"
+                              x-text="j.title + (j.status !== 'Open' ? ' (' + j.status + ')' : '')"></option>
+                    </template>
+                  </select>
+                </div>
+                <div class="goals-matrix-wrap">
+                  <table class="goals-matrix">
+                    <thead>
+                      <tr>
+                        <th class="goals-stage-col">Stage</th>
+                        <th class="goals-default-col">All Jobs Target</th>
+                        <th class="goals-job-col"
+                            :title="'Target for selected job: ' + goalJobTitle()"
+                            x-text="'Selected Job Target'"></th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      <template x-for="s in goalStages()" :key="s.id">
+                        <tr :data-stage-id="s.id"
+                            :class="{ 'flash': flashStage === s.id }">
+                          <td class="goals-stage-name">
+                            <span class="goals-stage-dot"
+                                  :style="'background:' + (s.color || 'var(--primary)')"></span>
+                            <span x-text="s.name"></span>
+                          </td>
+                          <td class="goals-cell goals-default-cell">
+                            <select class="form-select form-select-sm goals-input benchmark-input"
+                                    :value="defaultGoalValue(s.id)"
+                                    @change="setDefaultGoal(s.id, $event.target.value)">
+                              <option value="__none__">Not set</option>
+                              <template x-for="opt in goalSelectOptions(goalFor(s.id, 0))" :key="opt.value">
+                                <option :value="opt.value" x-text="opt.label"></option>
+                              </template>
+                            </select>
+                          </td>
+                          <td class="goals-cell">
+                            <select class="form-select form-select-sm goals-input"
+                                   :value="selectedGoalValue(s.id)"
+                                   @change="setSelectedGoal(s.id, $event.target.value)"
+                                   :title="'Target for ' + goalJobTitle() + '. Use all-jobs target keeps the default.'">
+                              <option value="__default__">Use all-jobs target</option>
+                              <template x-for="opt in goalSelectOptions(selectedGoalFor(s.id))" :key="opt.value">
+                                <option :value="opt.value" x-text="opt.label"></option>
+                              </template>
+                            </select>
+                          </td>
+                        </tr>
+                      </template>
+                      <template x-if="goalStages().length === 0">
+                        <tr><td colspan="3" class="text-muted text-center" style="padding:14px;">
+                          No stages to set goals for. Add stages first.
+                        </td></tr>
+                      </template>
+                    </tbody>
+                  </table>
+                </div>
+                <div class="settings-save-row">
+                  <button class="btn btn-primary btn-sm" :disabled="saving" @click="save('goals')">Save Goals</button>
+                  <button class="btn btn-outline-secondary btn-sm ms-2" @click="reload('benchmarks')">Discard</button>
                 </div>
               </div>
             </template>

@@ -16,6 +16,7 @@ import type {
   RegionRow,
   RecruiterRow,
   RefuseReasonRow,
+  WaterfallBenchmarkRow,
 } from "./types";
 
 // ---------- Column index maps (1-based for GAS, 0-based here for arrays) ----------
@@ -32,7 +33,7 @@ const JOB_COLS = {
   id: 0, title: 1, department: 2, location: 3, region_id: 4,
   status: 5, head_count: 6, recruiter_id: 7, salary_range: 8,
   posted_date: 9, closes_date: 10, posting_expires: 11, notes: 12, created_at: 13,
-  filled: 14,
+  filled: 14, role_tier: 15,
 };
 
 const HISTORY_COLS = {
@@ -41,11 +42,12 @@ const HISTORY_COLS = {
   stage_to_name: 9, changed_by: 10, days_in_previous_stage: 11,
 };
 
-const STAGE_COLS = { id: 0, name: 1, sequence: 2, color: 3, is_hired: 4, is_rejected: 5, is_offer: 6, target_hours: 7, is_enabled: 8 };
+const STAGE_COLS = { id: 0, name: 1, sequence: 2, color: 3, is_hired: 4, is_rejected: 5, is_offer: 6, target_hours: 7, is_enabled: 8, benchmark_pct: 9 };
 const SOURCE_COLS = { id: 0, name: 1, medium: 2, default_motion: 3, is_enabled: 4 };
 const REGION_COLS = { id: 0, name: 1, is_enabled: 2 };
 const RECRUITER_COLS = { id: 0, name: 1, email: 2, is_active: 3 };
 const REFUSE_COLS = { id: 0, name: 1, is_enabled: 2 };
+const WATERFALL_BENCHMARK_COLS = { id: 0, stage_id: 1, job_id: 2, benchmark_pct: 3 };
 
 const SHEET_NAMES = {
   candidates: "candidates",
@@ -56,6 +58,7 @@ const SHEET_NAMES = {
   regions: "regions",
   recruiters: "recruiters",
   refuseReasons: "refuse_reasons",
+  waterfallBenchmarks: "waterfall_benchmarks",
 };
 
 // ---------- Helpers ----------
@@ -201,10 +204,18 @@ export class SheetDB implements ISheetDB {
 
   // Cross-execution cache for settings tables (stages, sources, regions,
   // recruiters, refuse_reasons). They change rarely but are read on every
-  // single request, so a 60s TTL on CacheService eliminates almost all
-  // settings I/O. Invalidated immediately on any replace*() write so a
-  // settings change is visible to other users on the next poll.
-  private static readonly SETTINGS_CACHE_TTL_SEC = 60;
+  // single request, so a TTL on CacheService eliminates almost all settings
+  // I/O. Invalidated immediately on any replace*() write so a settings
+  // change made via the in-app Settings modal is visible to other users
+  // on the next poll, regardless of TTL.
+  //
+  // 180s (3 min) is the conservative middle ground between the original
+  // 60s and the maximum-cache-hit 300s+ — it covers ~90% of poll traffic
+  // while still bounding the staleness window for the rare workflow where
+  // an admin edits the spreadsheet tabs directly (bypassing the in-app
+  // invalidation path). For the high-traffic in-app edit path, staleness
+  // is always 0 because replaceX() busts the cache immediately.
+  private static readonly SETTINGS_CACHE_TTL_SEC = 180;
   private static readonly SETTINGS_CACHE_PREFIX  = "tpg.ats.settings.v1.";
 
   constructor(spreadsheetId?: string) {
@@ -549,6 +560,9 @@ export class SheetDB implements ISheetDB {
       is_offer: parseBool(r[STAGE_COLS.is_offer]),
       target_hours: parseNumOrNull(r[STAGE_COLS.target_hours]),
       is_enabled: parseBool(r[STAGE_COLS.is_enabled]),
+      // Backwards-compatible: if the column doesn't exist yet on existing
+      // sheets (pre-benchmark rollout), parseNumOrNull of undefined → null.
+      benchmark_pct: parseNumOrNull(r[STAGE_COLS.benchmark_pct]),
     }));
     this._settingsCacheSet(SHEET_NAMES.stages, rows);
     return rows;
@@ -605,6 +619,43 @@ export class SheetDB implements ISheetDB {
     return rows;
   }
 
+  getAllWaterfallBenchmarks(): WaterfallBenchmarkRow[] {
+    const cached = this._settingsCacheGet<WaterfallBenchmarkRow>(SHEET_NAMES.waterfallBenchmarks);
+    if (cached) return cached;
+    // Sheet may not exist yet on pre-upgrade installs. Benign — readers
+    // fall back to stage.benchmark_pct / XDR_BENCH when this returns [].
+    const raw = this._getRowsIfSheetExists(SHEET_NAMES.waterfallBenchmarks);
+    const rows: WaterfallBenchmarkRow[] = raw.map(r => {
+      const stageId = parseNum(r[WATERFALL_BENCHMARK_COLS.stage_id]);
+      const pct     = parseNum(r[WATERFALL_BENCHMARK_COLS.benchmark_pct]);
+      if (!stageId || !isFinite(pct)) return null;
+      // Legacy tolerance: pre-migration seed data stored a role_tier string
+      // ("xdr" / "mid" / ...) in the job_id column. Number(s) of any such
+      // string is NaN → coerce to 0 (the default row) so those rows still
+      // load as the fallback benchmark rather than corrupting the matrix.
+      const rawJob = r[WATERFALL_BENCHMARK_COLS.job_id];
+      const jobNum = Number(rawJob);
+      const jobId  = Number.isFinite(jobNum) && jobNum >= 0 ? jobNum : 0;
+      return {
+        id: parseNum(r[WATERFALL_BENCHMARK_COLS.id]),
+        stage_id: stageId,
+        job_id: jobId,
+        benchmark_pct: pct,
+      };
+    }).filter((x): x is WaterfallBenchmarkRow => x !== null);
+    this._settingsCacheSet(SHEET_NAMES.waterfallBenchmarks, rows);
+    return rows;
+  }
+
+  /** Read rows from a sheet, returning [] if the sheet doesn't exist yet.
+   *  Used for the waterfall_benchmarks sheet which may be absent on
+   *  pre-upgrade installs. Lets the app keep working on legacy sheets. */
+  private _getRowsIfSheetExists(name: string): unknown[][] {
+    const sheet = this._ss.getSheetByName(name);
+    if (!sheet) return [];
+    return this._getRows(name);
+  }
+
   private _replaceSheet(sheetName: string, header: string[], rows: unknown[][]): void {
     const sheet = this._sheet(sheetName);
     const lastRow = sheet.getLastRow();
@@ -619,7 +670,9 @@ export class SheetDB implements ISheetDB {
   replaceStages(rows: StageRow[]): void {
     const assigned = assignIds(rows);
     this._replaceSheet(SHEET_NAMES.stages, [], assigned.map(r => [
-      r.id, r.name, r.sequence, r.color, r.is_hired, r.is_rejected, r.is_offer, r.target_hours ?? "", r.is_enabled,
+      r.id, r.name, r.sequence, r.color, r.is_hired, r.is_rejected, r.is_offer,
+      r.target_hours ?? "", r.is_enabled,
+      r.benchmark_pct ?? "",
     ]));
     this._settingsCacheInvalidate(SHEET_NAMES.stages);
   }
@@ -650,6 +703,29 @@ export class SheetDB implements ISheetDB {
     this._settingsCacheInvalidate(SHEET_NAMES.refuseReasons);
   }
 
+  replaceWaterfallBenchmarks(rows: WaterfallBenchmarkRow[]): void {
+    this._ensureSheet(SHEET_NAMES.waterfallBenchmarks,
+      ["id", "stage_id", "job_id", "benchmark_pct"]);
+    const assigned = assignIds(rows);
+    this._replaceSheet(SHEET_NAMES.waterfallBenchmarks, [], assigned.map(r => [
+      r.id, r.stage_id, r.job_id, r.benchmark_pct,
+    ]));
+    this._settingsCacheInvalidate(SHEET_NAMES.waterfallBenchmarks);
+  }
+
+  /** Auto-create a sheet with header row if it doesn't exist. Used for
+   *  sheets introduced after the initial schema (waterfall_benchmarks)
+   *  so legacy installs upgrade transparently on first write. */
+  private _ensureSheet(name: string, headers: string[]): GoogleAppsScript.Spreadsheet.Sheet {
+    let sheet = this._ss.getSheetByName(name);
+    if (sheet) return sheet;
+    sheet = this._ss.insertSheet(name);
+    sheet.getRange(1, 1, 1, headers.length).setValues([headers]);
+    sheet.getRange(1, 1, 1, headers.length).setFontWeight("bold");
+    sheet.setFrozenRows(1);
+    return sheet;
+  }
+
   seedDefaultData(): void {
     if (this.getAllStages().length === 0) {
       this.replaceStages(DEFAULT_STAGES);
@@ -662,6 +738,21 @@ export class SheetDB implements ISheetDB {
     }
     if (this.getAllRefuseReasons().length === 0) {
       this.replaceRefuseReasons(DEFAULT_REFUSE_REASONS);
+    }
+    // Seed the DEFAULT benchmark row (job_id = 0) from whatever's on the
+    // stage rows. job_id > 0 rows are per-job overrides that the admin
+    // sets later via the Job edit modal.
+    if (this.getAllWaterfallBenchmarks().length === 0) {
+      const stages = this.getAllStages();
+      const seeds: WaterfallBenchmarkRow[] = stages
+        .filter(s => s.benchmark_pct != null)
+        .map(s => ({
+          id: 0,
+          stage_id: s.id,
+          job_id: 0,   // 0 = default, applies to all jobs
+          benchmark_pct: s.benchmark_pct as number,
+        }));
+      if (seeds.length > 0) this.replaceWaterfallBenchmarks(seeds);
     }
   }
 
@@ -725,6 +816,12 @@ export class SheetDB implements ISheetDB {
       // undefined cells so existing rows that pre-date the column read
       // cleanly as 0 (no slots filled yet, which is the correct default).
       filled: parseNum(r[JOB_COLS.filled]),
+      // `role_tier` added after initial schema. Legacy rows have no value;
+      // return null so downstream matching falls back to title-substring.
+      role_tier: (function (v): JobRow["role_tier"] {
+        const s = parseStr(v).toLowerCase().trim();
+        return (s === "xdr" || s === "mid" || s === "senior" || s === "exec") ? s : null;
+      })(r[JOB_COLS.role_tier]),
     };
   }
 
@@ -734,6 +831,7 @@ export class SheetDB implements ISheetDB {
       j.status, j.head_count, j.recruiter_id ?? "", j.salary_range,
       j.posted_date, j.closes_date, j.posting_expires, j.notes, j.created_at,
       j.filled ?? 0,
+      j.role_tier ?? "",
     ];
   }
 }
@@ -741,15 +839,15 @@ export class SheetDB implements ISheetDB {
 // -------- Default seed data --------
 
 export const DEFAULT_STAGES: StageRow[] = [
-  { id: 1, name: "Applied",         sequence: 100, color: "#1976d2", is_hired: false, is_rejected: false, is_offer: false, target_hours: 48,  is_enabled: true },
-  { id: 2, name: "Reviewed",        sequence: 200, color: "#0288d1", is_hired: false, is_rejected: false, is_offer: false, target_hours: 72,  is_enabled: true },
-  { id: 3, name: "Contacted",       sequence: 300, color: "#0097a7", is_hired: false, is_rejected: false, is_offer: false, target_hours: 48,  is_enabled: true },
-  { id: 4, name: "Pre-screen",      sequence: 400, color: "#00897b", is_hired: false, is_rejected: false, is_offer: false, target_hours: 96,  is_enabled: true },
-  { id: 5, name: "Roleplay/CG",     sequence: 500, color: "#43a047", is_hired: false, is_rejected: false, is_offer: false, target_hours: 120, is_enabled: true },
-  { id: 6, name: "Final Interview", sequence: 600, color: "#fdd835", is_hired: false, is_rejected: false, is_offer: false, target_hours: 96,  is_enabled: true },
-  { id: 7, name: "Offer",           sequence: 700, color: "#fb8c00", is_hired: false, is_rejected: false, is_offer: true,  target_hours: 48,  is_enabled: true },
-  { id: 8, name: "Hired",           sequence: 800, color: "#4caf50", is_hired: true,  is_rejected: false, is_offer: false, target_hours: null, is_enabled: true },
-  { id: 9, name: "Rejected",        sequence: 900, color: "#e53935", is_hired: false, is_rejected: true,  is_offer: false, target_hours: null, is_enabled: true },
+  { id: 1, name: "Applied",         sequence: 100, color: "#1976d2", is_hired: false, is_rejected: false, is_offer: false, target_hours: 48,  is_enabled: true, benchmark_pct: null },
+  { id: 2, name: "Reviewed",        sequence: 200, color: "#0288d1", is_hired: false, is_rejected: false, is_offer: false, target_hours: 72,  is_enabled: true, benchmark_pct: 50 },
+  { id: 3, name: "Contacted",       sequence: 300, color: "#0097a7", is_hired: false, is_rejected: false, is_offer: false, target_hours: 48,  is_enabled: true, benchmark_pct: 80 },
+  { id: 4, name: "Pre-screen",      sequence: 400, color: "#00897b", is_hired: false, is_rejected: false, is_offer: false, target_hours: 96,  is_enabled: true, benchmark_pct: 75 },
+  { id: 5, name: "Roleplay/CG",     sequence: 500, color: "#43a047", is_hired: false, is_rejected: false, is_offer: false, target_hours: 120, is_enabled: true, benchmark_pct: 80 },
+  { id: 6, name: "Final Interview", sequence: 600, color: "#fdd835", is_hired: false, is_rejected: false, is_offer: false, target_hours: 96,  is_enabled: true, benchmark_pct: 79 },
+  { id: 7, name: "Offer",           sequence: 700, color: "#fb8c00", is_hired: false, is_rejected: false, is_offer: true,  target_hours: 48,  is_enabled: true, benchmark_pct: 89 },
+  { id: 8, name: "Hired",           sequence: 800, color: "#4caf50", is_hired: true,  is_rejected: false, is_offer: false, target_hours: null, is_enabled: true, benchmark_pct: 94 },
+  { id: 9, name: "Rejected",        sequence: 900, color: "#e53935", is_hired: false, is_rejected: true,  is_offer: false, target_hours: null, is_enabled: true, benchmark_pct: null },
 ];
 
 export const DEFAULT_SOURCES: SourceRow[] = [

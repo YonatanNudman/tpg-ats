@@ -7,8 +7,17 @@
 
     <!-- ── Add Candidate ─────────────────────────────────── -->
     <template x-if="$store.app.modal.open && $store.app.modal.type === 'addCandidate'">
-      <div class="modal-overlay" @click.self="$store.app.closeModal()">
-        <div class="modal-dialog" x-data="addCandidateModal()" x-init="init()">
+      <div class="modal-overlay"
+           @click.self="$store.app.closeModal()"
+           @keydown.escape.window="$store.app.closeModal()">
+        <!--
+          Keyboard wiring: Enter submits unless focus is in a textarea (where
+          Enter = newline). Autofocus the first interactive element on mount
+          so recruiters can start typing immediately without a tab/click.
+        -->
+        <div class="modal-dialog" x-data="addCandidateModal()"
+             x-init="init(); $nextTick(() => { var el = $el.querySelector('input,select,textarea'); if (el) el.focus(); })"
+             @keydown.enter="if ($event.target.tagName !== 'TEXTAREA') { $event.preventDefault(); submit(); }">
 
           <div class="modal-header">
             <span class="modal-title">Add Candidate</span>
@@ -161,8 +170,12 @@
 
     <!-- ── Reject Candidate ─────────────────────────────── -->
     <template x-if="$store.app.modal.open && $store.app.modal.type === 'confirmReject'">
-      <div class="modal-overlay" @click.self="$store.app.closeModal()">
-        <div class="modal-dialog" x-data="rejectModal()" x-init="init()">
+      <div class="modal-overlay"
+           @click.self="$store.app.closeModal()"
+           @keydown.escape.window="$store.app.closeModal()">
+        <div class="modal-dialog" x-data="rejectModal()"
+             x-init="init(); $nextTick(() => { var el = $el.querySelector('select,input,textarea'); if (el) el.focus(); })"
+             @keydown.enter="if ($event.target.tagName !== 'TEXTAREA') { $event.preventDefault(); submit(); }">
           <div class="modal-header">
             <span class="modal-title"
               x-text="(($store.app.modal.data || {}).bulk) ? ('Reject ' + ((($store.app.modal.data || {}).ids || []).length) + ' candidates') : 'Reject Candidate'"></span>
@@ -247,8 +260,12 @@
 
     <!-- ── Add / Edit Job ───────────────────────────────── -->
     <template x-if="$store.app.modal.open && ($store.app.modal.type === 'addJob' || $store.app.modal.type === 'editJob')">
-      <div class="modal-overlay" @click.self="$store.app.closeModal()">
-        <div class="modal-dialog modal-lg" x-data="jobModal()" x-init="init()">
+      <div class="modal-overlay"
+           @click.self="$store.app.closeModal()"
+           @keydown.escape.window="$store.app.closeModal()">
+        <div class="modal-dialog modal-lg" x-data="jobModal()"
+             x-init="init(); $nextTick(() => { var el = $el.querySelector('input,select,textarea'); if (el) el.focus(); })"
+             @keydown.enter="if ($event.target.tagName !== 'TEXTAREA') { $event.preventDefault(); submit(); }">
 
           <div class="modal-header">
             <span class="modal-title" x-text="$store.app.modal.type === 'editJob' ? 'Edit Job' : 'Add Job Opening'"></span>
@@ -271,6 +288,20 @@
                   <option>Open</option>
                   <option>On Hold</option>
                   <option>Closed</option>
+                </select>
+              </div>
+
+              <div class="col-6">
+                <label class="form-label">
+                  Role tier
+                  <span class="form-label-hint">drives xDR filter + waterfall benchmarks</span>
+                </label>
+                <select class="form-select" x-model="form.role_tier">
+                  <option value="">— Unset —</option>
+                  <option value="xdr">xDR</option>
+                  <option value="mid">Mid</option>
+                  <option value="senior">Senior</option>
+                  <option value="exec">Exec</option>
                 </select>
               </div>
 
@@ -368,6 +399,25 @@
                 <textarea class="form-control" rows="2" x-model="form.notes"></textarea>
               </div>
 
+              <!-- Waterfall goals live in Settings → Waterfall Goals
+                   now — one matrix for all jobs + stages. Kept this slot
+                   in the job modal for a deep-link shortcut. -->
+              <template x-if="$store.app.modal.type === 'editJob' && jobId">
+                <div class="col-12">
+                  <div class="job-benchmarks-head">
+                    <label class="form-label mb-0">
+                      Waterfall goals
+                      <span class="form-label-hint">set per-job goals in Settings</span>
+                    </label>
+                    <button type="button" class="btn btn-sm btn-outline-secondary"
+                            @click.prevent="openGoalsTab(jobId)">
+                      Edit in Settings
+                      <span class="material-icons mi-inline">arrow_forward</span>
+                    </button>
+                  </div>
+                </div>
+              </template>
+
             </div>
           </div>
 
@@ -375,6 +425,53 @@
             <button class="btn btn-outline-secondary" @click="$store.app.closeModal()">Cancel</button>
             <button class="btn btn-primary" :disabled="submitting" @click="submit()"
               x-text="submitting ? 'Saving…' : ($store.app.modal.type === 'editJob' ? 'Save Changes' : 'Add Job')"></button>
+          </div>
+        </div>
+      </div>
+    </template>
+
+    <!-- ── Generic Confirm dialog ─────────────────────────── -->
+    <!--
+      Branded replacement for window.confirm(). Opened via the store's
+      async confirm() helper which returns a Promise<boolean>; this
+      template renders the prompt and routes the two button choices
+      back through _confirmResolve(). See app.js.html for the helper +
+      docs.
+
+      Visual contract:
+        - title           — bold, top of dialog
+        - message         — plain text, preserves newlines via white-space
+        - cancelLabel     — left button, neutral outline (safe choice)
+        - confirmLabel    — right button, blue (primary) or red (danger)
+
+      Keyboard:
+        - Enter  → confirm
+        - Esc    → cancel (also closes via the overlay handler)
+        - Click outside → cancel
+    -->
+    <template x-if="$store.app.modal.open && $store.app.modal.type === 'confirm'">
+      <div class="modal-overlay confirm-overlay"
+           @click.self="$store.app._confirmResolve(false)"
+           @keydown.escape.window="$store.app._confirmResolve(false)">
+        <div class="modal-dialog modal-confirm" x-data
+             x-init="$nextTick(() => { var el = $el.querySelector('button.confirm-btn'); if (el) el.focus(); })"
+             @keydown.enter.prevent="$store.app._confirmResolve(true)">
+          <div class="modal-header">
+            <span class="modal-title" x-text="($store.app.modal.data || {}).title || 'Confirm'"></span>
+            <button class="icon-btn-sm" @click="$store.app._confirmResolve(false)"
+                    aria-label="Cancel">&times;</button>
+          </div>
+          <div class="modal-body">
+            <p class="confirm-message" x-text="($store.app.modal.data || {}).message"></p>
+          </div>
+          <div class="modal-footer">
+            <button class="btn btn-outline-secondary"
+                    @click="$store.app._confirmResolve(false)"
+                    x-text="($store.app.modal.data || {}).cancelLabel || 'Cancel'"></button>
+            <button class="btn confirm-btn"
+                    :class="(($store.app.modal.data || {}).danger) ? 'btn-danger' : 'btn-primary'"
+                    @click="$store.app._confirmResolve(true)"
+                    x-text="($store.app.modal.data || {}).confirmLabel || 'Confirm'"></button>
           </div>
         </div>
       </div>
@@ -431,6 +528,37 @@ document.addEventListener('alpine:init', function () {
             var ok  = (result.successIds || []).length;
             var bad = (result.failures   || []).length;
             var storeBulk = this.$store.app;
+            // Close the modal immediately on success path — the await
+            // above already finished, the result is in hand. Previously
+            // the modal stayed open through the full reloadAll() (~1-3s
+            // on big datasets), making it feel like nothing happened.
+            this.$store.app.closeModal();
+            var rootBulk = Alpine.$data(document.querySelector('#app'));
+            if (rootBulk) {
+              // Drop rejected ids from selection AND patch the local
+              // candidate list so the funnel reflects the rejection
+              // without waiting for the network round-trip below.
+              var done = {};
+              (result.successIds || []).forEach(function (id) { done[id] = true; });
+              rootBulk.selectedIds = rootBulk.selectedIds.filter(function (id) { return !done[id]; });
+              var rejStage = (rootBulk.settings.stages || [])
+                .find(function (s) { return s.is_rejected && s.is_enabled; });
+              if (rejStage) {
+                rootBulk._patchCandidatesById(result.successIds || [], {
+                  stage_id:               rejStage.id,
+                  stage_name:             rejStage.name,
+                  status:                 'Rejected',
+                  refuse_reason_id:       reasonId,
+                  date_last_stage_update: new Date().toISOString().slice(0, 10),
+                });
+              }
+              // Background reload to pick up server-side denormalizations
+              // (refuse reason name, history). Failures here are non-fatal;
+              // local patch already gave the user the right view.
+              rootBulk.reloadAll().catch(function () {});
+            }
+            // Show toast AFTER closing so the success affordance lands
+            // on the now-visible page rather than a fading modal backdrop.
             if (bad === 0) {
               storeBulk.toastSuccess('Rejected ' + ok + ' candidate' + (ok === 1 ? '' : 's') + '.', {
                 actionLabel: 'View rejections',
@@ -438,56 +566,77 @@ document.addEventListener('alpine:init', function () {
                 onAction: function () {
                   var root = Alpine.$data(document.querySelector('#app'));
                   if (!root) return;
-                  root.showRejections = true;
-                  root.loadRecentRejections();
-                  root.scrollToSection('sec-rejections');
+                  root.showFunnel = true;
+                  if (root.expandedStages.indexOf(-1) < 0) root.expandedStages.push(-1);
+                  root.scrollToSection('sec-funnel');
                 },
               });
             } else {
-              this.$store.app.toastError(
+              storeBulk.toastError(
                 'Rejected ' + ok + ', ' + bad + ' failed. First error: ' +
                   (result.failures[0].message || 'unknown'),
                 { duration: 8000 }
               );
             }
-            this.$store.app.closeModal();
-            var rootBulk = Alpine.$data(document.querySelector('#app'));
-            if (rootBulk) {
-              // Drop rejected ids from selection so the action bar
-              // doesn't keep showing them as pending.
-              var done = {};
-              (result.successIds || []).forEach(function (id) { done[id] = true; });
-              rootBulk.selectedIds = rootBulk.selectedIds.filter(function (id) { return !done[id]; });
-              await rootBulk.reloadAll();
-            }
             return;
           }
           var candidateId = data.candidateId;
           await gasCall('rejectCandidate', candidateId, reasonId);
-          // If a note was provided, append it to the candidate's notes.
-          if (this.note && this.note.trim()) {
-            try {
-              var detail = await gasCall('getCandidateDetail', candidateId);
-              var existing = (detail.candidate.notes || '').trim();
-              var stamp = '[Rejected ' + new Date().toISOString().split('T')[0] + '] ' + this.note.trim();
-              var combined = existing ? existing + '\n\n' + stamp : stamp;
-              await gasCall('updateCandidate', candidateId, { notes: combined });
-            } catch (e) { /* non-fatal — reject already succeeded */ }
-          }
+          // Capture the note text before we close — `this.note` will
+          // get reset by closeModal -> init.
+          var pendingNote = this.note && this.note.trim() ? this.note.trim() : '';
+          // Close modal + peek immediately. The reject succeeded; everything
+          // below (note append, full reload, funnel expand) is non-blocking
+          // background work. Previously this chain held the modal open for
+          // 1.5-6s through 3 serial round trips before the user got to see
+          // the page again — felt frozen even though the work was done.
           this.$store.app.closeModal();
           this.$store.app.closePeek();
           var root = Alpine.$data(document.querySelector('#app'));
-          if (root) await root.reloadAll();
+          // Local-patch the candidate so the funnel updates instantly.
+          if (root) {
+            var rejStage1 = (root.settings.stages || [])
+              .find(function (s) { return s.is_rejected && s.is_enabled; });
+            if (rejStage1) {
+              root._patchCandidatesById([candidateId], {
+                stage_id:               rejStage1.id,
+                stage_name:             rejStage1.name,
+                status:                 'Rejected',
+                refuse_reason_id:       reasonId,
+                date_last_stage_update: new Date().toISOString().slice(0, 10),
+              });
+            }
+            root.showFunnel = true;
+            if (root.expandedStages.indexOf(-1) < 0) root.expandedStages.push(-1);
+          }
+          // Show toast right away so feedback isn't gated on the background
+          // reload completing. View-rejections action still works because
+          // the funnel is already populated locally.
           this.$store.app.toastSuccess('Candidate rejected.', {
             actionLabel: 'View rejections',
             duration: 7000,
             onAction: function () {
               if (!root) return;
-              root.showRejections = true;
-              root.loadRecentRejections();
-              root.scrollToSection('sec-rejections');
+              root.showFunnel = true;
+              if (root.expandedStages.indexOf(-1) < 0) root.expandedStages.push(-1);
+              root.scrollToSection('sec-funnel');
             },
           });
+          // Background: append the note (if any), then reload everything.
+          // Wrapped in an async IIFE so `submitting` resets right away in
+          // the finally block — the modal is already gone.
+          (async function () {
+            if (pendingNote) {
+              try {
+                var detail = await gasCall('getCandidateDetail', candidateId);
+                var existing = (detail.candidate.notes || '').trim();
+                var stamp = '[Rejected ' + new Date().toISOString().split('T')[0] + '] ' + pendingNote;
+                var combined = existing ? existing + '\n\n' + stamp : stamp;
+                await gasCall('updateCandidate', candidateId, { notes: combined });
+              } catch (e) { /* non-fatal — reject already succeeded */ }
+            }
+            if (root) { try { await root.reloadAll(); } catch (e) { /* ignore */ } }
+          })();
         } catch (e) {
           this.$store.app.toastError('Reject failed: ' + e.message);
         } finally { this.submitting = false; }
@@ -584,12 +733,16 @@ document.addEventListener('alpine:init', function () {
             linkedin_url: this.form.linkedin_url || '',
             notes: this.form.notes || '',
           });
+          // Close immediately so the modal disappears in <16ms instead of
+          // staying open through the reloadAll() round-trip (~300-1500ms).
+          // The new candidate will appear when reloadAll completes in the
+          // background; the toast confirms the create either way.
+          this.$store.app.closeModal();
           this.$store.app.toastSuccess(
             this.duplicates.length > 0 ? 'Duplicate candidate added.' : 'Candidate added.'
           );
-          this.$store.app.closeModal();
           var root = Alpine.$data(document.querySelector('#app'));
-          if (root) await root.reloadAll();
+          if (root) root.reloadAll().catch(function () { /* non-fatal */ });
         } catch (e) {
           this.$store.app.toastError('Could not add: ' + e.message);
         } finally { this.submitting = false; }
@@ -606,14 +759,21 @@ document.addEventListener('alpine:init', function () {
         // typing while still letting them overwrite for in-office roles.
         title: '', department: '', location: 'Remote', region_id: '',
         status: 'Open', head_count: 1, filled: 0, recruiter_id: '',
+        role_tier: '',
         salary_min: '', salary_max: '',
         posted_date: new Date().toISOString().split('T')[0],
         closes_date: '', posting_expires: '', notes: '',
       },
 
+      // Real job id, set in edit mode only. Drives the "Edit in Settings"
+      // shortcut at the bottom of the modal — new jobs need to be saved
+      // first before per-job goals make sense.
+      jobId: null,
+
       init: function () {
-        if (this.$store.app.modal.type === 'editJob' && this.$store.app.modal.data && this.$store.app.modal.data.job) {
-          var j = this.$store.app.modal.data.job;
+        var data = this.$store.app.modal.data || {};
+        if (this.$store.app.modal.type === 'editJob' && data.job) {
+          var j = data.job;
           // Parse the historical freeform `salary_range` string into the
           // structured min/max inputs the new UI renders. Anything that
           // doesn't parse cleanly leaves both blank — the recruiter can
@@ -625,13 +785,24 @@ document.addEventListener('alpine:init', function () {
             region_id: j.region_id || '', status: j.status || 'Open',
             head_count: j.head_count || 1, filled: j.filled || 0,
             recruiter_id: j.recruiter_id || '',
+            role_tier: j.role_tier || '',
             salary_min: salary.min != null ? salary.min : '',
             salary_max: salary.max != null ? salary.max : '',
             posted_date: j.posted_date || '',
             closes_date: j.closes_date || '', posting_expires: j.posting_expires || '',
             notes: j.notes || '',
           };
+          this.jobId = j.id;
         }
+      },
+
+      // Close the job modal and open Settings → Waterfall Goals, flashing
+      // to the top of this job's column so the admin knows where to edit.
+      openGoalsTab: function (jobId) {
+        this.$store.app.closeModal();
+        var s = this.$store.app;
+        s.settingsTab = 'goals';
+        s.settingsOpen = true;
       },
 
       validate: function () {
@@ -670,24 +841,44 @@ document.addEventListener('alpine:init', function () {
             head_count: parseInt(this.form.head_count, 10) || 1,
             filled: Math.max(0, parseInt(this.form.filled, 10) || 0),
             recruiter_id: this.form.recruiter_id ? parseInt(this.form.recruiter_id, 10) : null,
+            role_tier: this.form.role_tier || null,
             salary_range: salaryStorage,
             posted_date: this.form.posted_date || '',
             closes_date: this.form.closes_date || '',
             posting_expires: this.form.posting_expires || '',
             notes: this.form.notes || '',
           };
-          if (this.$store.app.modal.type === 'editJob') {
+          var isEdit = this.$store.app.modal.type === 'editJob';
+          var jobIdSaved;
+          if (isEdit) {
             await gasCall('updateJobOpening', this.$store.app.modal.data.job.id, payload);
-            this.$store.app.toastSuccess('Job updated.');
+            jobIdSaved = this.$store.app.modal.data.job.id;
           } else {
-            await gasCall('createJobOpening', payload);
-            this.$store.app.toastSuccess('Job created.');
+            var created = await gasCall('createJobOpening', payload);
+            jobIdSaved = created && created.id;
           }
+
+          // Benchmark overrides live in Settings → Waterfall Goals now.
+          // The job modal just deep-links there; no need to persist overrides
+          // at job-save time.
+
+          // Close before the background reload — the write succeeded,
+          // no reason to make the user watch the modal for the 300-1500ms
+          // getJobOpenings + loadCandidates round-trips.
           this.$store.app.closeModal();
+          this.$store.app.toastSuccess(isEdit ? 'Job updated.' : 'Job created.');
           var root = Alpine.$data(document.querySelector('#app'));
           if (root) {
-            root.jobs = await gasCall('getJobOpenings');
-            await root.loadCandidates();
+            // Fire refreshes in parallel and detach. Either failing
+            // is non-fatal; the next sync poll will catch us up.
+            gasCall('getJobOpenings').then(function (j) { root.jobs = j; }).catch(function () {});
+            root.loadCandidates().catch(function () {});
+            // Refresh the waterfall benchmarks list and the waterfall view
+            // so the new override shows up without a manual reload.
+            gasCall('getSettings').then(function (s) {
+              root.settings.waterfallBenchmarks = s.waterfallBenchmarks || [];
+              if (root.reloadWaterfall) root.reloadWaterfall();
+            }).catch(function () {});
           }
         } catch (e) {
           this.$store.app.toastError('Save failed: ' + e.message);

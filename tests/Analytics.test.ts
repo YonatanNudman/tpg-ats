@@ -7,6 +7,7 @@ import {
   computeSourceEffectiveness,
   computeTimeToHireTrend,
   computeStageVelocity,
+  computeRejectionReasons,
   computeSlaBreaches,
   computeWaterfall,
   XDR_BENCH,
@@ -17,6 +18,7 @@ import type {
   StageRow,
   SourceRow,
   RecruiterRow,
+  RefuseReasonRow,
   HistoryRow,
   DashboardFilters,
   WaterfallFilters,
@@ -637,7 +639,7 @@ describe("computeWaterfall", () => {
     expect(result.cohortSize).toBe(0);
   });
 
-  it("xdrOnly restricts cohort to jobs with 'xdr' in title", () => {
+  it("roleTier='xdr' restricts cohort to jobs tagged xdr or with 'xdr' in title", () => {
     const candidates = [
       makeCandidate({ id: 1, stage_id: 1, job_id: 1, date_applied: "2026-04-05" }), // xDR
       makeCandidate({ id: 2, stage_id: 1, job_id: 2, date_applied: "2026-04-05" }), // AE
@@ -646,7 +648,7 @@ describe("computeWaterfall", () => {
       hist({ candidate_id: 1, stage_to_id: 1 }),
       hist({ candidate_id: 2, stage_to_id: 1 }),
     ];
-    const result = computeWaterfall(candidates, history, stages, jobs, { ...aprilWindow, xdrOnly: true });
+    const result = computeWaterfall(candidates, history, stages, jobs, { ...aprilWindow, roleTier: "xdr" });
     expect(result.cohortSize).toBe(1);
     expect(result.rows[0].count).toBe(1);
   });
@@ -719,6 +721,8 @@ describe("computeWaterfall", () => {
       history.push(hist({ candidate_id: i, stage_to_id: 3 }));
     }
 
+    // Out-of-box: no stored benchmarks, no jobId filter. XDR_BENCH
+    // positional fallback kicks in for the default 8-stage setup.
     const result = computeWaterfall(candidates, history, stages, jobs, aprilWindow);
 
     expect(result.benchmarksValid).toBe(true);
@@ -731,12 +735,95 @@ describe("computeWaterfall", () => {
     expect(result.rows[2].bench_above).toBe(false);
   });
 
-  it("sets benchmarksValid=false when stage count isn't exactly 8 non-rejected stages", () => {
-    // Drop two stages to get only 6 non-rejected.
+  it("reads default benchmarks from the sheet (job_id = 0)", () => {
+    // Default row wins over the XDR_BENCH fallback.
+    const candidates = [
+      makeCandidate({ id: 1, stage_id: 1, date_applied: "2026-04-05" }),
+      makeCandidate({ id: 2, stage_id: 2, date_applied: "2026-04-05" }),
+    ];
+    const history = [
+      hist({ candidate_id: 1, stage_to_id: 1 }),
+      hist({ candidate_id: 2, stage_to_id: 1 }),
+      hist({ candidate_id: 2, stage_to_id: 2 }),
+    ];
+    const benches = [
+      { id: 1, stage_id: 2, job_id: 0, benchmark_pct: 40 },
+    ];
+    const result = computeWaterfall(
+      candidates, history, stages, jobs, aprilWindow, benches,
+    );
+    expect(result.rows[1].bench_pct).toBe(40);     // default stored row wins
+    expect(result.rows[1].step_pct).toBe(50);      // 1/2 = 50%
+    expect(result.rows[1].bench_above).toBe(true); // 50 >= 40
+  });
+
+  it("prefers per-job override when the waterfall is filtered to a single job", () => {
+    const candidates = [
+      makeCandidate({ id: 1, stage_id: 2, job_id: 1, date_applied: "2026-04-05" }),
+      makeCandidate({ id: 2, stage_id: 2, job_id: 1, date_applied: "2026-04-05" }),
+      makeCandidate({ id: 3, stage_id: 1, job_id: 1, date_applied: "2026-04-05" }),
+    ];
+    const history = [
+      hist({ candidate_id: 1, stage_to_id: 1 }),
+      hist({ candidate_id: 1, stage_to_id: 2 }),
+      hist({ candidate_id: 2, stage_to_id: 1 }),
+      hist({ candidate_id: 2, stage_to_id: 2 }),
+      hist({ candidate_id: 3, stage_to_id: 1 }),
+    ];
+    const benches = [
+      { id: 1, stage_id: 2, job_id: 0, benchmark_pct: 50 }, // default
+      { id: 2, stage_id: 2, job_id: 1, benchmark_pct: 75 }, // override for job 1
+    ];
+    const result = computeWaterfall(
+      candidates, history, stages, jobs,
+      { ...aprilWindow, jobId: 1 }, benches,
+    );
+    // 3 cohort, 2 reached stage 2 → 66.67% → 67%. 67 < 75 → bench_above=false
+    expect(result.rows[1].bench_pct).toBe(75);       // override, not default 50
+    expect(result.rows[1].bench_above).toBe(false);
+  });
+
+  it("ignores per-job overrides when no single job is selected (uses default)", () => {
+    const candidates = [
+      makeCandidate({ id: 1, stage_id: 2, job_id: 1, date_applied: "2026-04-05" }),
+      makeCandidate({ id: 2, stage_id: 1, job_id: 2, date_applied: "2026-04-05" }),
+    ];
+    const history = [
+      hist({ candidate_id: 1, stage_to_id: 1 }),
+      hist({ candidate_id: 1, stage_to_id: 2 }),
+      hist({ candidate_id: 2, stage_to_id: 1 }),
+    ];
+    const benches = [
+      { id: 1, stage_id: 2, job_id: 0, benchmark_pct: 50 }, // default
+      { id: 2, stage_id: 2, job_id: 1, benchmark_pct: 75 }, // override only for job 1
+    ];
+    const result = computeWaterfall(
+      candidates, history, stages, jobs, aprilWindow, benches,
+    );
+    expect(result.rows[1].bench_pct).toBe(50);     // default, not the override
+  });
+
+  it("renders benchmarks when stored defaults exist (any stage count)", () => {
+    // With stored defaults, we no longer require the 8-stage shape.
     const trimmedStages = stages.filter(s => s.id !== 2 && s.id !== 5);
     const candidates = [makeCandidate({ id: 1, stage_id: 1, date_applied: "2026-04-05" })];
     const history   = [hist({ candidate_id: 1, stage_to_id: 1 })];
-    const result    = computeWaterfall(candidates, history, trimmedStages, jobs, aprilWindow);
+    const benches   = [{ id: 1, stage_id: 3, job_id: 0, benchmark_pct: 60 }];
+    const result = computeWaterfall(
+      candidates, history, trimmedStages, jobs, aprilWindow, benches,
+    );
+    expect(result.benchmarksValid).toBe(true);
+  });
+
+  it("sets benchmarksValid=false when no fallback chain resolves", () => {
+    // Drop two stages AND pass no stored benchmarks AND strip legacy
+    // stage.benchmark_pct. Nothing should resolve.
+    const bareStages = stages
+      .filter(s => s.id !== 2 && s.id !== 5)
+      .map(s => ({ ...s, benchmark_pct: null }));
+    const candidates = [makeCandidate({ id: 1, stage_id: 1, date_applied: "2026-04-05" })];
+    const history   = [hist({ candidate_id: 1, stage_to_id: 1 })];
+    const result    = computeWaterfall(candidates, history, bareStages, jobs, aprilWindow);
 
     expect(result.benchmarksValid).toBe(false);
     expect(result.rows.every(r => r.bench_pct === null)).toBe(true);
@@ -745,10 +832,271 @@ describe("computeWaterfall", () => {
     expect(result.rows[0].count).toBe(1);
   });
 
+  it("coerces string filter IDs (Alpine sends '1', row has 1)", () => {
+    // Regression for the shipped filter-doesn't-work bug: the frontend
+    // dropdown gives us filters.jobId = "1" but candidate.job_id is 1.
+    // Strict `!==` would always fail. Loose / coerced comparison must pass.
+    const candidates = [
+      makeCandidate({ id: 1, stage_id: 1, job_id: 1, date_applied: "2026-04-05" }),
+      makeCandidate({ id: 2, stage_id: 1, job_id: 2, date_applied: "2026-04-05" }),
+    ];
+    const history = [
+      hist({ candidate_id: 1, stage_to_id: 1 }),
+      hist({ candidate_id: 2, stage_to_id: 1 }),
+    ];
+    const result = computeWaterfall(candidates, history, stages, jobs, {
+      ...aprilWindow,
+      jobId: "1" as any,   // intentionally a string — Alpine payload
+    });
+    expect(result.cohortSize).toBe(1);
+    expect(result.rows[0].count).toBe(1);
+  });
+
   it("XDR_BENCH array matches sheet row 23 derivation", () => {
     // 100 → 50 → 40 → 30 → 24 → 19 → 17 → 16
     // step pcts = 50, 80, 75, 80, 79.1→79, 89.4→89, 94.1→94
     expect(Array.from(XDR_BENCH)).toEqual([50, 80, 75, 80, 79, 89, 94]);
     expect(XDR_BENCH.length).toBe(7); // 7 transitions for 8 stages
+  });
+});
+
+// ============================================================
+// Regression tests for the analytics-not-working bug
+// ============================================================
+//
+// These exercise specifically the three bugs the v75 audit caught that
+// were making the bottom-of-page Analytics section feel broken:
+//   1. computeFunnelConversion / computeStageVelocity used `new Date(endDate)`
+//      which parses as midnight UTC and excluded everything later that day.
+//   2. computeStageVelocity also had a `> 0` guard that dropped same-day
+//      moves entirely from dwell-time stats.
+//   3. computeTimeToHireTrend bucketed via local-time JS Date constructor,
+//      mis-attributing early-month hires to the previous month in EDT.
+//
+// All three bugs were silent under the existing `wideFilters` (endDate
+// "2030-12-31") test setup. These tests use realistic dates to catch the
+// real-world failure mode.
+
+describe("computeFunnelConversion (regression: today's events on endDate)", () => {
+  const stages: StageRow[] = [
+    { id: 1, name: "Applied",   sequence: 100, color: "#000", is_hired: false, is_rejected: false, is_offer: false, target_hours: null, is_enabled: true },
+    { id: 2, name: "Reviewed",  sequence: 200, color: "#000", is_hired: false, is_rejected: false, is_offer: false, target_hours: null, is_enabled: true },
+    { id: 99, name: "Rejected", sequence: 999, color: "#000", is_hired: false, is_rejected: true,  is_offer: false, target_hours: null, is_enabled: true },
+  ];
+
+  function hist(overrides: Partial<HistoryRow>): HistoryRow {
+    return {
+      id: 1, timestamp: "2026-04-23T14:30:00.000Z",
+      candidate_id: 1, candidate_name: "A",
+      job_id: 1, job_title: "J",
+      stage_from_id: 1, stage_from_name: "Applied",
+      stage_to_id: 2, stage_to_name: "Reviewed",
+      changed_by: "x", days_in_previous_stage: 0,
+      ...overrides,
+    };
+  }
+
+  it("INCLUDES transitions on the endDate that happen after midnight UTC", () => {
+    // Reproduces the original bug: history row at 14:30 UTC on the
+    // endDate. Old code: `ts > new Date('2026-04-23').getTime()` =>
+    // ts > midnight UTC => SKIPPED. Fixed code: dateOnly comparison
+    // => '2026-04-23' === '2026-04-23' => INCLUDED.
+    const history = [hist({ candidate_id: 1, timestamp: "2026-04-23T14:30:00.000Z" })];
+    const result = computeFunnelConversion(history, stages, {
+      startDate: "2026-04-01",
+      endDate:   "2026-04-23",
+    });
+    const reviewed = result.find(r => r.stage_id === 2);
+    expect(reviewed?.entered_count).toBe(1);
+  });
+
+  it("excludes transitions outside the date range", () => {
+    const history = [
+      hist({ candidate_id: 1, timestamp: "2026-03-31T23:59:00.000Z" }), // before start
+      hist({ candidate_id: 2, timestamp: "2026-04-15T10:00:00.000Z" }), // in range
+      hist({ candidate_id: 3, timestamp: "2026-04-24T01:00:00.000Z" }), // after end
+    ];
+    const result = computeFunnelConversion(history, stages, {
+      startDate: "2026-04-01",
+      endDate:   "2026-04-23",
+    });
+    expect(result.find(r => r.stage_id === 2)?.entered_count).toBe(1);
+  });
+
+  it("returns 100% for the first stage and computes conversion downstream", () => {
+    // A → B for 4 candidates, then B → A doesn't make sense; use B→Reviewed
+    // for 2 of them. Stage list is just Applied + Reviewed.
+    const history: HistoryRow[] = [
+      hist({ candidate_id: 1, stage_from_id: null, stage_to_id: 1, stage_from_name: "" }),
+      hist({ candidate_id: 2, stage_from_id: null, stage_to_id: 1, stage_from_name: "" }),
+      hist({ candidate_id: 3, stage_from_id: null, stage_to_id: 1, stage_from_name: "" }),
+      hist({ candidate_id: 4, stage_from_id: null, stage_to_id: 1, stage_from_name: "" }),
+      hist({ candidate_id: 1, stage_from_id: 1,    stage_to_id: 2 }),
+      hist({ candidate_id: 2, stage_from_id: 1,    stage_to_id: 2 }),
+    ];
+    const result = computeFunnelConversion(history, stages, wideFilters);
+    expect(result[0].conversion_rate).toBe(100);
+    expect(result[0].entered_count).toBe(4);
+    expect(result[1].entered_count).toBe(2);
+    expect(result[1].conversion_rate).toBe(50);
+  });
+});
+
+describe("computeStageVelocity (regression: same-day moves + endDate)", () => {
+  const stages: StageRow[] = [
+    { id: 1, name: "Applied",   sequence: 100, color: "#000", is_hired: false, is_rejected: false, is_offer: false, target_hours: null, is_enabled: true },
+    { id: 2, name: "Reviewed",  sequence: 200, color: "#000", is_hired: false, is_rejected: false, is_offer: false, target_hours: null, is_enabled: true },
+    { id: 99, name: "Rejected", sequence: 999, color: "#000", is_hired: false, is_rejected: true,  is_offer: false, target_hours: null, is_enabled: true },
+  ];
+
+  function hist(overrides: Partial<HistoryRow>): HistoryRow {
+    return {
+      id: 1, timestamp: "2026-04-15T10:00:00.000Z",
+      candidate_id: 1, candidate_name: "A",
+      job_id: 1, job_title: "J",
+      stage_from_id: 1, stage_from_name: "Applied",
+      stage_to_id: 2, stage_to_name: "Reviewed",
+      changed_by: "x", days_in_previous_stage: 3,
+      ...overrides,
+    };
+  }
+
+  it("INCLUDES same-day moves (days_in_previous_stage = 0) in the average", () => {
+    // Two candidates: one took 3 days, one moved same day (0 days).
+    // Old `> 0` filter would drop the 0 → average = 3.
+    // Fixed: average = (3 + 0) / 2 = 1.5.
+    const history = [
+      hist({ candidate_id: 1, days_in_previous_stage: 3 }),
+      hist({ candidate_id: 2, days_in_previous_stage: 0 }),
+    ];
+    const result = computeStageVelocity(history, stages, wideFilters);
+    const applied = result.find(r => r.stage_id === 1);
+    expect(applied?.candidate_count).toBe(2);
+    expect(applied?.avg_days_in_stage).toBe(1.5);
+  });
+
+  it("INCLUDES transitions on the endDate (after midnight UTC)", () => {
+    const history = [hist({ timestamp: "2026-04-23T14:30:00.000Z" })];
+    const result = computeStageVelocity(history, stages, {
+      startDate: "2026-04-01",
+      endDate:   "2026-04-23",
+    });
+    expect(result.find(r => r.stage_id === 1)?.candidate_count).toBe(1);
+  });
+
+  it("counts rejections from each stage in rejected_count", () => {
+    const history = [
+      // A: Applied → Reviewed (normal move from Applied)
+      hist({ candidate_id: 1, stage_from_id: 1, stage_to_id: 2 }),
+      // B: Reviewed → Rejected (rejection from Reviewed)
+      hist({ candidate_id: 2, stage_from_id: 2, stage_to_id: 99 }),
+      // C: Reviewed → Rejected (another from Reviewed)
+      hist({ candidate_id: 3, stage_from_id: 2, stage_to_id: 99 }),
+      // D: Applied → Rejected (rejection from Applied)
+      hist({ candidate_id: 4, stage_from_id: 1, stage_to_id: 99 }),
+    ];
+    const result = computeStageVelocity(history, stages, wideFilters);
+    expect(result.find(r => r.stage_id === 1)?.rejected_count).toBe(1); // Applied
+    expect(result.find(r => r.stage_id === 2)?.rejected_count).toBe(2); // Reviewed
+  });
+
+  it("rejected_count is 0 when no rejected stage is configured", () => {
+    const stagesNoRej = stages.filter(s => !s.is_rejected);
+    const history = [hist({ stage_from_id: 1, stage_to_id: 2 })];
+    const result = computeStageVelocity(history, stagesNoRej, wideFilters);
+    expect(result.every(r => r.rejected_count === 0)).toBe(true);
+  });
+});
+
+describe("computeTimeToHireTrend (regression: month-boundary bucketing)", () => {
+  it("attributes a hire on the 1st of a month to THAT month, not the previous", () => {
+    // Reproduces the EDT off-by-one: candidate hired April 1 should land
+    // in the April bucket. Old code computed `monthEnd = April 0 23:59 LOCAL`
+    // which, in EDT, was ~April 1 04:59 UTC — and `new Date("2026-04-01").getTime()`
+    // is April 1 00:00 UTC, which fell inside the March bucket.
+    const candidates = [
+      makeCandidate({
+        id: 1, status: "Hired",
+        date_applied: "2026-03-20",
+        date_last_stage_update: "2026-04-01",
+      }),
+    ];
+    const result = computeTimeToHireTrend(candidates, 6);
+    // Find the April-of-current-year-or-prior bucket. Tests are
+    // calendar-relative so we match by label suffix.
+    const aprBucket = result.find(r => r.month_label.startsWith("Apr"));
+    const marBucket = result.find(r => r.month_label.startsWith("Mar"));
+    if (aprBucket) {
+      // If April is in the visible 6-month window, the hire must land here
+      expect(aprBucket.avg_days_to_hire).toBeGreaterThan(0);
+      if (marBucket) expect(marBucket.avg_days_to_hire).toBe(0);
+    }
+  });
+});
+
+describe("computeRejectionReasons", () => {
+  const reasons: RefuseReasonRow[] = [
+    { id: 1, name: "Salary mismatch",  is_enabled: true },
+    { id: 2, name: "Skills gap",       is_enabled: true },
+    { id: 3, name: "Withdrew",         is_enabled: true },
+  ];
+
+  it("counts rejected candidates by reason, sorted desc by count", () => {
+    const candidates = [
+      makeCandidate({ id: 1, status: "Rejected", refuse_reason_id: 1, date_last_stage_update: "2026-04-10" }),
+      makeCandidate({ id: 2, status: "Rejected", refuse_reason_id: 2, date_last_stage_update: "2026-04-11" }),
+      makeCandidate({ id: 3, status: "Rejected", refuse_reason_id: 1, date_last_stage_update: "2026-04-12" }),
+      makeCandidate({ id: 4, status: "Rejected", refuse_reason_id: 1, date_last_stage_update: "2026-04-13" }),
+    ];
+    const result = computeRejectionReasons(candidates, reasons, wideFilters);
+    expect(result[0]).toEqual({ reason_id: 1, reason_name: "Salary mismatch", count: 3 });
+    expect(result[1]).toEqual({ reason_id: 2, reason_name: "Skills gap",      count: 1 });
+  });
+
+  it("excludes candidates without a reason set (legacy / pre-structured)", () => {
+    const candidates = [
+      makeCandidate({ id: 1, status: "Rejected", refuse_reason_id: null, date_last_stage_update: "2026-04-10" }),
+      makeCandidate({ id: 2, status: "Rejected", refuse_reason_id: 1,    date_last_stage_update: "2026-04-11" }),
+    ];
+    const result = computeRejectionReasons(candidates, reasons, wideFilters);
+    expect(result).toHaveLength(1);
+    expect(result[0].count).toBe(1);
+  });
+
+  it("excludes Active and Hired candidates", () => {
+    const candidates = [
+      makeCandidate({ id: 1, status: "Active",   refuse_reason_id: 1, date_last_stage_update: "2026-04-10" }),
+      makeCandidate({ id: 2, status: "Hired",    refuse_reason_id: 1, date_last_stage_update: "2026-04-10" }),
+      makeCandidate({ id: 3, status: "Rejected", refuse_reason_id: 1, date_last_stage_update: "2026-04-10" }),
+    ];
+    const result = computeRejectionReasons(candidates, reasons, wideFilters);
+    expect(result).toHaveLength(1);
+    expect(result[0].count).toBe(1);
+  });
+
+  it("filters by date range using rejection date (date_last_stage_update)", () => {
+    const candidates = [
+      makeCandidate({ id: 1, status: "Rejected", refuse_reason_id: 1, date_applied: "2026-01-01", date_last_stage_update: "2026-03-15" }),
+      makeCandidate({ id: 2, status: "Rejected", refuse_reason_id: 1, date_applied: "2026-01-01", date_last_stage_update: "2026-04-15" }),
+      makeCandidate({ id: 3, status: "Rejected", refuse_reason_id: 1, date_applied: "2026-01-01", date_last_stage_update: "2026-05-15" }),
+    ];
+    const result = computeRejectionReasons(candidates, reasons, {
+      startDate: "2026-04-01",
+      endDate:   "2026-04-30",
+    });
+    expect(result[0].count).toBe(1);
+  });
+
+  it("filters by recruiterId", () => {
+    const candidates = [
+      makeCandidate({ id: 1, status: "Rejected", refuse_reason_id: 1, recruiter_id: 5,    date_last_stage_update: "2026-04-10" }),
+      makeCandidate({ id: 2, status: "Rejected", refuse_reason_id: 1, recruiter_id: 7,    date_last_stage_update: "2026-04-10" }),
+    ];
+    const result = computeRejectionReasons(candidates, reasons, { ...wideFilters, recruiterId: 5 });
+    expect(result[0].count).toBe(1);
+  });
+
+  it("returns empty when no rejections in scope", () => {
+    expect(computeRejectionReasons([], reasons, wideFilters)).toEqual([]);
   });
 });

@@ -32,6 +32,7 @@ import {
   computeSourceEffectiveness,
   computeTimeToHireTrend,
   computeStageVelocity,
+  computeRejectionReasons,
   computeSlaBreaches,
   computeStaleCandidates,
   computeWaterfall,
@@ -261,11 +262,12 @@ function ensureDefaultData(): void {
 function getSettings(): SettingsResult {
   const db = getDB();
   return {
-    stages:        db.getAllStages(),
-    sources:       db.getAllSources(),
-    regions:       db.getAllRegions(),
-    recruiters:    db.getAllRecruiters(),
-    refuseReasons: db.getAllRefuseReasons(),
+    stages:              db.getAllStages(),
+    sources:             db.getAllSources(),
+    regions:             db.getAllRegions(),
+    recruiters:          db.getAllRecruiters(),
+    refuseReasons:       db.getAllRefuseReasons(),
+    waterfallBenchmarks: db.getAllWaterfallBenchmarks(),
   };
 }
 
@@ -784,6 +786,7 @@ function createJobOpening(data: CreateJobInput): JobRow {
       head_count:      data.head_count,
       filled:          data.filled ?? 0,
       recruiter_id:    data.recruiter_id ?? null,
+      role_tier:       data.role_tier ?? null,
       salary_range:    data.salary_range ?? "",
       posted_date:     data.posted_date  ?? todayStr(),
       closes_date:     data.closes_date  ?? "",
@@ -827,12 +830,13 @@ function deleteJobOpening(id: number): void {
  */
 function getDashboardData(filters: DashboardFilters): DashboardResult {
   const db = getDB();
-  const candidates  = db.getAllCandidates();
-  const jobs        = db.getAllJobs();
-  const stages      = db.getAllStages();
-  const sources     = db.getAllSources();
-  const recruiters  = db.getAllRecruiters();
-  const allHistory  = db.getAllHistory();   // single scan, used by funnel + velocity
+  const candidates    = db.getAllCandidates();
+  const jobs          = db.getAllJobs();
+  const stages        = db.getAllStages();
+  const sources       = db.getAllSources();
+  const recruiters    = db.getAllRecruiters();
+  const refuseReasons = db.getAllRefuseReasons();
+  const allHistory    = db.getAllHistory();   // single scan, used by funnel + velocity
 
   return {
     funnelConversion:     computeFunnelConversion(allHistory, stages, filters),
@@ -840,6 +844,11 @@ function getDashboardData(filters: DashboardFilters): DashboardResult {
     sourceEffectiveness:  computeSourceEffectiveness(candidates, sources, filters),
     timeToHireTrend:      computeTimeToHireTrend(candidates),
     stageVelocity:        computeStageVelocity(allHistory, stages, filters),
+    // Included on initial-load path so the Rejection Reasons panel
+    // populates immediately, not only after a section filter change
+    // triggers reloadAnalyticsHistorical. Reuses already-loaded
+    // candidates + refuseReasons; cost is one extra pass over candidates.
+    rejectionReasons:     computeRejectionReasons(candidates, refuseReasons, filters),
     slaBreaches:          computeSlaBreaches(candidates, stages, recruiters, jobs, filters),
     staleCandidates:      computeStaleCandidates(candidates, stages, recruiters, jobs, filters),
   };
@@ -910,7 +919,35 @@ function getWaterfallMetrics(filters: WaterfallFilters): WaterfallResult {
     db.getAllStages(),
     db.getAllJobs(),
     filters,
+    db.getAllWaterfallBenchmarks(),
   );
+}
+
+/**
+ * Save waterfall benchmarks — one row per (stage, role_tier, benchmark_pct).
+ * Full replace semantics (matches saveStages etc). Admin edits via
+ * Settings → Pipeline Stages with a role-tier selector at the top.
+ */
+function saveWaterfallBenchmarks(rows: import("./types").WaterfallBenchmarkRow[]): void {
+  withLock(() => {
+    // Defensive validation — strip invalid rows rather than throw so a
+    // partial payload doesn't block the save. job_id = 0 is the default
+    // row that applies to all jobs; positive job_id = per-job override.
+    const clean = (rows || []).filter(r => {
+      if (!r || typeof r.stage_id !== "number" || r.stage_id <= 0) return false;
+      const j = Number(r.job_id);
+      if (!Number.isFinite(j) || j < 0) return false;
+      const v = Number(r.benchmark_pct);
+      if (!Number.isFinite(v) || v < 0 || v > 100) return false;
+      return true;
+    }).map(r => ({
+      id: r.id || 0,
+      stage_id: Number(r.stage_id),
+      job_id: Number(r.job_id) || 0,
+      benchmark_pct: Number(r.benchmark_pct),
+    }));
+    getDB().replaceWaterfallBenchmarks(clean);
+  });
 }
 
 /**
@@ -929,15 +966,22 @@ function getAnalyticsHistorical(filters: DashboardFilters): {
   funnelConversion: import("./types").FunnelItem[];
   timeToHireTrend:  import("./types").MonthlyTrendItem[];
   stageVelocity:    import("./types").StageVelocityItem[];
+  rejectionReasons: import("./types").RejectionReasonItem[];
 } {
   const db = getDB();
-  const candidates = db.getAllCandidates();
-  const stages     = db.getAllStages();
-  const allHistory = db.getAllHistory();
+  const candidates    = db.getAllCandidates();
+  const stages        = db.getAllStages();
+  const allHistory    = db.getAllHistory();
+  const refuseReasons = db.getAllRefuseReasons();
+  // computeRejectionReasons reuses the already-loaded candidates +
+  // refuseReasons so adding it here is essentially free vs. a separate
+  // endpoint round-trip. Section filter (job/recruiter/source/period)
+  // is honored — period applies to the rejection date, not date_applied.
   return {
     funnelConversion: computeFunnelConversion(allHistory, stages, filters),
     timeToHireTrend:  computeTimeToHireTrend(filterCandidates(candidates, filters)),
     stageVelocity:    computeStageVelocity(allHistory, stages, filters),
+    rejectionReasons: computeRejectionReasons(candidates, refuseReasons, filters),
   };
 }
 

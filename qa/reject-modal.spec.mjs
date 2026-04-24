@@ -103,14 +103,15 @@ async function call(page, fn, ...args) {
   assert(updated && updated.status === 'Rejected',
     `Candidate should be Rejected; got status=${updated && updated.status}`);
 
-  // Verify the new "Recent Rejections" section now shows the candidate
+  // Verify the funnel's synthetic Rejected bucket now contains the candidate.
+  // The bucket uses stage_id = -1 as a sentinel (see _buildFunnelCache).
   await settle(page, 400);
-  const inRejectionsList = await page.evaluate(async ({ tag }) => {
+  const inRejectedBucket = await page.evaluate(({ tag }) => {
     const root = Alpine.$data(document.querySelector('#app'));
-    await root.loadRecentRejections();
-    return (root.recentRejections || []).some((c) => c.email && c.email.includes(`rejecto-${tag}`));
+    const rows = root.funnelCandidatesForStage(-1) || [];
+    return rows.some((c) => c.email && c.email.includes(`rejecto-${tag}`));
   }, { tag });
-  assert(inRejectionsList, 'Rejected candidate should appear in Recent Rejections section');
+  assert(inRejectedBucket, 'Rejected candidate should appear in the funnel Rejected bucket');
 
   // Verify the toast included the "View rejections" action
   const toastHasAction = await page.evaluate(() => {

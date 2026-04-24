@@ -59,6 +59,16 @@ export interface JobRow {
   // hired, role descoped) doesn't lose the historical context that the
   // role originally needed three. `head_count - filled` = open slots.
   filled: number;
+  /**
+   * Role tier — drives the xDR filter on the waterfall (and, later, tier-
+   * specific benchmarks). Replaces the fragile "title contains 'xdr'"
+   * string match that missed entries like "Senior xDR", "X.D.R. Bay",
+   * "xDR-US". Admin sets once per job.
+   *
+   * Optional — unset on legacy jobs is fine. The waterfall's xDR filter
+   * falls back to the title-substring match when role_tier is missing.
+   */
+  role_tier?: "xdr" | "mid" | "senior" | "exec" | null;
   // Joined
   recruiter_name?: string;
   region_name?: string;
@@ -90,6 +100,20 @@ export interface StageRow {
   is_offer: boolean;
   target_hours: number | null;
   is_enabled: boolean;
+  /**
+   * Step-to-step conversion benchmark as a percentage (0-100). This is the
+   * target % of candidates that should make it from the previous stage into
+   * THIS stage, and is rendered in the Waterfall Report's ▲/▼ comparison chip.
+   *
+   * null on the first stage (no previous to convert from), or any stage the
+   * admin hasn't tuned yet. When null, the waterfall falls back to the
+   * default xDR positional array (XDR_BENCH in Analytics.ts) — so out-of-box
+   * the app still ships with Janice's row-23 benchmarks wired up.
+   *
+   * Optional on the type (not all callers construct StageRows with it) but
+   * always present on rows returned by SheetDB (which reads the column).
+   */
+  benchmark_pct?: number | null;
 }
 
 export interface SourceRow {
@@ -125,6 +149,7 @@ export interface SettingsResult {
   regions: RegionRow[];
   recruiters: RecruiterRow[];
   refuseReasons: RefuseReasonRow[];
+  waterfallBenchmarks: WaterfallBenchmarkRow[];
 }
 
 // ============================================================
@@ -185,6 +210,7 @@ export interface CreateJobInput {
   head_count: number;
   filled?: number;
   recruiter_id?: number | null;
+  role_tier?: "xdr" | "mid" | "senior" | "exec" | null;
   salary_range?: string;
   posted_date?: string;
   closes_date?: string;
@@ -198,13 +224,34 @@ export interface UpdateJobInput extends Partial<CreateJobInput> {}
 // Analytics / Dashboard types
 // ============================================================
 
+/**
+ * Dashboard scope filters.
+ *
+ * Plural *Ids / motions fields are the current path — an empty or missing
+ * array means "no filter on this axis"; a non-empty array means "match ANY
+ * of these values". Legacy singular fields (jobId, recruiterId, etc.) are
+ * still accepted so existing tests + any unmigrated call sites keep working.
+ *
+ * Normalization rule (enforced in filterCandidates / computeWaterfall):
+ *   - If the plural array is set and non-empty, it wins and the single
+ *     field is ignored on that axis.
+ *   - Otherwise the single field is promoted into a one-element array.
+ *   - Empty array (or both unset) = no filter on this axis.
+ */
 export interface DashboardFilters {
+  // Legacy single-value scope — honored when its plural counterpart is absent/empty.
   jobId?: number | "__unassigned__" | null;
   recruiterId?: number | "__unassigned__" | "__assigned__" | null;
   sourceId?: number | "__unassigned__" | null;
   regionId?: number | "__unassigned__" | null;
   motion?: "Inbound" | "Outbound" | "__unassigned__" | null;
   status?: "Active" | "Hired" | "Rejected" | null;
+  // Multi-value scope. Empty / unset = all.
+  jobIds?: Array<number | "__unassigned__"> | null;
+  recruiterIds?: Array<number | "__unassigned__" | "__assigned__"> | null;
+  sourceIds?: Array<number | "__unassigned__"> | null;
+  regionIds?: Array<number | "__unassigned__"> | null;
+  motions?: Array<"Inbound" | "Outbound" | "__unassigned__"> | null;
   startDate: string;
   endDate: string;
 }
@@ -281,6 +328,23 @@ export interface StageVelocityItem {
   stage_color: string;
   avg_days_in_stage: number;
   candidate_count: number;
+  /** How many candidates were rejected FROM this stage in the period.
+   *  Surfaces the "where do we lose people" question alongside dwell time. */
+  rejected_count: number;
+}
+
+/**
+ * Aggregated rejection-reason breakdown for the Analytics section.
+ * Counts each candidate currently in `Rejected` status (within the date
+ * range) by their refuse_reason_id, joined to the reason name for display.
+ * Intentionally excludes candidates with `refuse_reason_id` blank — those
+ * pre-date the structured-reason workflow and would otherwise crowd the
+ * top of the list as "(none)".
+ */
+export interface RejectionReasonItem {
+  reason_id: number;
+  reason_name: string;
+  count: number;
 }
 
 export interface SlaBreachItem {
@@ -338,10 +402,15 @@ export interface WaterfallItem {
   bench_pct: number | null;
   /** true if step_pct >= bench_pct, false if below, null when either side is null. */
   bench_above: boolean | null;
+  /** IDs of cohort candidates whose max-stage-reached ≥ this stage's sequence.
+   *  Powers the click-to-expand drilldown without needing a second round trip. */
+  candidate_ids: number[];
 }
 
 export interface WaterfallResult {
-  /** Total unique candidates whose date_applied is in the window and pass scope filters. */
+  /** Total unique candidates in the cohort (match date window + scope filters).
+   *  In All-Time mode, candidates with no date_applied are included; with an
+   *  explicit window they're excluded and counted in `excludedNoDate`. */
   cohortSize: number;
   rows: WaterfallItem[];
   window: { startDate: string; endDate: string };
@@ -349,18 +418,61 @@ export interface WaterfallResult {
    *  shape that XDR_BENCH was built against. When false, bench_pct is null everywhere
    *  and the UI should show a "—" plus a tooltip explaining why. */
   benchmarksValid: boolean;
+  /** Count of candidates dropped because they have no date_applied AND a
+   *  window was set. UI surfaces this as "(N excluded — missing date)" so
+   *  an admin understands why cohortSize looks smaller than Pipeline Funnel's
+   *  total. Always 0 in All-Time mode. */
+  excludedNoDate: number;
 }
 
 export interface WaterfallFilters {
   startDate: string;
   endDate: string;
+  // Scope — same dual single/multi shape as DashboardFilters. See the
+  // normalization rule on DashboardFilters for how plural vs. single
+  // fields resolve at the filter-evaluation boundary.
   jobId?: number | "__unassigned__" | null;
   recruiterId?: number | "__unassigned__" | "__assigned__" | null;
   sourceId?: number | "__unassigned__" | null;
   regionId?: number | "__unassigned__" | null;
   motion?: "Inbound" | "Outbound" | "__unassigned__" | null;
-  /** When true, restrict cohort to jobs whose title contains "xdr" (case-insensitive). */
+  jobIds?: Array<number | "__unassigned__"> | null;
+  recruiterIds?: Array<number | "__unassigned__" | "__assigned__"> | null;
+  sourceIds?: Array<number | "__unassigned__"> | null;
+  regionIds?: Array<number | "__unassigned__"> | null;
+  motions?: Array<"Inbound" | "Outbound" | "__unassigned__"> | null;
+  /** @deprecated Legacy field — kept for back-compat with older clients.
+   *  The new UI filters by specific job, not by tier. */
+  roleTier?: "xdr" | "mid" | "senior" | "exec" | null;
+  /** @deprecated Same story as `roleTier`. */
   xdrOnly?: boolean;
+}
+
+/**
+ * Waterfall benchmark — keyed by (stage_id, job_id).
+ *
+ * `job_id === 0` is the default row (applies to every job). A positive
+ * job_id is an override that wins only when the waterfall is filtered
+ * to exactly that single job. This lets admins:
+ *   1. Tune one set of defaults that covers the 80% case
+ *   2. Override specific jobs where reality differs (e.g. exec searches
+ *      convert very differently from the xDR default)
+ *
+ * Lives in its own sheet so the admin UI can edit it without risking
+ * stage-row writes. Seeded from the xDR values on first run.
+ *
+ * Note: older seed data may have a `role_tier` string in the job_id
+ * column. The SheetDB reader treats non-numeric values as the default
+ * row (job_id = 0), so legacy data doesn't break reads.
+ */
+export interface WaterfallBenchmarkRow {
+  id: number;
+  stage_id: number;
+  /** 0 = default benchmark that applies to all jobs.
+   *  Positive = override for that specific job. */
+  job_id: number;
+  /** 0-100. Target % of previous stage that should reach this stage. */
+  benchmark_pct: number;
 }
 
 /**
@@ -383,6 +495,7 @@ export interface DashboardResult {
   sourceEffectiveness: SourceEffectivenessItem[];
   timeToHireTrend: MonthlyTrendItem[];
   stageVelocity: StageVelocityItem[];
+  rejectionReasons: RejectionReasonItem[];
   slaBreaches: SlaBreachItem[];
   staleCandidates: StaleCandidateItem[];
 }
@@ -422,10 +535,12 @@ export interface ISheetDB {
   getAllRegions(): RegionRow[];
   getAllRecruiters(): RecruiterRow[];
   getAllRefuseReasons(): RefuseReasonRow[];
+  getAllWaterfallBenchmarks(): WaterfallBenchmarkRow[];
   replaceStages(rows: StageRow[]): void;
   replaceSources(rows: SourceRow[]): void;
   replaceRegions(rows: RegionRow[]): void;
   replaceRecruiters(rows: RecruiterRow[]): void;
   replaceRefuseReasons(rows: RefuseReasonRow[]): void;
+  replaceWaterfallBenchmarks(rows: WaterfallBenchmarkRow[]): void;
   seedDefaultData(): void;
 }

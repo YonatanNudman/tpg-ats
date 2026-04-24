@@ -59,7 +59,8 @@ window.google.script.run = (function () {
     var runner = {};
     var fnNames = [
       'ensureDefaultData','getSettings','saveStages','saveSources','saveRegions',
-      'saveRecruiters','saveRefuseReasons','getCurrentUserEmail','getCandidates',
+      'saveRecruiters','saveRefuseReasons','saveWaterfallBenchmarks',
+      'getCurrentUserEmail','getCandidates',
       'getCandidateDetail','createCandidate','updateCandidate','updateCandidateStage',
       'rejectCandidate','deleteCandidate','getJobOpenings','createJobOpening',
       'updateJobOpening','deleteJobOpening','getDashboardData','getSyncFingerprint',

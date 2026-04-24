@@ -20,6 +20,7 @@ const {
   computeSourceEffectiveness,
   computeTimeToHireTrend,
   computeStageVelocity,
+  computeRejectionReasons,
   computeSlaBreaches,
   computeStaleCandidates,
   computeWaterfall,
@@ -48,6 +49,7 @@ function makeHandlers(db) {
   function saveRegions(regions) { db.replaceRegions(regions); }
   function saveRecruiters(recruiters) { db.replaceRecruiters(recruiters); }
   function saveRefuseReasons(reasons) { db.replaceRefuseReasons(reasons); }
+  function saveWaterfallBenchmarks(rows) { db.replaceWaterfallBenchmarks(rows); }
 
   function getCurrentUserEmailHandler() { return getCurrentUserEmail(); }
 
@@ -393,6 +395,7 @@ function makeHandlers(db) {
       sourceEffectiveness:  computeSourceEffectiveness(candidates, sources, filters),
       timeToHireTrend:      computeTimeToHireTrend(candidates),
       stageVelocity:        computeStageVelocity(allHistory, stages, filters),
+      rejectionReasons:     computeRejectionReasons(candidates, refuseReasons, filters),
       slaBreaches:          computeSlaBreaches(candidates, stages, recruiters, jobs, filters),
       recentHires,
     };
@@ -409,13 +412,15 @@ function makeHandlers(db) {
   }
 
   function getAnalyticsHistorical(filters) {
-    const candidates = db.getAllCandidates();
-    const stages = db.getAllStages();
-    const allHistory = db.getAllHistory();
+    const candidates    = db.getAllCandidates();
+    const stages        = db.getAllStages();
+    const allHistory    = db.getAllHistory();
+    const refuseReasons = db.getAllRefuseReasons();
     return {
       funnelConversion: computeFunnelConversion(allHistory, stages, filters),
       timeToHireTrend:  computeTimeToHireTrend(filterCandidates(candidates, filters)),
       stageVelocity:    computeStageVelocity(allHistory, stages, filters),
+      rejectionReasons: computeRejectionReasons(candidates, refuseReasons, filters),
     };
   }
 
@@ -510,6 +515,7 @@ function makeHandlers(db) {
     saveRegions,
     saveRecruiters,
     saveRefuseReasons,
+    saveWaterfallBenchmarks,
     getCurrentUserEmail: getCurrentUserEmailHandler,
     getCandidates,
     getCandidateDetail,

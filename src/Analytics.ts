@@ -13,6 +13,7 @@ import type {
   StageRow,
   SourceRow,
   RecruiterRow,
+  RefuseReasonRow,
   DashboardFilters,
   KpiData,
   PipelineSnapshotItem,
@@ -21,11 +22,13 @@ import type {
   SourceEffectivenessItem,
   MonthlyTrendItem,
   StageVelocityItem,
+  RejectionReasonItem,
   SlaBreachItem,
   StaleCandidateItem,
   WaterfallItem,
   WaterfallResult,
   WaterfallFilters,
+  WaterfallBenchmarkRow,
 } from "./types";
 
 // ---------- Filters ----------
@@ -47,6 +50,104 @@ function dateOnly(s: string | undefined | null): string {
   return String(s || "").slice(0, 10);
 }
 
+/**
+ * Normalize a scope axis from the dual single/plural filter shape into a
+ * flat array of values. Plural wins when set & non-empty; otherwise the
+ * single value is promoted. Returns [] when neither is set — meaning
+ * "no filter on this axis".
+ *
+ * Strings are coerced to numbers at this boundary (Alpine dropdowns send
+ * `"1"`, row data stores `1`), while known sentinels pass through verbatim.
+ * This makes every downstream comparison an apples-to-apples equality check.
+ */
+function normalizeAxis<T extends string>(
+  plural: ReadonlyArray<number | T> | null | undefined,
+  single: number | T | null | undefined | string,
+  sentinels: readonly T[] = [] as any,
+): Array<number | T> {
+  const raw: Array<number | T | string> = [];
+  if (Array.isArray(plural) && plural.length > 0) {
+    for (const v of plural) raw.push(v as any);
+  } else if (single !== null && single !== undefined && single !== "") {
+    raw.push(single as any);
+  }
+  const out: Array<number | T> = [];
+  for (const v of raw) {
+    if (typeof v === "string" && (sentinels as readonly string[]).indexOf(v) !== -1) {
+      out.push(v as T);
+      continue;
+    }
+    if (typeof v === "number" && Number.isFinite(v)) {
+      out.push(v);
+      continue;
+    }
+    if (typeof v === "string") {
+      const n = Number(v);
+      if (Number.isFinite(n)) out.push(n);
+    }
+  }
+  return out;
+}
+
+/** Empty `allowed` = no filter → always true.
+ *  `__unassigned__` matches null/0 candidate ids. */
+function matchIdAxis(
+  allowed: Array<number | string>,
+  candidateId: number | null | undefined,
+): boolean {
+  if (allowed.length === 0) return true;
+  const unassigned = candidateId == null || candidateId === 0;
+  for (const v of allowed) {
+    if (v === "__unassigned__") {
+      if (unassigned) return true;
+      continue;
+    }
+    if (!unassigned && v === candidateId) return true;
+  }
+  return false;
+}
+
+/** Recruiter axis adds the `__assigned__` sentinel (inverse of unassigned). */
+function matchRecruiterAxis(
+  allowed: Array<number | string>,
+  recruiterId: number | null | undefined,
+): boolean {
+  if (allowed.length === 0) return true;
+  const unassigned = recruiterId == null || recruiterId === 0;
+  for (const v of allowed) {
+    if (v === "__unassigned__") {
+      if (unassigned) return true;
+      continue;
+    }
+    if (v === "__assigned__") {
+      if (!unassigned) return true;
+      continue;
+    }
+    if (!unassigned && v === recruiterId) return true;
+  }
+  return false;
+}
+
+/** Motion axis values are "Inbound" | "Outbound" | "__unassigned__".
+ *  Accepts a looser `Array<number | string>` input for call-site ergonomics
+ *  (normalizeAxis returns a union type); numeric entries simply never match. */
+function matchMotionAxis(
+  allowed: Array<number | string>,
+  motion: string | null | undefined,
+): boolean {
+  if (allowed.length === 0) return true;
+  const isSet = motion === "Inbound" || motion === "Outbound";
+  for (const v of allowed) {
+    if (typeof v !== "string") continue;
+    if (v === "__unassigned__") {
+      if (!isSet) return true;
+      continue;
+    }
+    if (v === motion) return true;
+  }
+  return false;
+}
+
 export function filterCandidates(
   candidates: CandidateRow[],
   filters: DashboardFilters
@@ -54,34 +155,18 @@ export function filterCandidates(
   const start = dateOnly(filters.startDate);
   const end = dateOnly(filters.endDate);
 
+  const jobs = normalizeAxis(filters.jobIds,       filters.jobId,       ["__unassigned__"] as const);
+  const recs = normalizeAxis(filters.recruiterIds, filters.recruiterId, ["__unassigned__", "__assigned__"] as const);
+  const srcs = normalizeAxis(filters.sourceIds,    filters.sourceId,    ["__unassigned__"] as const);
+  const regs = normalizeAxis(filters.regionIds,    filters.regionId,    ["__unassigned__"] as const);
+  const mots = normalizeAxis(filters.motions,      filters.motion,      ["__unassigned__", "Inbound", "Outbound"] as const);
+
   return candidates.filter(c => {
-    if (filters.jobId === "__unassigned__") {
-      if (c.job_id != null && c.job_id !== 0) return false;
-    } else if (filters.jobId && c.job_id !== filters.jobId) {
-      return false;
-    }
-    if (filters.recruiterId === "__unassigned__") {
-      if (c.recruiter_id != null && c.recruiter_id !== 0) return false;
-    } else if (filters.recruiterId === "__assigned__") {
-      if (c.recruiter_id == null || c.recruiter_id === 0) return false;
-    } else if (filters.recruiterId && c.recruiter_id !== filters.recruiterId) {
-      return false;
-    }
-    if (filters.sourceId === "__unassigned__") {
-      if (c.source_id != null && c.source_id !== 0) return false;
-    } else if (filters.sourceId && c.source_id !== filters.sourceId) {
-      return false;
-    }
-    if (filters.regionId === "__unassigned__") {
-      if (c.region_id != null && c.region_id !== 0) return false;
-    } else if (filters.regionId && c.region_id !== filters.regionId) {
-      return false;
-    }
-    if (filters.motion === "__unassigned__") {
-      if (c.motion === "Inbound" || c.motion === "Outbound") return false;
-    } else if (filters.motion && c.motion !== filters.motion) {
-      return false;
-    }
+    if (!matchIdAxis(jobs, c.job_id)) return false;
+    if (!matchRecruiterAxis(recs, c.recruiter_id)) return false;
+    if (!matchIdAxis(srcs, c.source_id)) return false;
+    if (!matchIdAxis(regs, c.region_id)) return false;
+    if (!matchMotionAxis(mots, c.motion)) return false;
     if (filters.status && c.status !== filters.status) return false;
     const applied = dateOnly(c.date_applied);
     if (start && applied && applied < start) return false;
@@ -202,15 +287,25 @@ export function computeFunnelConversion(
   stages: StageRow[],
   filters: DashboardFilters
 ): FunnelItem[] {
-  const start = filters.startDate ? new Date(filters.startDate).getTime() : 0;
-  const end = filters.endDate ? new Date(filters.endDate).getTime() : Infinity;
+  // Calendar-date comparison via dateOnly() — was previously
+  // `new Date(filters.endDate).getTime()` which parses an end date like
+  // "2026-04-23" as midnight UTC, then EXCLUDES every history row whose
+  // timestamp is later that same day. Net effect: today's transitions
+  // never showed up in the funnel. Same fix applied to computeStageVelocity
+  // below; matches the pattern filterCandidates and computeWaterfall already
+  // use (see dateOnly's docstring).
+  const start = filters.startDate ? dateOnly(filters.startDate) : "";
+  const end   = filters.endDate   ? dateOnly(filters.endDate)   : "";
 
-  // Count transitions INTO each stage (from a different stage)
+  // Count transitions INTO each stage (from a different stage).
+  // Job-scope check runs against the normalized axis so multi-select works.
+  const histJobAxis = normalizeAxis(filters.jobIds, filters.jobId, ["__unassigned__"] as const);
   const entryCounts = new Map<number, Set<number>>(); // stageId → Set<candidateId>
   for (const h of history) {
-    const ts = new Date(h.timestamp).getTime();
-    if (ts < start || ts > end) continue;
-    if (filters.jobId && h.job_id !== filters.jobId) continue;
+    const tsDate = dateOnly(h.timestamp);
+    if (start && tsDate && tsDate < start) continue;
+    if (end   && tsDate && tsDate > end)   continue;
+    if (!matchIdAxis(histJobAxis, h.job_id)) continue;
     if (h.stage_from_id === h.stage_to_id) continue; // initial placement, not a transition
 
     if (!entryCounts.has(h.stage_to_id)) entryCounts.set(h.stage_to_id, new Set());
@@ -336,19 +431,27 @@ export function computeTimeToHireTrend(
   candidates: CandidateRow[],
   monthsBack = 6
 ): MonthlyTrendItem[] {
+  // Bucket by calendar-month PREFIX ("YYYY-MM") rather than millis. The
+  // previous code built bucket boundaries with `new Date(year, month, …)`
+  // (local time) and compared them to `new Date(c.date_last_stage_update)`
+  // (UTC midnight from the "YYYY-MM-DD" string). In US Eastern, this
+  // attributed the first 4-5 hours of any month to the PREVIOUS month —
+  // a candidate hired April 1 showed up in March.
+  //
+  // Prefix-based comparison is timezone-invariant for our purposes: the
+  // stored date string IS the calendar date, regardless of how the
+  // server's locale would render its midnight.
   const now = new Date();
   const result: MonthlyTrendItem[] = [];
 
   for (let i = monthsBack - 1; i >= 0; i--) {
     const d = new Date(now.getFullYear(), now.getMonth() - i, 1);
     const label = d.toLocaleString("default", { month: "short", year: "2-digit" });
-    const monthStart = d.getTime();
-    const monthEnd = new Date(d.getFullYear(), d.getMonth() + 1, 0, 23, 59, 59).getTime();
+    const ymPrefix = d.getFullYear() + "-" + String(d.getMonth() + 1).padStart(2, "0");
 
     const hires = candidates.filter(c => {
       if (c.status !== "Hired" || !c.date_last_stage_update) return false;
-      const t = new Date(c.date_last_stage_update).getTime();
-      return t >= monthStart && t <= monthEnd;
+      return dateOnly(c.date_last_stage_update).slice(0, 7) === ymPrefix;
     });
 
     const avg = hires.length > 0
@@ -371,19 +474,44 @@ export function computeStageVelocity(
   stages: StageRow[],
   filters: DashboardFilters
 ): StageVelocityItem[] {
-  const start = filters.startDate ? new Date(filters.startDate).getTime() : 0;
-  const end = filters.endDate ? new Date(filters.endDate).getTime() : Infinity;
+  // Calendar-date comparison via dateOnly() — see computeFunnelConversion
+  // for the rationale on why `new Date(endDate).getTime()` was wrong.
+  const start = filters.startDate ? dateOnly(filters.startDate) : "";
+  const end   = filters.endDate   ? dateOnly(filters.endDate)   : "";
 
-  // For each stage, compute average days spent based on history transitions
+  // For each stage, compute average days spent based on history transitions.
   const stageDays = new Map<number, number[]>();
+  // Per-stage rejection count: how many candidates were rejected FROM
+  // this stage in the period. Surfaces "where do we lose people" as a
+  // direct companion to dwell time. See StageVelocityItem.rejected_count.
+  const rejectedFromStage = new Map<number, number>();
+  const rejectedStageId = stages.find(s => s.is_rejected && s.is_enabled)?.id;
 
+  const velJobAxis = normalizeAxis(filters.jobIds, filters.jobId, ["__unassigned__"] as const);
   for (const h of history) {
-    const ts = new Date(h.timestamp).getTime();
-    if (ts < start || ts > end) continue;
-    if (filters.jobId && h.job_id !== filters.jobId) continue;
-    if (h.days_in_previous_stage > 0 && h.stage_from_id) {
+    const tsDate = dateOnly(h.timestamp);
+    if (start && tsDate && tsDate < start) continue;
+    if (end   && tsDate && tsDate > end)   continue;
+    if (!matchIdAxis(velJobAxis, h.job_id)) continue;
+
+    // Dwell-time sample. The previous `> 0` guard was overly aggressive:
+    // it dropped legitimate same-day moves (which round to 0 days via
+    // daysBetween's Math.round). Result: faster teams looked SLOWER on
+    // the chart because their fast moves were silently filtered out.
+    // The `stage_from_id` check alone correctly excludes initial
+    // placements (those have stage_from_id = null).
+    if (h.stage_from_id) {
       if (!stageDays.has(h.stage_from_id)) stageDays.set(h.stage_from_id, []);
       stageDays.get(h.stage_from_id)!.push(h.days_in_previous_stage);
+    }
+
+    // Rejection-from-stage tally: a transition to the rejected stage,
+    // attributed to the stage the candidate was IN when it happened.
+    if (rejectedStageId && h.stage_to_id === rejectedStageId && h.stage_from_id) {
+      rejectedFromStage.set(
+        h.stage_from_id,
+        (rejectedFromStage.get(h.stage_from_id) ?? 0) + 1,
+      );
     }
   }
 
@@ -399,8 +527,67 @@ export function computeStageVelocity(
         stage_color: s.color,
         avg_days_in_stage: Math.round(avg * 10) / 10,
         candidate_count: days.length,
+        rejected_count: rejectedFromStage.get(s.id) ?? 0,
       };
     });
+}
+
+// ---------- Rejection Reasons (period-bounded) ----------
+
+/**
+ * Top rejection reasons in the filter period. Period is interpreted as
+ * "candidates rejected during this window," so the date filter is
+ * applied to `date_last_stage_update` (when they moved to Rejected),
+ * NOT `date_applied`. That's what filterCandidates would do, hence the
+ * custom per-field filter logic below.
+ *
+ * Skips candidates whose `refuse_reason_id` is blank — those pre-date
+ * the structured-reason workflow and would otherwise dominate the top
+ * of the list as "(none)" without giving the team anything actionable.
+ */
+export function computeRejectionReasons(
+  candidates: CandidateRow[],
+  refuseReasons: RefuseReasonRow[],
+  filters: DashboardFilters,
+): RejectionReasonItem[] {
+  const start = dateOnly(filters.startDate);
+  const end   = dateOnly(filters.endDate);
+  const reasonMap = new Map(refuseReasons.map(r => [r.id, r.name]));
+  const counts = new Map<number, number>();
+
+  // Per-field filter checks. We don't reuse filterCandidates() because
+  // it filters by date_applied, but here the meaningful date is the
+  // rejection date (date_last_stage_update for status=Rejected).
+  const jobAxis = normalizeAxis(filters.jobIds,       filters.jobId,       ["__unassigned__"] as const);
+  const recAxis = normalizeAxis(filters.recruiterIds, filters.recruiterId, ["__unassigned__", "__assigned__"] as const);
+  const srcAxis = normalizeAxis(filters.sourceIds,    filters.sourceId,    ["__unassigned__"] as const);
+  const regAxis = normalizeAxis(filters.regionIds,    filters.regionId,    ["__unassigned__"] as const);
+  const motAxis = normalizeAxis(filters.motions,      filters.motion,      ["__unassigned__", "Inbound", "Outbound"] as const);
+
+  for (const c of candidates) {
+    if (c.status !== "Rejected") continue;
+    if (!c.refuse_reason_id) continue;
+
+    if (!matchIdAxis(jobAxis, c.job_id)) continue;
+    if (!matchRecruiterAxis(recAxis, c.recruiter_id)) continue;
+    if (!matchIdAxis(srcAxis, c.source_id)) continue;
+    if (!matchIdAxis(regAxis, c.region_id)) continue;
+    if (!matchMotionAxis(motAxis, c.motion)) continue;
+
+    const rejectedOn = dateOnly(c.date_last_stage_update);
+    if (start && rejectedOn && rejectedOn < start) continue;
+    if (end   && rejectedOn && rejectedOn > end)   continue;
+
+    counts.set(c.refuse_reason_id, (counts.get(c.refuse_reason_id) ?? 0) + 1);
+  }
+
+  return Array.from(counts.entries())
+    .map(([id, count]) => ({
+      reason_id:   id,
+      reason_name: reasonMap.get(id) ?? "(unknown)",
+      count,
+    }))
+    .sort((a, b) => b.count - a.count || a.reason_name.localeCompare(b.reason_name));
 }
 
 // ---------- SLA Breaches ----------
@@ -545,15 +732,45 @@ export const XDR_BENCH: readonly number[] = [50, 80, 75, 80, 79, 89, 94];
  *   - rejected stages are never rendered
  *   - step_pct is null on the first row, computed as count/prev*100 elsewhere
  */
+/** Normalize an ID-filter value so the caller can pass strings (as Alpine
+ *  x-model does) or numbers. Sentinels pass through. Empty / null → null. */
+function normIdFilter<T extends string>(
+  v: number | T | null | undefined | string,
+  sentinels: readonly T[] = [] as any,
+): number | T | null {
+  if (v === null || v === undefined || v === "") return null;
+  if (typeof v === "string" && (sentinels as readonly string[]).indexOf(v) !== -1) {
+    return v as T;
+  }
+  const n = Number(v);
+  return Number.isFinite(n) ? n : null;
+}
+
 export function computeWaterfall(
   candidates: CandidateRow[],
   history: HistoryRow[],
   stages: StageRow[],
   jobs: JobRow[],
   filters: WaterfallFilters,
+  benchmarks: WaterfallBenchmarkRow[] = [],
 ): WaterfallResult {
   const start = dateOnly(filters.startDate);
   const end = dateOnly(filters.endDate);
+
+  // Multi-axis filter normalization (see DashboardFilters.normalization).
+  // Empty array on an axis = "no filter"; non-empty = "match any".
+  const jobAxis = normalizeAxis(filters.jobIds,       filters.jobId,       ["__unassigned__"] as const);
+  const recAxis = normalizeAxis(filters.recruiterIds, filters.recruiterId, ["__unassigned__", "__assigned__"] as const);
+  const srcAxis = normalizeAxis(filters.sourceIds,    filters.sourceId,    ["__unassigned__"] as const);
+  const regAxis = normalizeAxis(filters.regionIds,    filters.regionId,    ["__unassigned__"] as const);
+  const motAxis = normalizeAxis(filters.motions,      filters.motion,      ["__unassigned__", "Inbound", "Outbound"] as const);
+
+  // Per-job benchmark overrides require a single specific job selection —
+  // override rows apply to ONE job and mixing jobs makes the cohort no longer
+  // attributable to any single override row. So the override only kicks in
+  // when exactly one concrete job id is selected.
+  const selectedJobId: number | null =
+    jobAxis.length === 1 && typeof jobAxis[0] === "number" ? (jobAxis[0] as number) : null;
 
   // Enabled, non-rejected stages in order (the ones we render).
   const orderedStages = stages
@@ -571,55 +788,53 @@ export function computeWaterfall(
 
   const firstStageSeq = orderedStages.length > 0 ? orderedStages[0].sequence : 0;
 
-  // xDR job allowlist (title contains "xdr" case-insensitive).
-  let xdrJobIds: Set<number> | null = null;
-  if (filters.xdrOnly) {
-    xdrJobIds = new Set<number>();
+  // Legacy "xDR-only" clients (older deployments still sending xdrOnly:true
+  // or roleTier:"xdr") translate to a tier-based allowlist.  New UI uses
+  // the explicit jobId filter and never sets these.
+  let legacyTierJobIds: Set<number> | null = null;
+  const legacyTier: string | null = filters.roleTier || (filters.xdrOnly ? "xdr" : null);
+  if (legacyTier) {
+    legacyTierJobIds = new Set<number>();
     for (const j of jobs) {
-      if ((j.title || "").toLowerCase().indexOf("xdr") !== -1) {
-        xdrJobIds.add(j.id);
+      if (j.role_tier === legacyTier) { legacyTierJobIds.add(j.id); continue; }
+      if (legacyTier === "xdr") {
+        const titleNorm = (j.title || "").toLowerCase().replace(/[^a-z0-9]/g, "");
+        if (titleNorm.indexOf("xdr") !== -1) legacyTierJobIds.add(j.id);
       }
     }
   }
 
   // Build the cohort.
+  //
+  // Cohort semantics: "candidates who entered this funnel during [start, end]
+  // and match the scope filters." The date_applied column is the canonical
+  // entry-time signal.
+  //
+  // Edge case: some candidates (legacy imports, manual Sheet edits) have
+  // an EMPTY date_applied. In All-Time mode (no start/end set) we include
+  // them anyway — excluding them made the Waterfall totals mysteriously
+  // smaller than the Pipeline Funnel's, because Pipeline doesn't require
+  // date_applied. With an explicit window set we must exclude them
+  // (can't place them in the window).
+  const haveWindow = !!(start || end);
+  let excludedNoDate = 0;
   const cohort: CandidateRow[] = [];
   for (const c of candidates) {
     const applied = dateOnly(c.date_applied);
-    if (!applied) continue;
-    if (start && applied < start) continue;
-    if (end && applied > end) continue;
+    if (!applied) {
+      if (haveWindow) { excludedNoDate++; continue; }
+      // All-Time: let them through so totals match Pipeline Funnel.
+    } else {
+      if (start && applied < start) continue;
+      if (end && applied > end) continue;
+    }
 
-    // Scope filters (mirror DashboardFilters semantics, including sentinels).
-    // Truthy check on the filter value handles "" / null / 0 as "no filter".
-    if (filters.jobId === "__unassigned__") {
-      if (c.job_id != null && c.job_id !== 0) continue;
-    } else if (filters.jobId && c.job_id !== filters.jobId) {
-      continue;
-    }
-    if (filters.recruiterId === "__unassigned__") {
-      if (c.recruiter_id != null && c.recruiter_id !== 0) continue;
-    } else if (filters.recruiterId === "__assigned__") {
-      if (c.recruiter_id == null || c.recruiter_id === 0) continue;
-    } else if (filters.recruiterId && c.recruiter_id !== filters.recruiterId) {
-      continue;
-    }
-    if (filters.sourceId === "__unassigned__") {
-      if (c.source_id != null && c.source_id !== 0) continue;
-    } else if (filters.sourceId && c.source_id !== filters.sourceId) {
-      continue;
-    }
-    if (filters.regionId === "__unassigned__") {
-      if (c.region_id != null && c.region_id !== 0) continue;
-    } else if (filters.regionId && c.region_id !== filters.regionId) {
-      continue;
-    }
-    if (filters.motion === "__unassigned__") {
-      if (c.motion === "Inbound" || c.motion === "Outbound") continue;
-    } else if (filters.motion && c.motion !== filters.motion) {
-      continue;
-    }
-    if (xdrJobIds !== null && !xdrJobIds.has(c.job_id)) continue;
+    if (!matchIdAxis(jobAxis, c.job_id)) continue;
+    if (!matchRecruiterAxis(recAxis, c.recruiter_id)) continue;
+    if (!matchIdAxis(srcAxis, c.source_id)) continue;
+    if (!matchIdAxis(regAxis, c.region_id)) continue;
+    if (!matchMotionAxis(motAxis, c.motion)) continue;
+    if (legacyTierJobIds !== null && !legacyTierJobIds.has(c.job_id)) continue;
 
     cohort.push(c);
   }
@@ -662,33 +877,67 @@ export function computeWaterfall(
     maxSeqByCand.set(c.id, maxSeq);
   }
 
-  // Bucket candidates into stages.
-  const benchmarksValid = orderedStages.length === 8;
+  // Index benchmarks by (stage_id, job_id). job_id === 0 is the default
+  // row that applies to every job. A positive job_id is an override that
+  // wins only when the waterfall is filtered to that single job.
+  const benchByKey = new Map<string, number>();
+  for (const b of benchmarks) {
+    benchByKey.set(b.stage_id + ":" + b.job_id, b.benchmark_pct);
+  }
+
+  // Benchmarks render when we have at least one resolvable target from
+  // any tier of fallback: a default row, a legacy stage.benchmark_pct,
+  // or the 8-stage XDR_BENCH positional fallback.
+  const hasAnyDefault  = benchmarks.some(b => b.job_id === 0);
+  const hasLegacyStage = orderedStages.some(s => s.benchmark_pct != null);
+  const benchmarksValid = hasAnyDefault || hasLegacyStage || orderedStages.length === 8;
   const rows: WaterfallItem[] = orderedStages.map((s, i) => {
-    let count = 0;
+    const ids: number[] = [];
     for (const c of cohort) {
-      if ((maxSeqByCand.get(c.id) || 0) >= s.sequence) count++;
+      if ((maxSeqByCand.get(c.id) || 0) >= s.sequence) ids.push(c.id);
     }
     return {
       stage_id:    s.id,
       stage_name:  s.name,
       stage_color: s.color,
       sequence:    s.sequence,
-      count,
+      count:       ids.length,
+      candidate_ids: ids,
       step_pct:    null,
       bench_pct:   null,
       bench_above: null,
     };
   });
 
-  // Fill step_pct + bench comparisons.
+  // Fill step_pct + benchmark lookup. Priority order:
+  //   1. Per-job override (stage_id, selectedJobId) — only when the waterfall
+  //      is filtered to a single specific job AND an override row exists
+  //   2. Default row (stage_id, 0) from the benchmarks sheet
+  //   3. Legacy stage.benchmark_pct (from the first schema pass)
+  //   4. XDR_BENCH positional fallback (out-of-box defaults for 8-stage setup)
   for (let i = 1; i < rows.length; i++) {
     const prev = rows[i - 1].count;
     const curr = rows[i].count;
     rows[i].step_pct = prev > 0 ? Math.round((curr / prev) * 100) : null;
 
-    if (benchmarksValid && (i - 1) < XDR_BENCH.length) {
-      const bench = XDR_BENCH[i - 1];
+    const stage = orderedStages[i];
+    let bench: number | null = null;
+
+    if (selectedJobId != null) {
+      const overrideKey = stage.id + ":" + selectedJobId;
+      if (benchByKey.has(overrideKey)) bench = benchByKey.get(overrideKey) as number;
+    }
+    if (bench == null && benchByKey.has(stage.id + ":0")) {
+      bench = benchByKey.get(stage.id + ":0") as number;
+    }
+    if (bench == null && stage.benchmark_pct != null) {
+      bench = stage.benchmark_pct;
+    }
+    if (bench == null && orderedStages.length === 8 && (i - 1) < XDR_BENCH.length) {
+      bench = XDR_BENCH[i - 1];
+    }
+
+    if (bench != null) {
       rows[i].bench_pct = bench;
       rows[i].bench_above =
         rows[i].step_pct !== null ? (rows[i].step_pct! >= bench) : null;
@@ -699,6 +948,7 @@ export function computeWaterfall(
     cohortSize: cohort.length,
     rows,
     window: { startDate: start, endDate: end },
+    excludedNoDate,
     benchmarksValid,
   };
 }

@@ -143,6 +143,22 @@ window.initials = function (name) {
   if (!name) return '?';
   return name.split(/\s+/).filter(Boolean).map(function (p) { return p[0]; }).slice(0, 2).join('').toUpperCase();
 };
+window.emailDisplayName = function (email) {
+  if (!email) return 'Unknown user';
+  var local = String(email).split('@')[0] || '';
+  var spaced = local
+    .replace(/[._-]+/g, ' ')
+    .replace(/([a-z])([A-Z])/g, '$1 $2')
+    .trim();
+  if (!spaced) return email;
+  return spaced
+    .split(/\s+/)
+    .filter(Boolean)
+    .map(function (part) {
+      return part.charAt(0).toUpperCase() + part.slice(1);
+    })
+    .join(' ');
+};
 // Deterministic palette color from an email so the same person always
 // gets the same avatar tint across sessions and across surfaces (peek
 // panel presence, topbar app presence). Avoids a server round-trip
@@ -442,15 +458,24 @@ document.addEventListener('alpine:init', function () {
     toasts: [],
     _toastId: 0,
 
-    peek:     { open: false, candidateId: null, candidate: null, history: [], loading: false },
+    peek:     { open: false, candidateId: null, candidate: null, history: [], loading: false, historyLoading: false },
     modal:    { open: false, type: null, data: null },
-    settings: { stages: [], sources: [], regions: [], recruiters: [], refuseReasons: [] },
+    settings: { stages: [], sources: [], regions: [], recruiters: [], refuseReasons: [], waterfallBenchmarks: [] },
     // Mirrored from atsApp.jobs by loadJobs() so the peek panel
     // (a separate Alpine component scope) can render the Job dropdown
     // without reaching up to the root component for every render.
     jobs:     [],
     settingsOpen: false,
     settingsDirty: false,
+    // Deep-link sinks: waterfall Goal-cell click writes these to pre-select
+    // the Goals tab + flash a specific stage row. Cleared by the settings
+    // component after it honors them.
+    settingsTab: null,
+    settingsFlashStage: null,
+    settingsGoalJobId: null,
+    // Legacy slot — no longer read, but kept to avoid breaking snapshots
+    // that might still set it. Safe to remove after one deploy cycle.
+    settingsBenchmarkTier: null,
 
     // Toast — "opts" can include:
     //   actionLabel  — text for the inline action button
@@ -553,9 +578,27 @@ document.addEventListener('alpine:init', function () {
 
     // Peek — opt { suppressHistory: true } skips pushing a new history frame
     // (used when restoring from a URL on initial load, or reacting to popstate)
+    //
+    // Two-phase render: the candidate object is already in allCandidates with
+    // every joined field (stage_name, recruiter_name, job title, motion, etc.)
+    // because the table just rendered it, so we can paint the entire panel
+    // chrome instantly from local state. Only the history strip needs the
+    // server. Saves the 300-1500ms blank-panel feel on every row click —
+    // the most-frequent interaction in the app.
     openPeek: async function (id, opt) {
       this.peek.open = true; this.peek.candidateId = id;
-      this.peek.candidate = null; this.peek.history = []; this.peek.loading = true;
+      // Seed from local allCandidates so the panel renders in <16ms.
+      // Falls through to null (with the spinner) only when the candidate
+      // isn't in the current view (URL deep-link, search miss, etc.).
+      var rootEl = document.querySelector('#app');
+      var rootData = rootEl ? Alpine.$data(rootEl) : null;
+      var local = rootData && rootData.allCandidates
+        ? rootData.allCandidates.find(function (x) { return x.id === id; })
+        : null;
+      this.peek.candidate = local || null;
+      this.peek.history = [];
+      this.peek.loading = !local;        // only spin when we had nothing to show
+      this.peek.historyLoading = true;   // strip-level skeleton while history loads
       if (!opt || !opt.suppressHistory) pushHistory({ candidate: id });
       try {
         var r = await gasCall('getCandidateDetail', id);
@@ -563,12 +606,19 @@ document.addEventListener('alpine:init', function () {
         this.peek.history = r.history;
       } catch (e) {
         this.toastError('Could not load candidate: ' + e.message);
-        this.peek.open = false;
-      } finally { this.peek.loading = false; }
+        // Only close the panel if we never managed to render anything.
+        // If we already showed the local snapshot, leave it up — the user
+        // can still see the candidate; just the history failed to refresh.
+        if (!local) this.peek.open = false;
+      } finally {
+        this.peek.loading = false;
+        this.peek.historyLoading = false;
+      }
     },
     closePeek: function (opt) {
       this.peek.open = false; this.peek.candidateId = null;
       this.peek.candidate = null; this.peek.history = [];
+      this.peek.loading = false; this.peek.historyLoading = false;
       if (!opt || !opt.suppressHistory) popHistory();
     },
 
@@ -578,12 +628,76 @@ document.addEventListener('alpine:init', function () {
       pushHistory({ modal: type });
     },
     closeModal: function (opt) {
+      // If a confirm() Promise is pending and the modal is being closed
+      // by a path other than the confirm buttons themselves (URL state,
+      // SDK call, etc.), resolve it as "cancel" so the awaiter doesn't
+      // hang forever. Idempotent — _confirmResolve no-ops without state.
+      if (this.modal.type === 'confirm') this._confirmResolve(false, { skipClose: true });
       this.modal.open = false; this.modal.type = null; this.modal.data = null;
       if (!opt || !opt.suppressHistory) popHistory();
     },
-    requestCloseSettings: function () {
+
+    // ── Branded async confirm() — replaces native window.confirm ──────
+    // Returns Promise<boolean>. Native confirm shows a scary
+    // "An embedded page at n-xxx.googleusercontent.com says…" header
+    // because GAS web apps run inside an iframe; the browser refuses to
+    // let us suppress that affordance. This in-app modal looks like the
+    // rest of the app and uses clear, action-specific button labels
+    // instead of generic "OK" / "Cancel."
+    //
+    // Usage:
+    //   var ok = await Alpine.store('app').confirm({
+    //     title: 'Discard unsaved changes?',
+    //     message: 'You have unsaved Settings changes…',
+    //     confirmLabel: 'Discard changes',
+    //     cancelLabel:  'Keep editing',
+    //     danger: true,    // makes confirm button red instead of blue
+    //   });
+    //   if (!ok) return;
+    confirm: function (opts) {
+      var self = this;
+      return new Promise(function (resolve) {
+        // If a previous confirm is somehow still pending, dismiss it as
+        // cancelled before opening this one. Prevents two stacked dialogs
+        // and a leaked Promise resolver from a prior call.
+        if (self._confirmResolver) {
+          var prev = self._confirmResolver;
+          self._confirmResolver = null;
+          try { prev(false); } catch (_e) { /* noop */ }
+        }
+        self._confirmResolver = resolve;
+        self.openModal('confirm', {
+          title:        opts.title        || 'Confirm',
+          message:      opts.message      || '',
+          confirmLabel: opts.confirmLabel || 'Confirm',
+          cancelLabel:  opts.cancelLabel  || 'Cancel',
+          danger:       !!opts.danger,
+        });
+      });
+    },
+
+    // Called by the confirm modal's buttons. Resolves the pending Promise
+    // and closes the modal in one step. skipClose=true is used by the
+    // closeModal() defensive path above to avoid recursion.
+    _confirmResolver: null,
+    _confirmResolve: function (value, opt) {
+      if (this._confirmResolver) {
+        var fn = this._confirmResolver;
+        this._confirmResolver = null;
+        try { fn(value); } catch (_e) { /* noop */ }
+      }
+      if (!opt || !opt.skipClose) this.closeModal();
+    },
+
+    requestCloseSettings: async function () {
       if (this.settingsDirty) {
-        var ok = window.confirm('You have unsaved Settings changes. Close without saving?');
+        var ok = await this.confirm({
+          title:        'Discard unsaved changes?',
+          message:      'You have unsaved Settings changes that will be lost if you close now.',
+          confirmLabel: 'Discard changes',
+          cancelLabel:  'Keep editing',
+          danger:       true,
+        });
         if (!ok) return false;
       }
       this.settingsDirty = false;
@@ -592,7 +706,122 @@ document.addEventListener('alpine:init', function () {
     },
   });
 
+  // ── Reusable multi-select component ─────────────────────────
+  //
+  // Chip-style trigger + checkbox popover. The caller owns the selection
+  // state and passes it in via `get` / `set` closures so reactivity flows
+  // naturally through the parent scope (Alpine doesn't have v-model-like
+  // two-way bindings across component boundaries, so closures are cleaner
+  // than passing in string paths + $data reflection).
+  //
+  // Options come in as `{id, name}` objects; the component prepends
+  // `__unassigned__` / `__assigned__` sentinels when configured. Empty
+  // selection === "all" everywhere downstream.
+  Alpine.data('mselect', function (config) {
+    return {
+      open: false,
+      query: '',
+      label:           (config && config.label) || 'Filter',
+      allowUnassigned: !!(config && config.allowUnassigned),
+      allowAssigned:   !!(config && config.allowAssigned),
+      searchable:      !(config && config.searchable === false),
+      // Read-only fallback when options is static.
+      _optsFn:    (config && typeof config.options === 'function') ? config.options : function () { return (config && config.options) || []; },
+      _getFn:     (config && typeof config.get === 'function')     ? config.get     : function () { return []; },
+      _setFn:     (config && typeof config.set === 'function')     ? config.set     : function () {},
+      selected: function () {
+        var v = this._getFn();
+        return Array.isArray(v) ? v : [];
+      },
+      isChecked: function (id) {
+        var sel = this.selected();
+        for (var i = 0; i < sel.length; i++) if (sel[i] === id) return true;
+        return false;
+      },
+      toggle: function (id) {
+        var sel = this.selected().slice();
+        var idx = -1;
+        for (var i = 0; i < sel.length; i++) if (sel[i] === id) { idx = i; break; }
+        if (idx >= 0) sel.splice(idx, 1);
+        else          sel.push(id);
+        this._setFn(sel);
+      },
+      clearAll: function () { this._setFn([]); },
+      allOptions: function () {
+        var base = (this._optsFn() || []).map(function (o) {
+          return { id: o.id, name: o.name || o.title || String(o.id), italic: false };
+        });
+        var extras = [];
+        if (this.allowAssigned)   extras.push({ id: '__assigned__',   name: 'Assigned',   italic: true });
+        if (this.allowUnassigned) extras.push({ id: '__unassigned__', name: 'Unassigned', italic: true });
+        return extras.concat(base);
+      },
+      visibleOptions: function () {
+        var q = (this.query || '').trim().toLowerCase();
+        var opts = this.allOptions();
+        if (!q) return opts;
+        return opts.filter(function (o) { return (o.name || '').toLowerCase().indexOf(q) !== -1; });
+      },
+      triggerText: function () {
+        var sel = this.selected();
+        if (sel.length === 0) return 'All';
+        if (sel.length === 1) {
+          var opts = this.allOptions();
+          for (var i = 0; i < opts.length; i++) {
+            if (opts[i].id === sel[0]) return opts[i].name;
+          }
+          return String(sel[0]);
+        }
+        return sel.length + ' selected';
+      },
+      toggleOpen: function () {
+        var self = this;
+        this.open = !this.open;
+        if (this.open && this.searchable) {
+          this.$nextTick(function () {
+            var el = self.$refs && self.$refs.mselectSearch;
+            if (el) el.focus();
+          });
+        }
+      },
+    };
+  });
+
   // ── Main ATS app component ──────────────────────────────────
+  // ── Tiny LRU cache (shared across section reloaders) ────────
+  //
+  // Keys filter objects → API results so re-applying a recently used
+  // filter is instant. Capacity is small (5-10) because the working set
+  // is small (a recruiter toggles a handful of filters repeatedly while
+  // triaging). Evicts least-recently-used on overflow via Map ordering
+  // (a Map's iteration order IS insertion order; touching a key means
+  // delete + re-set so it moves to the end = "most recent").
+  //
+  // Caches are invalidated en masse by _clearSectionCaches() (bound to
+  // sync-fingerprint change detection) so stale entries can't outlive
+  // real data changes. A touched entry doesn't TTL individually — the
+  // only correctness signal is the fingerprint.
+  function makeLRU(capacity) {
+    var max = capacity || 8;
+    var map = new Map();
+    return {
+      get: function (key) {
+        if (!map.has(key)) return undefined;
+        var val = map.get(key);
+        // Re-insert to move to most-recent end of Map's iteration order.
+        map.delete(key); map.set(key, val);
+        return val;
+      },
+      set: function (key, val) {
+        if (map.has(key)) map.delete(key);
+        else if (map.size >= max) map.delete(map.keys().next().value);
+        map.set(key, val);
+      },
+      clear: function () { map.clear(); },
+      size:  function () { return map.size; },
+    };
+  }
+
   Alpine.data('atsApp', function () {
     var syncTimer = null;
     var lastSyncSig = '';
@@ -600,6 +829,12 @@ document.addEventListener('alpine:init', function () {
     var lastFunnelChartSig = '';
     var lastSourceChartSig = '';
     var lastTrendChartSig = '';
+    // Per-section response caches. Keyed by JSON.stringify(filters).
+    // Shared across the 3 server-driven reloaders; reset when the sync
+    // fingerprint reports a data change. See _clearSectionCaches().
+    var waterfallCache   = makeLRU(10);
+    var sourceCache      = makeLRU(10);
+    var analyticsCache   = makeLRU(10);
 
     return {
       userEmail: '',
@@ -609,20 +844,16 @@ document.addEventListener('alpine:init', function () {
       drill: null,                // currently only 'stale' (banner toggle)
       showJobs: true,
       showAnalytics: false,       // collapsed by default — funnel-primary view surfaces the important stuff above
-      showActivity: false,     // collapsed by default so the fold stays analytics-first
-      showRejections: false,   // collapsed by default; expands when user rejects via toast action
+      analyticsView: 'historical',
+      activityPanelOpen: false,
       // The three primary dashboards default to expanded (they're the
       // value the page exists to show), but recruiters can collapse any
       // of them when they want to focus on one. State persists via
       // localStorage in _persistSectionState / _restoreSectionState.
       showFunnel: true,
       showWaterfall: true,
-      showRecruiters: true,
-      showSources: true,
       activity: [],            // array of HistoryRow, newest first
       activityLoading: false,
-      recentRejections: [],    // populated by loadRecentRejections; hydrated by reloadAll
-      rejectionsLoading: false,
 
       allCandidates: [],
       _candidatesVersion: 0,   // increments on any candidate list mutation
@@ -630,7 +861,7 @@ document.addEventListener('alpine:init', function () {
       _funnelCacheSig: '',
       _funnelCacheData: null,
       jobs: [],
-      settings: { stages: [], sources: [], regions: [], recruiters: [], refuseReasons: [] },
+      settings: { stages: [], sources: [], regions: [], recruiters: [], refuseReasons: [], waterfallBenchmarks: [] },
       _globalAnalyticsReloadTimer: null,
       _globalAnalyticsReloadSeq: 0,
       _chartRenderTimer: null,
@@ -644,38 +875,71 @@ document.addEventListener('alpine:init', function () {
       presenceBackoffMaxMs: 120000,
       _presenceTimer: null,
 
-      filters: {
+      // ── Per-section filters ────────────────────────────────
+      // The global filter bar was removed in the Apr 2026 redesign — each
+      // section now owns its own filters end-to-end. Empty array on an
+      // axis = "all"; non-empty = "match any of these values" (the same
+      // semantic enforced server-side in Analytics.ts).
+      //
+      // Sentinels allowed in arrays: "__unassigned__" on every axis,
+      // "__assigned__" on recruiter, "Inbound"/"Outbound" on motion.
+      //
+      // Period + date range stay single-valued (dates don't multi-select
+      // meaningfully). Each section picks its own initial preset; the
+      // default is "All Time" (empty dates) except where a specific
+      // window makes more sense (e.g. Recruiter Hires defaults to 30d).
+      funnelFilters: {
+        preset: 'all', startDate: '', endDate: '',
+        jobIds: [], sourceIds: [], recruiterIds: [], motions: [], regionIds: [],
+      },
+      sourceFilters: {
+        preset: 'all', startDate: '', endDate: '',
+        jobIds: [], recruiterIds: [], motions: [], regionIds: [],
+      },
+      analyticsFilters: {
         preset: '90d',
         startDate: presetRange('90d').start,
-        endDate: presetRange('90d').end,
-        jobId: '', sourceId: '', motion: '', regionId: '', recruiterId: '',
-        status: 'Active', search: '',
+        endDate:   presetRange('90d').end,
+        jobIds: [], sourceIds: [], recruiterIds: [], motions: [], regionIds: [],
       },
 
-      // ── Per-section filter overrides ──────────────────────
-      // Each dashboard section has its own filter row whose values
-      // override the global filter bar above for that section only.
-      // Blank/empty value = inherit the global filter; non-empty
-      // overrides it. Keeps the page-wide filter bar as the default
-      // intent while still letting a specific dashboard scope itself
-      // (e.g. global "Last 90 Days" but Recruiter Hires = "Last 30 Days").
-      funnelFilters:    { jobId: '', sourceId: '', recruiterId: '', preset: '', startDate: '', endDate: '', xdrOnly: false },
-      recruiterFilters: { jobId: '', sourceId: '', hiresPreset: '', hiresStartDate: '', hiresEndDate: '' },
-      sourceFilters:    { jobId: '', recruiterId: '', preset: '', startDate: '', endDate: '' },
-      analyticsFilters: { jobId: '', sourceId: '', recruiterId: '', preset: '', startDate: '', endDate: '' },
+      // Search lives in the topbar as a navigator, not a filter. Typing
+      // into it opens a suggestion dropdown; picking a suggestion opens
+      // the peek panel. Keeping it as a distinct piece of state from the
+      // section scopes makes it impossible for "search" to silently
+      // narrow a dashboard the user isn't looking at.
+      searchQuery: '',
+      searchOpen:  false,
+      searchResults: [],
 
       // Waterfall (cohort) — independent of the snapshot funnel above.
-      // Anchored default start: Apr 1, 2026 (per the Apr 23 meeting with
-      // Janice — she wants "candidates who applied since April"). Empty
-      // endDate means "through today" server-side.
+      // Default to All Time — strict cohort means a shorter window only
+      // counts candidates who entered DURING that window, so the funnel
+      // stays self-consistent (no rollover ambiguity). Empty dates +
+      // preset='all' means "everyone ever".
       waterfallFilters: {
-        startDate: '2026-04-01',
+        startDate: '',
         endDate:   '',
-        jobId: '', sourceId: '', recruiterId: '', regionId: '', motion: '',
-        xdrOnly: false,
+        preset:    'all',
+        // Multi-select axes. Empty = all. Per-job benchmark overrides
+        // only kick in when exactly one concrete job id is selected —
+        // the cohort is no longer attributable to a single override row
+        // once two jobs are mixed, so the server falls back to defaults.
+        jobIds: [], sourceIds: [], recruiterIds: [], motions: [], regionIds: [],
       },
       waterfallData:    null,
       waterfallLoading: false,
+      // Separate from waterfallLoading so the UI can keep showing
+      // previous waterfallData during a refetch instead of blanking.
+      // See reloadWaterfall — waterfallLoading only flips true when
+      // there's nothing to show yet; waterfallRevalidating flips for
+      // any in-flight fetch.
+      waterfallRevalidating: false,
+      // Stage_id of the currently-expanded drilldown row. null = no row.
+      waterfallExpanded: null,
+      // (The summary / by-recruiter view toggle was removed in Apr 2026 —
+      // the per-recruiter matrix now always renders below the waterfall
+      // rows, since it's the strict superset of the old Summary view.)
 
       // ── Funnel-as-primary state ──────────────────────────
       // Stage IDs currently expanded inline (one per stage; we track an
@@ -715,21 +979,22 @@ document.addEventListener('alpine:init', function () {
       // changes scattered through the codebase.
       gasCallLog:   [],
 
-      // Per-section loading flags. Toggled by reloadRecruiterPerf /
-      // reloadSourceEffectiveness so the user gets visible feedback that
-      // the filter change is in flight (otherwise the table just silently
-      // re-renders ~500ms later, which feels broken).
-      recruiterLoading: false,
+      // Per-section loading flags. Toggled by reloadSourceEffectiveness
+      // so the user gets visible feedback that the filter change is in
+      // flight (otherwise the table just silently re-renders ~500ms
+      // later, which feels broken).
       sourceLoading:    false,
       analyticsHistoricalLoading: false,
 
       analytics: {
         funnelConversion: [], timeToHireTrend: [], stageVelocity: [],
+        rejectionReasons: [],
       },
       // Promoted dashboards — populated from getDashboardData on initial
       // load, then refreshed via dedicated per-section endpoints whenever
       // their section filters change (saves recomputing the whole bundle).
-      recruiterPerformance: [],
+      // (Recruiter Performance table removed in Apr 2026 — the waterfall
+      // by-recruiter matrix superseded it.)
       sourceEffectiveness:  [],
       slaBreaches:      [],
       staleCandidates:  [],     // pipeline health alerts (2×+ past SLA or >14d no-SLA)
@@ -745,48 +1010,16 @@ document.addEventListener('alpine:init', function () {
       // order from anymore. Export keeps the natural order returned by the
       // backend, which is already date_applied desc by virtue of how
       // candidates are appended.
+      // After the global filter bar was removed, `filteredCandidates`
+      // drives a single surface: the topbar Export button. It exports
+      // candidates that match the Funnel section's current scope — the
+      // most natural "what I'm looking at right now" semantic. Active-
+      // status only, because that's the funnel's baseline filter (the
+      // Rejected bucket is a separate synthetic row).
       get filteredCandidates() {
-        var f = this.filters;
+        var self = this;
         return this.allCandidates.filter(function (c) {
-          if (f.status && c.status !== f.status) return false;
-          if (f.jobId === '__unassigned__') {
-            if (hasAssignedId(c.job_id)) return false;
-          } else if (f.jobId && c.job_id != f.jobId) return false;
-          if (f.sourceId === '__unassigned__') {
-            if (hasAssignedId(c.source_id)) return false;
-          } else if (f.sourceId && c.source_id != f.sourceId) return false;
-          if (f.motion === '__unassigned__') {
-            if (c.motion === 'Inbound' || c.motion === 'Outbound') return false;
-          } else if (f.motion && c.motion !== f.motion) return false;
-          if (f.regionId === '__unassigned__') {
-            if (hasAssignedId(c.region_id)) return false;
-          } else if (f.regionId && c.region_id != f.regionId) return false;
-          if (f.recruiterId === '__unassigned__') {
-            if (hasAssignedId(c.recruiter_id)) return false;
-          } else if (f.recruiterId === '__assigned__') {
-            if (!hasAssignedId(c.recruiter_id)) return false;
-          } else if (f.recruiterId) {
-            if (c.recruiter_id != f.recruiterId) return false;
-          }
-          if (f.search) {
-            var q = f.search.toLowerCase();
-            var hay = ((c.first_name || '') + ' ' + (c.last_name || '') + ' ' + (c.email || '')).toLowerCase();
-            if (hay.indexOf(q) === -1) return false;
-          }
-          if (c.date_applied) {
-            // CALENDAR DATE compare (not timestamp). When Sheets coerces a
-            // date cell to a native Date in the spreadsheet's locale, the
-            // backend's parseStr emits a full ISO like "2026-04-22T04:00:00.000Z"
-            // (midnight Eastern = 4am UTC). A timestamp comparison against
-            // f.endDate "2026-04-22" (= midnight UTC) would drop today's
-            // candidates from a Last-90-Days filter. Slicing to YYYY-MM-DD
-            // on both sides treats the period as "calendar days inclusive",
-            // which matches what the user actually means.
-            var d = String(c.date_applied).slice(0, 10);
-            if (f.startDate && d < String(f.startDate).slice(0, 10)) return false;
-            if (f.endDate   && d > String(f.endDate).slice(0, 10))   return false;
-          }
-          return true;
+          return self._funnelMatch(c, self.funnelFilters);
         });
       },
 
@@ -803,8 +1036,23 @@ document.addEventListener('alpine:init', function () {
       // workstation and account. Storage failures (private mode, quota)
       // are silently swallowed: missing persistence is annoying, but
       // throwing on every filter change would be worse.
-      _SECTION_STATE_KEY: 'tpg-ats.section-state.v1',
+      // Bumped to v2 in the Apr 2026 multi-select redesign. Old v1 state
+      // had single-value filters (`jobId: ''`) rather than arrays; rather
+      // than migrate stored state in-place (risk: mixing shapes half-way),
+      // bump the key so every browser starts fresh with the new shape.
+      _SECTION_STATE_KEY: 'tpg-ats.section-state.v2',
       _persistTimer: null,
+
+      // Wipes every per-section response cache. Called from the sync
+      // poll whenever getSyncFingerprint reports a real data change,
+      // so cached waterfall/source/analytics results can't outlive the
+      // server-side state they were computed from. Cheap — just resets
+      // three small Maps.
+      _clearSectionCaches: function () {
+        waterfallCache.clear();
+        sourceCache.clear();
+        analyticsCache.clear();
+      },
 
       // Debounced + idle-scheduled so rapid dropdown changes (or typing
       // into custom date inputs that fire a deep watcher per keystroke)
@@ -819,15 +1067,13 @@ document.addEventListener('alpine:init', function () {
             try {
               var snapshot = {
                 funnelFilters:    self.funnelFilters,
-                recruiterFilters: self.recruiterFilters,
                 sourceFilters:    self.sourceFilters,
                 analyticsFilters: self.analyticsFilters,
                 waterfallFilters: self.waterfallFilters,
                 expandedStages:   self.expandedStages,
                 showFunnel:     self.showFunnel,
                 showWaterfall:  self.showWaterfall,
-                showRecruiters: self.showRecruiters,
-                showSources:    self.showSources,
+                analyticsView:  self.analyticsView,
               };
               localStorage.setItem(self._SECTION_STATE_KEY, JSON.stringify(snapshot));
             } catch (e) { /* quota / private mode — non-fatal */ }
@@ -837,24 +1083,51 @@ document.addEventListener('alpine:init', function () {
         }, 250);
       },
 
+      // Only array-shaped, array-sanitized keys flow from storage into
+      // live state. Anything legacy (singular `jobId`, stale `xdrOnly`)
+      // gets dropped silently so a browser still holding v1-ish state
+      // doesn't poison the v2 filters.
+      _restoreArrayFilters: function (target, snap, arrayKeys, scalarKeys) {
+        if (!snap || typeof snap !== 'object') return;
+        arrayKeys.forEach(function (k) {
+          if (Array.isArray(snap[k])) target[k] = snap[k].slice();
+        });
+        scalarKeys.forEach(function (k) {
+          if (typeof snap[k] === 'string') target[k] = snap[k];
+        });
+      },
       _restoreSectionState: function () {
         try {
           var raw = localStorage.getItem(this._SECTION_STATE_KEY);
           if (!raw) return;
           var snap = JSON.parse(raw);
-          if (snap && typeof snap === 'object') {
-            // Defensive merge — never overwrite a field with undefined,
-            // and discard schema mismatches by only copying known keys.
-            if (snap.funnelFilters)    Object.assign(this.funnelFilters,    snap.funnelFilters);
-            if (snap.recruiterFilters) Object.assign(this.recruiterFilters, snap.recruiterFilters);
-            if (snap.sourceFilters)    Object.assign(this.sourceFilters,    snap.sourceFilters);
-            if (snap.analyticsFilters) Object.assign(this.analyticsFilters, snap.analyticsFilters);
-            if (snap.waterfallFilters) Object.assign(this.waterfallFilters, snap.waterfallFilters);
-            if (Array.isArray(snap.expandedStages)) this.expandedStages = snap.expandedStages.slice();
-            if (typeof snap.showFunnel     === 'boolean') this.showFunnel     = snap.showFunnel;
-            if (typeof snap.showWaterfall  === 'boolean') this.showWaterfall  = snap.showWaterfall;
-            if (typeof snap.showRecruiters === 'boolean') this.showRecruiters = snap.showRecruiters;
-            if (typeof snap.showSources    === 'boolean') this.showSources    = snap.showSources;
+          if (!snap || typeof snap !== 'object') return;
+          var ARR = ['jobIds', 'sourceIds', 'recruiterIds', 'motions', 'regionIds'];
+          if (snap.funnelFilters) {
+            this._restoreArrayFilters(this.funnelFilters, snap.funnelFilters,
+              ARR, ['preset', 'startDate', 'endDate']);
+          }
+          // (snap.recruiterFilters intentionally ignored — Recruiter Performance
+          // section and its filters were removed in Apr 2026. Older snapshots
+          // still carrying the key simply drop on load.)
+          if (snap.sourceFilters) {
+            this._restoreArrayFilters(this.sourceFilters, snap.sourceFilters,
+              ['jobIds', 'recruiterIds', 'motions', 'regionIds'],
+              ['preset', 'startDate', 'endDate']);
+          }
+          if (snap.analyticsFilters) {
+            this._restoreArrayFilters(this.analyticsFilters, snap.analyticsFilters,
+              ARR, ['preset', 'startDate', 'endDate']);
+          }
+          if (snap.waterfallFilters) {
+            this._restoreArrayFilters(this.waterfallFilters, snap.waterfallFilters,
+              ARR, ['preset', 'startDate', 'endDate']);
+          }
+          if (Array.isArray(snap.expandedStages)) this.expandedStages = snap.expandedStages.slice();
+          if (typeof snap.showFunnel     === 'boolean') this.showFunnel     = snap.showFunnel;
+          if (typeof snap.showWaterfall  === 'boolean') this.showWaterfall  = snap.showWaterfall;
+          if (snap.analyticsView === 'historical' || snap.analyticsView === 'source') {
+            this.analyticsView = snap.analyticsView;
           }
         } catch (e) { /* malformed JSON or storage error — start clean */ }
       },
@@ -929,14 +1202,19 @@ document.addEventListener('alpine:init', function () {
         // Persist collapse state for the three primary dashboards so
         // a refresh restores the user's preferred section visibility.
         this.$watch('showFunnel',     function () { self._persistSectionState(); });
-        this.$watch('showRecruiters', function () { self._persistSectionState(); });
-        this.$watch('showSources',    function () { self._persistSectionState(); });
-        // Defer chart work until the section is actually visible.
-        this.$watch('showSources', function (open) {
-          if (open) self.scheduleChartRender();
+        this.$watch('analyticsView', function (view) {
+          self._persistSectionState();
+          if (view === 'source') {
+            self.reloadSourceEffectiveness();
+          }
+          if (self.showAnalytics) self.scheduleChartRender();
         });
+        // Defer chart work until the section is actually visible.
         this.$watch('showAnalytics', function (open) {
-          if (open) self.scheduleChartRender();
+          if (open) {
+            if (self.analyticsView === 'source') self.reloadSourceEffectiveness();
+            self.scheduleChartRender();
+          }
         });
 
         // Esc key clears any active bulk selection — common shortcut for
@@ -949,6 +1227,30 @@ document.addEventListener('alpine:init', function () {
               && !Alpine.store('app').modal.open) {
             self.clearSelection();
           }
+        });
+
+        // ── Pause polls when tab is hidden ──────────────────
+        // Previously: checkSync and _appPresenceTick guarded with
+        // `if (document.hidden) return`, but the setTimeout itself kept
+        // firing every 20-30s even on backgrounded tabs — wakes the
+        // event loop, runs the no-op, reschedules. Multiplied across
+        // every recruiter's "I'll come back later" tab, this also wastes
+        // GAS daily-execution-time quota for no benefit.
+        //
+        // Now: we hard-clear the timers on hidden and re-arm + tick once
+        // immediately when visible. The immediate tick gives the user a
+        // fresh view in <1s instead of "wait up to 20s after refocusing"
+        // for the first sync to land.
+        document.addEventListener('visibilitychange', function () {
+          if (document.hidden) {
+            if (syncTimer) { clearTimeout(syncTimer); syncTimer = null; }
+            if (self._presenceTimer) { clearTimeout(self._presenceTimer); self._presenceTimer = null; }
+            return;
+          }
+          // Visible — kick fresh data immediately, then resume the loops.
+          self.checkSync().catch(function () {});
+          self._appPresenceTick().catch(function () {});
+          self.startSyncPolling();
         });
 
         // Register browser back/forward handler — closes topmost overlay
@@ -1026,9 +1328,6 @@ document.addEventListener('alpine:init', function () {
           this.loadAnalytics(),
         ]);
         this.scheduleChartRender();
-        // Refresh Recent Rejections only if it's currently visible — the
-        // user is actively looking at it, so the cost is justified.
-        if (this.showRejections) this.loadRecentRejections();
         // Silently refresh waterfall too so a teammate's stage-advance
         // shows up in the cohort without a manual page reload.
         if (this.showWaterfall) this.reloadWaterfall();
@@ -1055,8 +1354,9 @@ document.addEventListener('alpine:init', function () {
         local.stages   = shared.stages   = s.stages;
         local.sources  = shared.sources  = s.sources;
         local.regions  = shared.regions  = s.regions;
-        local.recruiters    = shared.recruiters    = s.recruiters;
-        local.refuseReasons = shared.refuseReasons = s.refuseReasons;
+        local.recruiters          = shared.recruiters          = s.recruiters;
+        local.refuseReasons       = shared.refuseReasons       = s.refuseReasons;
+        local.waterfallBenchmarks = shared.waterfallBenchmarks = s.waterfallBenchmarks || [];
         this._stagesVersion++;
         this._funnelCacheSig = '';
       },
@@ -1086,67 +1386,59 @@ document.addEventListener('alpine:init', function () {
         // own state slots so per-section refetches can update them
         // independently. Funnel itself is derived client-side from
         // allCandidates (see pipelineFunnelData getter), so we DON'T
-        // store a.pipelineSnapshot.
-        this.recruiterPerformance = a.recruiterPerformance;
+        // store a.pipelineSnapshot. a.recruiterPerformance is returned by
+        // the backend but intentionally discarded — the Recruiter
+        // Performance table was retired in favor of the Waterfall's
+        // by-recruiter matrix.
         this.sourceEffectiveness  = a.sourceEffectiveness;
         // Collapsible bottom-of-page analytics — historical context only.
         this.analytics = {
           funnelConversion: a.funnelConversion,
           timeToHireTrend:  a.timeToHireTrend,
           stageVelocity:    a.stageVelocity,
+          // Older getDashboardData responses don't carry rejectionReasons;
+          // default to [] so the panel renders cleanly with the "no
+          // rejections in this period" empty state instead of crashing
+          // on .map() of undefined. The dedicated reloader below DOES
+          // populate it from getAnalyticsHistorical.
+          rejectionReasons: a.rejectionReasons || [],
         };
         this.slaBreaches     = a.slaBreaches;
         this.staleCandidates = a.staleCandidates || [];
       },
 
+      // After the global filter bar was removed, each section is its own
+      // scope. buildDashboardFilters now drives the Analytics tab only —
+      // everything else calls the section's own filters directly.
       buildDashboardFilters: function () {
-        var f = this.filters;
+        var f = this.analyticsFilters || {};
         return {
-          jobId: f.jobId || null,
-          sourceId: f.sourceId || null,
-          motion: f.motion || null,
-          regionId: f.regionId || null,
-          recruiterId: f.recruiterId || null,
-          status: f.status || null,
-          startDate: f.startDate,
-          endDate: f.endDate,
+          jobIds:       (f.jobIds       || []).slice(),
+          sourceIds:    (f.sourceIds    || []).slice(),
+          recruiterIds: (f.recruiterIds || []).slice(),
+          motions:      (f.motions      || []).slice(),
+          regionIds:    (f.regionIds    || []).slice(),
+          startDate:    f.startDate || '',
+          endDate:      f.endDate   || '',
         };
       },
 
       // ── Per-section filter merging ────────────────────────
-      // Effective filters for a section = (section overrides) || (global).
-      // Pass through global motion/region/status untouched (those aren't
-      // per-section configurable). The funnel section auto-scopes to
-      // status='Active' separately (see pipelineFunnelData).
+      // No global bar anymore, so this is a pass-through that just
+      // shape-normalizes the section's own filters for downstream code.
+      // Kept as a helper so every call site routes through one place —
+      // makes it easy to add cross-section logic later (e.g. a future
+      // "apply to all" button) without hunting down call sites.
       mergeSectionFilters: function (section) {
-        var g = this.filters;
         return {
-          jobId:       (section.jobId       || g.jobId)       || null,
-          sourceId:    (section.sourceId    || g.sourceId)    || null,
-          recruiterId: this._effectiveRecruiterId(section.recruiterId, g.recruiterId),
-          motion:      g.motion   || null,
-          regionId:    g.regionId || null,
-          status:      g.status   || null,
-          startDate:   section.startDate || g.startDate,
-          endDate:     section.endDate   || g.endDate,
-          // Search is global-only (no per-section override) since the
-          // funnel/recruiter/source rows don't carry their own search
-          // boxes. Propagated through the merge so _funnelMatch can
-          // honor it — without this, typing in the topbar search
-          // updates "Export (N)" but the visible funnel doesn't filter,
-          // which reads as "search didn't work".
-          search:      g.search   || null,
+          jobIds:       (section.jobIds       || []).slice(),
+          sourceIds:    (section.sourceIds    || []).slice(),
+          recruiterIds: (section.recruiterIds || []).slice(),
+          motions:      (section.motions      || []).slice(),
+          regionIds:    (section.regionIds    || []).slice(),
+          startDate:    section.startDate || '',
+          endDate:      section.endDate   || '',
         };
-      },
-
-      _effectiveRecruiterId: function (sectionVal, globalVal) {
-        // '__unassigned__'/'__assigned__' are sentinels — preserve through merge.
-        if (sectionVal === '__unassigned__') return '__unassigned__';
-        if (sectionVal === '__assigned__') return '__assigned__';
-        if (sectionVal) return sectionVal;
-        if (globalVal === '__unassigned__') return '__unassigned__';
-        if (globalVal === '__assigned__') return '__assigned__';
-        return globalVal || null;
       },
 
       // Per-section "Period" preset → date range translation.
@@ -1169,19 +1461,6 @@ document.addEventListener('alpine:init', function () {
             range = preset ? presetRange(preset) : { start: '', end: '' };
             this.funnelFilters.startDate = range.start;
             this.funnelFilters.endDate   = range.end;
-          }
-        } else if (section === 'recruiterHires') {
-          preset = this.recruiterFilters.hiresPreset;
-          if (preset === 'custom') {
-            if (!this.recruiterFilters.hiresStartDate || !this.recruiterFilters.hiresEndDate) {
-              range = presetRange('30d');
-              this.recruiterFilters.hiresStartDate = this.recruiterFilters.hiresStartDate || range.start;
-              this.recruiterFilters.hiresEndDate   = this.recruiterFilters.hiresEndDate   || range.end;
-            }
-          } else {
-            range = preset ? presetRange(preset) : { start: '', end: '' };
-            this.recruiterFilters.hiresStartDate = range.start;
-            this.recruiterFilters.hiresEndDate   = range.end;
           }
         } else if (section === 'source') {
           preset = this.sourceFilters.preset;
@@ -1209,6 +1488,21 @@ document.addEventListener('alpine:init', function () {
             this.analyticsFilters.startDate = range.start;
             this.analyticsFilters.endDate   = range.end;
           }
+        } else if (section === 'waterfall') {
+          preset = this.waterfallFilters.preset;
+          if (preset === 'custom') {
+            // Keep existing dates (user is about to edit them).
+          } else if (preset === 'all' || !preset) {
+            // All Time — clear both bounds. Strict cohort means this
+            // includes every candidate ever in the system.
+            this.waterfallFilters.startDate = '';
+            this.waterfallFilters.endDate   = '';
+          } else {
+            range = presetRange(preset);
+            this.waterfallFilters.startDate = range.start;
+            this.waterfallFilters.endDate   = range.end;
+          }
+          this.reloadWaterfall();
         }
       },
 
@@ -1222,8 +1516,6 @@ document.addEventListener('alpine:init', function () {
         var f, sKey, eKey;
         if (section === 'funnel') {
           f = this.funnelFilters; sKey = 'startDate'; eKey = 'endDate';
-        } else if (section === 'recruiterHires') {
-          f = this.recruiterFilters; sKey = 'hiresStartDate'; eKey = 'hiresEndDate';
         } else if (section === 'source') {
           f = this.sourceFilters; sKey = 'startDate'; eKey = 'endDate';
         } else if (section === 'analytics') {
@@ -1237,8 +1529,7 @@ document.addEventListener('alpine:init', function () {
         }
         this._persistSectionState();
         this.pruneSelectionToVisible();
-        if (section === 'recruiterHires') this.reloadRecruiterPerf();
-        else if (section === 'source')    this.reloadSourceEffectiveness();
+        if (section === 'source')         this.reloadSourceEffectiveness();
         else if (section === 'analytics') this.reloadAnalyticsHistorical();
         // Funnel is client-side derived from allCandidates so no refetch
         // needed — the reactive getter picks up the new dates automatically.
@@ -1246,24 +1537,29 @@ document.addEventListener('alpine:init', function () {
 
       resetSectionFilters: function (section) {
         if (section === 'funnel') {
-          this.funnelFilters = { jobId: '', sourceId: '', recruiterId: '', preset: '', startDate: '', endDate: '', xdrOnly: false };
+          this.funnelFilters = {
+            preset: 'all', startDate: '', endDate: '',
+            jobIds: [], sourceIds: [], recruiterIds: [], motions: [], regionIds: [],
+          };
           // Symmetric inverse of filterFunnelByRecruiter — entering a recruiter
           // scope auto-expands every stage so the drill-in is one click; leaving
           // the scope collapses them back so the funnel returns to its compact
-          // baseline. Without this, "Clear scope" would only undo half of what
-          // the recruiter-row click did, leaving the user to manually collapse
-          // each stage to get back to the default view.
+          // baseline.
           this.expandedStages = [];
           this.pruneSelectionToVisible();
           this._persistSectionState();
-        } else if (section === 'recruiter') {
-          this.recruiterFilters = { jobId: '', sourceId: '', hiresPreset: '', hiresStartDate: '', hiresEndDate: '' };
-          this.reloadRecruiterPerf();   // persists on success
         } else if (section === 'source') {
-          this.sourceFilters = { jobId: '', recruiterId: '', preset: '', startDate: '', endDate: '' };
+          this.sourceFilters = {
+            preset: 'all', startDate: '', endDate: '',
+            jobIds: [], recruiterIds: [], motions: [], regionIds: [],
+          };
           this.reloadSourceEffectiveness();   // persists on success
         } else if (section === 'analytics') {
-          this.analyticsFilters = { jobId: '', sourceId: '', recruiterId: '', preset: '', startDate: '', endDate: '' };
+          var ar = presetRange('90d');
+          this.analyticsFilters = {
+            preset: '90d', startDate: ar.start, endDate: ar.end,
+            jobIds: [], sourceIds: [], recruiterIds: [], motions: [], regionIds: [],
+          };
           this.reloadAnalyticsHistorical();   // persists on success
         }
       },
@@ -1273,95 +1569,66 @@ document.addEventListener('alpine:init', function () {
       // funnel section (i.e. set on funnelFilters specifically, not just
       // inherited from the global filter bar). Used by the banner above
       // the funnel rows to make implicit scoping explicit.
-      funnelScopeLabel: function () {
-        var f = this.funnelFilters;
-        var parts = [];
-        if (f.recruiterId === '__unassigned__') {
-          parts.push('Unassigned candidates');
-        } else if (f.recruiterId === '__assigned__') {
-          parts.push('Assigned candidates');
-        } else if (f.recruiterId) {
-          var r = this.settings.recruiters.find(function (x) { return String(x.id) === String(f.recruiterId); });
-          if (r) parts.push(r.name + "'s pipeline");
+      // Human label for the selection on an axis: "Sharon", "Sharon + Joe",
+      // "3 recruiters", "Unassigned". Used by the per-section scope
+      // banners to summarize what's picked without listing every value.
+      _axisLabel: function (arr, lookup, singleLabel) {
+        if (!arr || arr.length === 0) return '';
+        if (arr.length === 1) {
+          var v = arr[0];
+          if (v === '__unassigned__') return 'Unassigned';
+          if (v === '__assigned__')   return 'Assigned';
+          var hit = lookup(v);
+          return hit || String(v);
         }
-        if (f.jobId === '__unassigned__') {
-          parts.push('No job assigned');
-        } else if (f.jobId) {
-          var j = this.jobs.find(function (x) { return String(x.id) === String(f.jobId); });
-          if (j) parts.push(j.title);
+        if (arr.length === 2) {
+          var a = this._axisLabel([arr[0]], lookup);
+          var b = this._axisLabel([arr[1]], lookup);
+          return a + ' + ' + b;
         }
-        if (f.sourceId === '__unassigned__') {
-          parts.push('No source assigned');
-        } else if (f.sourceId) {
-          var s = this.settings.sources.find(function (x) { return String(x.id) === String(f.sourceId); });
-          if (s) parts.push(s.name);
-        }
-        if (f.preset) parts.push(f.preset);
-        return parts.length > 0 ? parts.join(' · ') : '';
+        return arr.length + ' ' + (singleLabel || 'selected');
       },
-      recruiterScopeLabel: function () {
-        var f = this.recruiterFilters;
-        var parts = [];
-        if (f.jobId === '__unassigned__') {
-          parts.push('No job assigned');
-        } else if (f.jobId) {
-          var j = this.jobs.find(function (x) { return String(x.id) === String(f.jobId); });
-          if (j) parts.push(j.title);
-        }
-        if (f.sourceId === '__unassigned__') {
-          parts.push('No source assigned');
-        } else if (f.sourceId) {
-          var s = this.settings.sources.find(function (x) { return String(x.id) === String(f.sourceId); });
-          if (s) parts.push(s.name);
-        }
-        if (f.hiresPreset) parts.push('Hires ' + f.hiresPreset);
-        return parts.length > 0 ? parts.join(' · ') : '';
+      _jobLabel:       function (id) { var j = this.jobs.find(function (x) { return x.id == id; }); return j ? j.title : ''; },
+      _sourceLabel:    function (id) { var s = this.settings.sources.find(function (x) { return x.id == id; });    return s ? s.name : ''; },
+      _recruiterLabel: function (id) { var r = this.settings.recruiters.find(function (x) { return x.id == id; }); return r ? r.name : ''; },
+      _regionLabel:    function (id) { var r = this.settings.regions.find(function (x) { return x.id == id; });    return r ? r.name : ''; },
+
+      funnelScopeLabel: function () {
+        var f = this.funnelFilters, parts = [];
+        var self = this;
+        var rec = this._axisLabel(f.recruiterIds, function (id) { return self._recruiterLabel(id); }, 'recruiters');
+        if (rec) parts.push(rec === 'Unassigned' ? 'Unassigned candidates' : rec === 'Assigned' ? 'Assigned candidates' : rec + "'s pipeline");
+        var job = this._axisLabel(f.jobIds, function (id) { return self._jobLabel(id); }, 'jobs');
+        if (job) parts.push(job);
+        var src = this._axisLabel(f.sourceIds, function (id) { return self._sourceLabel(id); }, 'sources');
+        if (src) parts.push(src);
+        var reg = this._axisLabel(f.regionIds, function (id) { return self._regionLabel(id); }, 'regions');
+        if (reg) parts.push(reg);
+        if (f.motions && f.motions.length > 0) parts.push(f.motions.join(' + '));
+        if (f.preset && f.preset !== 'all') parts.push(f.preset);
+        return parts.join(' · ');
       },
       sourceScopeLabel: function () {
-        var f = this.sourceFilters;
-        var parts = [];
-        if (f.jobId === '__unassigned__') {
-          parts.push('No job assigned');
-        } else if (f.jobId) {
-          var j = this.jobs.find(function (x) { return String(x.id) === String(f.jobId); });
-          if (j) parts.push(j.title);
-        }
-        if (f.recruiterId === '__unassigned__') {
-          parts.push('Unassigned');
-        } else if (f.recruiterId === '__assigned__') {
-          parts.push('Assigned');
-        } else if (f.recruiterId) {
-          var r = this.settings.recruiters.find(function (x) { return String(x.id) === String(f.recruiterId); });
-          if (r) parts.push(r.name);
-        }
-        if (f.preset) parts.push(f.preset);
-        return parts.length > 0 ? parts.join(' · ') : '';
+        var f = this.sourceFilters, parts = [];
+        var self = this;
+        var job = this._axisLabel(f.jobIds, function (id) { return self._jobLabel(id); }, 'jobs');
+        if (job) parts.push(job);
+        var rec = this._axisLabel(f.recruiterIds, function (id) { return self._recruiterLabel(id); }, 'recruiters');
+        if (rec) parts.push(rec);
+        if (f.preset && f.preset !== 'all') parts.push(f.preset);
+        return parts.join(' · ');
       },
       analyticsScopeLabel: function () {
-        var f = this.analyticsFilters;
-        var parts = [];
-        if (f.jobId === '__unassigned__') {
-          parts.push('No job assigned');
-        } else if (f.jobId) {
-          var j = this.jobs.find(function (x) { return String(x.id) === String(f.jobId); });
-          if (j) parts.push(j.title);
-        }
-        if (f.sourceId === '__unassigned__') {
-          parts.push('No source assigned');
-        } else if (f.sourceId) {
-          var s = this.settings.sources.find(function (x) { return String(x.id) === String(f.sourceId); });
-          if (s) parts.push(s.name);
-        }
-        if (f.recruiterId === '__unassigned__') {
-          parts.push('Unassigned');
-        } else if (f.recruiterId === '__assigned__') {
-          parts.push('Assigned');
-        } else if (f.recruiterId) {
-          var r = this.settings.recruiters.find(function (x) { return String(x.id) === String(f.recruiterId); });
-          if (r) parts.push(r.name);
-        }
-        if (f.preset) parts.push(f.preset);
-        return parts.length > 0 ? parts.join(' · ') : '';
+        var f = this.analyticsFilters, parts = [];
+        var self = this;
+        var job = this._axisLabel(f.jobIds, function (id) { return self._jobLabel(id); }, 'jobs');
+        if (job) parts.push(job);
+        var src = this._axisLabel(f.sourceIds, function (id) { return self._sourceLabel(id); }, 'sources');
+        if (src) parts.push(src);
+        var rec = this._axisLabel(f.recruiterIds, function (id) { return self._recruiterLabel(id); }, 'recruiters');
+        if (rec) parts.push(rec);
+        if (f.preset && f.preset !== 'all') parts.push(f.preset);
+        return parts.join(' · ');
       },
 
       // ── Pipeline Funnel (client-side compute) ─────────────
@@ -1381,31 +1648,60 @@ document.addEventListener('alpine:init', function () {
       // at the bottom of the funnel so rejections honor job/source/
       // recruiter/date filters without being filtered out for not
       // being Active.
+      // ── Axis matching helpers ────────────────────────────
+      // Mirror the server-side logic in Analytics.ts but operate on the
+      // flat array shape the client produces. Empty array = no filter on
+      // this axis (pass). Non-empty = match any listed value.
+      //
+      // Comparisons use `==` instead of `===` because filter arrays can
+      // contain mixed types — a job dropdown writes `1` (number) when
+      // set from the jobs list but localStorage round-trips `"1"`
+      // (string). Loose equality handles both without the full normalize.
+      _axisMatchId: function (arr, candidateId) {
+        if (!arr || arr.length === 0) return true;
+        var unassigned = !hasAssignedId(candidateId);
+        for (var i = 0; i < arr.length; i++) {
+          var v = arr[i];
+          if (v === '__unassigned__') { if (unassigned) return true; continue; }
+          if (!unassigned && candidateId == v) return true;
+        }
+        return false;
+      },
+      _axisMatchRecruiter: function (arr, recruiterId) {
+        if (!arr || arr.length === 0) return true;
+        var unassigned = !hasAssignedId(recruiterId);
+        for (var i = 0; i < arr.length; i++) {
+          var v = arr[i];
+          if (v === '__unassigned__') { if (unassigned) return true; continue; }
+          if (v === '__assigned__')   { if (!unassigned) return true; continue; }
+          if (!unassigned && recruiterId == v) return true;
+        }
+        return false;
+      },
+      _axisMatchMotion: function (arr, motion) {
+        if (!arr || arr.length === 0) return true;
+        var isSet = motion === 'Inbound' || motion === 'Outbound';
+        for (var i = 0; i < arr.length; i++) {
+          var v = arr[i];
+          if (v === '__unassigned__') { if (!isSet) return true; continue; }
+          if (v === motion) return true;
+        }
+        return false;
+      },
+      // Predicate shared between _funnelMatch (active only) and the
+      // rejected-bucket synthetic row. Returns true iff the candidate
+      // clears every scope axis the filter object declares.
+      _matchScope: function (c, f) {
+        if (!this._axisMatchId(f.jobIds, c.job_id))             return false;
+        if (!this._axisMatchId(f.sourceIds, c.source_id))       return false;
+        if (!this._axisMatchRecruiter(f.recruiterIds, c.recruiter_id)) return false;
+        if (!this._axisMatchId(f.regionIds, c.region_id))       return false;
+        if (!this._axisMatchMotion(f.motions, c.motion))        return false;
+        return true;
+      },
+
       _funnelMatchExcludingStatus: function (c, f) {
-        if (f.jobId === '__unassigned__') {
-          if (hasAssignedId(c.job_id)) return false;
-        } else if (f.jobId && c.job_id != f.jobId) return false;
-        if (f.sourceId === '__unassigned__') {
-          if (hasAssignedId(c.source_id)) return false;
-        } else if (f.sourceId && c.source_id != f.sourceId) return false;
-        if (f.recruiterId === '__unassigned__') {
-          if (hasAssignedId(c.recruiter_id)) return false;
-        } else if (f.recruiterId === '__assigned__') {
-          if (!hasAssignedId(c.recruiter_id)) return false;
-        } else if (f.recruiterId) {
-          if (c.recruiter_id != f.recruiterId) return false;
-        }
-        if (f.regionId === '__unassigned__') {
-          if (hasAssignedId(c.region_id)) return false;
-        } else if (f.regionId && c.region_id != f.regionId) return false;
-        if (f.motion === '__unassigned__') {
-          if (c.motion === 'Inbound' || c.motion === 'Outbound') return false;
-        } else if (f.motion && c.motion !== f.motion) return false;
-        if (f.search) {
-          var q = String(f.search).toLowerCase();
-          var hay = ((c.first_name || '') + ' ' + (c.last_name || '') + ' ' + (c.email || '')).toLowerCase();
-          if (hay.indexOf(q) === -1) return false;
-        }
+        if (!this._matchScope(c, f)) return false;
         // For rejections, scope by date_last_stage_update (when they were
         // rejected) instead of date_applied — recruiters thinking
         // "rejections this month" mean "rejected this month", not
@@ -1420,41 +1716,16 @@ document.addEventListener('alpine:init', function () {
       },
 
       _funnelMatch: function (c, f) {
-        if (c.status !== 'Active') return false;
-        if (f.jobId === '__unassigned__') {
-          if (hasAssignedId(c.job_id)) return false;
-        } else if (f.jobId && c.job_id != f.jobId) return false;
-        if (f.sourceId === '__unassigned__') {
-          if (hasAssignedId(c.source_id)) return false;
-        } else if (f.sourceId && c.source_id != f.sourceId) return false;
-        if (f.recruiterId === '__unassigned__') {
-          if (hasAssignedId(c.recruiter_id)) return false;
-        } else if (f.recruiterId === '__assigned__') {
-          if (!hasAssignedId(c.recruiter_id)) return false;
-        } else if (f.recruiterId) {
-          if (c.recruiter_id != f.recruiterId) return false;
-        }
-        if (f.regionId === '__unassigned__') {
-          if (hasAssignedId(c.region_id)) return false;
-        } else if (f.regionId && c.region_id != f.regionId) return false;
-        if (f.motion === '__unassigned__') {
-          if (c.motion === 'Inbound' || c.motion === 'Outbound') return false;
-        } else if (f.motion && c.motion !== f.motion) return false;
-        // Topbar search box \u2014 substring match against name + email.
-        // Same semantic as the export-count `filteredCandidates` so
-        // the two surfaces always agree on which candidates a search
-        // selects. Mismatch was the bug: typing in search updated the
-        // export count but the visible funnel stayed unchanged, which
-        // read as "search didn't work".
-        if (f.search) {
-          var q = String(f.search).toLowerCase();
-          var hay = ((c.first_name || '') + ' ' + (c.last_name || '') + ' ' + (c.email || '')).toLowerCase();
-          if (hay.indexOf(q) === -1) return false;
-        }
-        // Timestamp-based date comparison so a Sheets-returned Date object
-        // (stringified by the backend's parseStr fallback) doesn't break
-        // the filter. parseStr now normalizes to ISO, but defense in depth.
-        // Calendar-date compare — see filteredCandidates above for the full
+        // Previously this filtered to status === 'Active', which meant
+        // Hired candidates (status = 'Hired') never appeared in ANY
+        // column — so the Hired column always read 0 while the Waterfall
+        // Report's Hired bucket showed the real count. Users saw two
+        // inconsistent "hired" counts and reasonably concluded the views
+        // were out of sync. Include Hired here; exclude only Rejected
+        // (the Rejected stage itself isn't rendered).
+        if (c.status === 'Rejected') return false;
+        if (!this._matchScope(c, f)) return false;
+        // Calendar-date compare — see filteredCandidates for the full
         // rationale. Same fix; same one-liner pattern so both code paths
         // can't drift apart on date semantics.
         if (c.date_applied && (f.startDate || f.endDate)) {
@@ -1465,20 +1736,21 @@ document.addEventListener('alpine:init', function () {
         return true;
       },
 
+      // Signature keys into the funnel cache so the expensive per-candidate
+      // scan only re-runs when something in the filter actually changed.
+      // Array axes get `.join(',')` so two filters with the same selected
+      // ids in different Alpine proxy instances still hash the same.
       _funnelSignature: function (f) {
         return [
           this._candidatesVersion,
           this._stagesVersion,
-          f.jobId || '',
-          f.sourceId || '',
-          f.recruiterId || '',
-          f.motion || '',
-          f.regionId || '',
-          f.status || '',
+          (f.jobIds       || []).slice().sort().join(','),
+          (f.sourceIds    || []).slice().sort().join(','),
+          (f.recruiterIds || []).slice().sort().join(','),
+          (f.motions      || []).slice().sort().join(','),
+          (f.regionIds    || []).slice().sort().join(','),
           f.startDate || '',
-          f.endDate || '',
-          f.search || '',
-          f.xdrOnly ? '1' : '0',
+          f.endDate   || '',
         ].join('|');
       },
 
@@ -1487,18 +1759,6 @@ document.addEventListener('alpine:init', function () {
         var sig = this._funnelSignature(f);
         if (sig === this._funnelCacheSig && this._funnelCacheData) {
           return this._funnelCacheData;
-        }
-
-        // Build xDR job ID allowlist when xdrOnly is active.
-        // Matches any job whose title contains "xdr" (case-insensitive).
-        var xdrJobIds = null;
-        if (f.xdrOnly) {
-          xdrJobIds = {};
-          for (var xi = 0; xi < this.jobs.length; xi++) {
-            if ((this.jobs[xi].title || '').toLowerCase().indexOf('xdr') !== -1) {
-              xdrJobIds[this.jobs[xi].id] = true;
-            }
-          }
         }
 
         // Active candidates feed the active stage rows. Rejected candidates
@@ -1511,10 +1771,22 @@ document.addEventListener('alpine:init', function () {
         var rejectedCandidates = [];
         var rejectedFilters = Object.assign({}, f);
         delete rejectedFilters.status;
+        // Build a map of rejected stage_ids so we can classify a candidate
+        // as "rejected" by EITHER status OR stage. Data coming from bulk
+        // imports (Sharon's / Simona's trackers) has many rows where the
+        // stage was manually set to Rejected but the status field was left
+        // as "Active" — those candidates were silently getting added to
+        // stageCandidates[rejectedStageId], counted in inScopeTotal, but
+        // never displayed (since the Rejected stage is filtered out of the
+        // rendered stageRows). Visible: 123; badge: 153 = 30 hidden.
+        var rejectedStageIds = {};
+        (this.settings.stages || []).forEach(function (s) {
+          if (s.is_rejected) rejectedStageIds[s.id] = true;
+        });
         for (var i = 0; i < this.allCandidates.length; i++) {
           var c = this.allCandidates[i];
-          if (xdrJobIds !== null && !xdrJobIds[c.job_id]) continue;
-          if (c.status === 'Rejected') {
+          var isRejected = c.status === 'Rejected' || rejectedStageIds[c.stage_id];
+          if (isRejected) {
             if (this._funnelMatchExcludingStatus(c, rejectedFilters)) {
               rejectedCandidates.push(c);
             }
@@ -1543,8 +1815,57 @@ document.addEventListener('alpine:init', function () {
               stage_color: s.color,
               candidate_count: rows.length,
               is_rejected_bucket: false,
+              is_orphan: false,
             };
           });
+
+        // ── Orphan-stage rows ──────────────────────────────────
+        // Any candidate whose stage_id doesn't land in one of the rendered
+        // rows above is otherwise invisible. That used to show up as a
+        // silent "N with missing pipeline stage" footer — unclickable,
+        // unactionable, confusing. Instead, emit a dedicated row for
+        // every distinct orphan stage_id so every human in the system is
+        // visible somewhere in the funnel. Two kinds of orphans:
+        //   (a) candidate points at a stage that exists in settings but
+        //       is disabled — render with the stage's real name + color
+        //       and a "disabled" badge so the user knows to re-enable or
+        //       reassign.
+        //   (b) candidate points at a stage_id that's not in settings at
+        //       all (legacy data) — render as "Unknown stage #<id>" so
+        //       the user sees something specific enough to investigate.
+        var renderedIds = {};
+        stageRows.forEach(function (r) { renderedIds[r.stage_id] = true; });
+        var stagesById = {};
+        (this.settings.stages || []).forEach(function (s) { stagesById[s.id] = s; });
+        var orphanRows = [];
+        Object.keys(stageCandidates).forEach(function (sid) {
+          if (renderedIds[sid]) return;
+          var s = stagesById[sid];
+          // Skip rejected-stage ids — those candidates already flowed into
+          // rejectedCandidates and will render in the Rejected bucket row.
+          if (s && s.is_rejected) return;
+          var rws = stageCandidates[sid] || [];
+          if (rws.length === 0) return;
+          rws.sort(function (a, b) { return (a.last_name || '').localeCompare(b.last_name || ''); });
+          orphanRows.push({
+            stage_id: isNaN(Number(sid)) ? sid : Number(sid),
+            stage_name: s ? s.name : ('Unknown stage #' + sid),
+            stage_color: s ? s.color : '#9A9DA6',
+            candidate_count: rws.length,
+            is_rejected_bucket: false,
+            is_orphan: true,
+            orphan_reason: s
+              ? 'Stage "' + s.name + '" is currently disabled in Settings \u2192 Pipeline Stages. Re-enable it or reassign these candidates to an active stage.'
+              : 'These candidates point at a stage_id that no longer exists in Settings. Open each one and reassign them to a live stage.',
+            // sequence used to sort orphans; disabled stages respect the
+            // order they were in when active, unknown stages trail at end.
+            _sequence: s ? s.sequence : 9999,
+          });
+        });
+        orphanRows.sort(function (a, b) { return a._sequence - b._sequence; });
+        // Prepend orphan rows so users see Applied/Reviewed at the top of
+        // the funnel where they'd expect them, not at the end.
+        stageRows = orphanRows.concat(stageRows);
 
         // Synthetic Rejected row pinned to the bottom of the funnel.
         // Reuses stage_id = -1 as a sentinel so funnelCandidatesForStage
@@ -1559,30 +1880,15 @@ document.addEventListener('alpine:init', function () {
           stage_color: (rejectedStage && rejectedStage.color) || '#E14B4B',
           candidate_count: rejectedCandidates.length,
           is_rejected_bucket: true,
+          is_orphan: false,
         });
 
-        // Step-to-step "share of previous stage" — purely descriptive.
-        // NOT a conversion rate: these counts are snapshots, not a cohort,
-        // so the pre-screen / reviewed ratio compares two different groups
-        // of candidates. For real conversion vs. xDR benchmarks, the
-        // Waterfall Report section walks `history` to compute a proper
-        // cohort flow and compares that to row 23's benchmarks.
-        for (var wi = 0; wi < stageRows.length; wi++) {
-          var wr = stageRows[wi];
-          if (wr.is_rejected_bucket) {
-            // Rejected isn't part of the active pipeline progression —
-            // showing a "▼50%" next to it would imply a rejection rate
-            // that this number doesn't actually represent. Leave blank.
-            wr.step_pct = null;
-            continue;
-          }
-          if (wi === 0) {
-            wr.step_pct = null;
-          } else {
-            var prevCnt = stageRows[wi - 1].candidate_count;
-            wr.step_pct = prevCnt > 0 ? Math.round((wr.candidate_count / prevCnt) * 100) : null;
-          }
-        }
+        // Funnel rows are a pure snapshot now — no step-% column. A prior
+        // iteration showed "share of previous stage's current headcount"
+        // which was mathematically meaningless (mixing cohorts of
+        // candidates from different weeks/months produced nonsense like
+        // "683%"). Real cohort conversion rates live in the Waterfall
+        // Report section, which walks `history` against xDR benchmarks.
 
         this._funnelCacheSig = sig;
         this._funnelCacheData = {
@@ -1601,11 +1907,53 @@ document.addEventListener('alpine:init', function () {
         return this._buildFunnelCache().total;
       },
 
+      // Total including the synthetic Rejected bucket — sum derived
+      // DIRECTLY from the rows the UI is about to render. That makes the
+      // badge mathematically identical to "add up the numbers you can
+      // see." Any candidate whose stage_id is orphan/disabled/unknown
+      // (data corruption) drops out of stageRows and therefore drops out
+      // of this total too — which is the correct behavior: if we don't
+      // display them, we don't count them.
+      funnelTotalEverywhere: function () {
+        var rows = this._buildFunnelCache().rows || [];
+        var n = 0;
+        for (var i = 0; i < rows.length; i++) {
+          n += (rows[i].candidate_count || 0);
+        }
+        return n;
+      },
+
+      // Count candidates whose stage_id doesn't map to any rendered row
+      // (data corruption: candidate points at a disabled/deleted stage).
+      // Exposed so the UI can surface a visible "N candidates with
+      // unknown stage" warning instead of silently swallowing them.
+      funnelTotalOrphaned: function () {
+        var data = this._buildFunnelCache();
+        var rows = data.rows || [];
+        var knownIds = {};
+        for (var i = 0; i < rows.length; i++) knownIds[rows[i].stage_id] = true;
+        var orphaned = 0;
+        var buckets = data.stageCandidates || {};
+        for (var k in buckets) {
+          if (!Object.prototype.hasOwnProperty.call(buckets, k)) continue;
+          if (!knownIds[k] && String(k) !== '-1') {
+            orphaned += (buckets[k] || []).length;
+          }
+        }
+        return orphaned;
+      },
+
       funnelBarWidth: function (stage) {
         // % of total active pipeline (each stage's count / sum of all stage counts).
-        // This makes the right-side label a meaningful "share of pipeline" metric
-        // and keeps the bar visually proportional to that share.
+        // The Rejected bucket is intentionally excluded from funnelTotalActive()
+        // so it doesn't inflate "share of active pipeline" for real stages.
+        // That means a large rejected count would produce a >100% bar if we
+        // used the active total as the denominator — so expand the denominator
+        // for the rejected bucket specifically to keep its bar <=100%.
         var total = this.funnelTotalActive();
+        if (stage.is_rejected_bucket) {
+          total = Math.max(total, stage.candidate_count);
+        }
         if (total <= 0) return 0;
         return Math.round((stage.candidate_count / total) * 100);
       },
@@ -1664,14 +2012,25 @@ document.addEventListener('alpine:init', function () {
         if (isNaN(stageId) || stageId === c.stage_id) return;
         var target = (this.settings.stages || []).find(function (s) { return s.id === stageId; });
         if (!target) return;
+        // Optimistic local update so the funnel moves the row immediately
+        // without waiting for the ~400–800ms GAS round-trip. Rollback on error.
+        var prevStageId = c.stage_id;
+        c.stage_id = stageId;
+        this._candidatesVersion++;
+        this._funnelCacheSig = '';
+        var self = this;
         try {
           await gasCall('updateCandidateStage', c.id, stageId, c.date_last_stage_update);
-          await this.refreshCandidate(c.id);
           this.toastSuccess(c.first_name + ' \u2192 ' + target.name);
+          // Refresh denormalized fields (date_last_stage_update, stage_name)
+          // in the background so the next save has the fresh version token.
+          this.refreshCandidate(c.id).catch(function () {});
         } catch (e) {
+          c.stage_id = prevStageId;
+          this._candidatesVersion++;
+          this._funnelCacheSig = '';
           var msg = (e && e.message) || String(e);
           if (msg.indexOf('CONFLICT: ') === 0) {
-            var self = this;
             this.toastError('Conflict \u2014 someone else updated ' + c.first_name + '.', {
               actionLabel: 'Reload', duration: 8000,
               onAction: function () { self.refreshCandidate(c.id); },
@@ -1771,6 +2130,28 @@ document.addEventListener('alpine:init', function () {
             (result.failures[0].message || 'unknown'), { duration: 8000 });
         }
       },
+      // Patches allCandidates in place for the given ids, applying `patch`
+      // (object merge) to each. Bumps the reactivity counter once at the
+      // end so dependent computeds (funnel counts, filters) re-evaluate
+      // exactly once for the whole batch. Used after bulk operations so
+      // we can skip the 300-1500ms full re-fetch — we already know what
+      // changed because we sent the IDs ourselves.
+      _patchCandidatesById: function (ids, patch) {
+        if (!ids || !ids.length) return;
+        var byId = {};
+        ids.forEach(function (id) { byId[id] = true; });
+        for (var i = 0; i < this.allCandidates.length; i++) {
+          var c = this.allCandidates[i];
+          if (!byId[c.id]) continue;
+          var next = {};
+          for (var k in c) if (Object.prototype.hasOwnProperty.call(c, k)) next[k] = c[k];
+          for (var k2 in patch) if (Object.prototype.hasOwnProperty.call(patch, k2)) next[k2] = patch[k2];
+          this.allCandidates[i] = next;
+        }
+        this._candidatesVersion++;
+        this._funnelCacheSig = '';
+      },
+
       bulkAdvance: async function () {
         if (this.bulkBusy) return;
         if (!this.bulkActionStageId) return;
@@ -1781,11 +2162,21 @@ document.addEventListener('alpine:init', function () {
         try {
           var result = await gasCall('bulkAdvanceStage', ids, targetId);
           this._summarizeBulkResult('Moved', result);
-          // Refresh just the affected candidates instead of full reload —
-          // way faster on a 100+ candidate dataset and the funnel
-          // re-renders reactively from allCandidates.
-          var fresh = await gasCall('getCandidates', {});
-          this._setCandidates(fresh);
+          // Local mutation from successIds — saves the 300-1500ms
+          // getCandidates re-fetch. settings.stages already has the
+          // metadata we need to denormalize stage_name + status.
+          var stage = (this.settings.stages || []).find(function (s) { return s.id === targetId; });
+          var newStatus = stage && stage.is_hired ? 'Hired'
+                        : stage && stage.is_rejected ? 'Rejected'
+                        : null;
+          var today = new Date().toISOString().slice(0, 10);
+          var patch = {
+            stage_id:               targetId,
+            stage_name:             stage ? stage.name : '',
+            date_last_stage_update: today,
+          };
+          if (newStatus) patch.status = newStatus;
+          this._patchCandidatesById(result.successIds || [], patch);
           // Drop successfully-moved candidates from selection so the
           // action bar doesn't keep them around as if still pending.
           var done = {};
@@ -1807,8 +2198,13 @@ document.addEventListener('alpine:init', function () {
         try {
           var result = await gasCall('bulkAssignRecruiter', ids, rid);
           this._summarizeBulkResult('Assigned', result);
-          var fresh = await gasCall('getCandidates', {});
-          this._setCandidates(fresh);
+          var recruiter = rid != null
+            ? (this.settings.recruiters || []).find(function (r) { return r.id === rid; })
+            : null;
+          this._patchCandidatesById(result.successIds || [], {
+            recruiter_id:   rid,
+            recruiter_name: recruiter ? recruiter.name : '',
+          });
           this.bulkActionRecruiterId = '';
         } catch (e) {
           this.toastError('Bulk assign failed: ' + (e.message || String(e)));
@@ -1835,22 +2231,8 @@ document.addEventListener('alpine:init', function () {
         });
       },
 
-      // ── Cross-section linking ─────────────────────────────
-      // Click a recruiter row in the perf table → scope the funnel
-      // section above to that recruiter so the user sees only that
-      // recruiter's pipeline. Scrolls funnel into view for the link
-      // to feel like a navigation, not a silent state change.
-      filterFunnelByRecruiter: function (recruiterId) {
-        this.funnelFilters.recruiterId = String(recruiterId);
-        // Auto-expand all stages so the user immediately sees the recruiter's
-        // candidate distribution without having to click each stage open.
-        this.expandedStages = this.pipelineFunnelData.map(function (s) { return s.stage_id; });
-        var el = document.querySelector('.funnel-card');
-        if (el) el.scrollIntoView({ behavior: 'smooth', block: 'start' });
-      },
-
       // ── Per-section refetches (server-side) ───────────────
-      // Both flip the per-section loading flag while the request is in
+      // Flips the per-section loading flag while the request is in
       // flight so the section can render a spinner / skeleton without
       // touching the page-wide `loading` state. Persisted filter state
       // is saved AFTER a successful refetch so a failed call doesn't
@@ -1858,48 +2240,32 @@ document.addEventListener('alpine:init', function () {
       // Debounce + race-safe wrappers so rapid dropdown changes within
       // a section don't queue 4 in-flight requests. Each section has its
       // own seq counter so cross-section changes don't cancel each other.
-      _recruiterReloadSeq: 0, _recruiterReloadTimer: null,
+      // (The old _recruiterReload* counters were removed with the
+      // Recruiter Performance section — see Apr 2026 cleanup.)
       _sourceReloadSeq:    0, _sourceReloadTimer:    null,
       _analyticsReloadSeq: 0, _analyticsReloadTimer: null,
-
-      reloadRecruiterPerf: function () {
-        var self = this;
-        var seq = ++this._recruiterReloadSeq;
-        if (this._recruiterReloadTimer) clearTimeout(this._recruiterReloadTimer);
-        this.recruiterLoading = true;
-        this._recruiterReloadTimer = setTimeout(async function () {
-          var main  = self.mergeSectionFilters(self.recruiterFilters);
-          var hires = null;
-          if (self.recruiterFilters.hiresPreset) {
-            hires = Object.assign({}, main, {
-              startDate: self.recruiterFilters.hiresStartDate,
-              endDate:   self.recruiterFilters.hiresEndDate,
-            });
-          }
-          try {
-            var rows = await gasCall('getRecruiterPerformance', main, hires);
-            if (seq !== self._recruiterReloadSeq) return;
-            self.recruiterPerformance = rows;
-            self._persistSectionState();
-          } catch (e) {
-            if (seq !== self._recruiterReloadSeq) return;
-            Alpine.store('app').toastError('Recruiter perf reload failed: ' + e.message);
-          } finally {
-            if (seq === self._recruiterReloadSeq) self.recruiterLoading = false;
-          }
-        }, 200);
-      },
 
       reloadSourceEffectiveness: function () {
         var self = this;
         var seq = ++this._sourceReloadSeq;
         if (this._sourceReloadTimer) clearTimeout(this._sourceReloadTimer);
-        this.sourceLoading = true;
+        var f = self.mergeSectionFilters(self.sourceFilters);
+        var cacheKey = JSON.stringify(f);
+        // Instant cache hit path — same pattern as reloadWaterfall.
+        var cached = sourceCache.get(cacheKey);
+        if (cached) {
+          self.sourceEffectiveness = cached;
+          self.scheduleChartRender();
+          self.sourceLoading = false;
+          self._persistSectionState();
+          return;
+        }
+        self.sourceLoading = true;
         this._sourceReloadTimer = setTimeout(async function () {
-          var f = self.mergeSectionFilters(self.sourceFilters);
           try {
             var rows = await gasCall('getSourceEffectiveness', f);
             if (seq !== self._sourceReloadSeq) return;
+            sourceCache.set(cacheKey, rows);
             self.sourceEffectiveness = rows;
             self.scheduleChartRender();
             self._persistSectionState();
@@ -1916,38 +2282,101 @@ document.addEventListener('alpine:init', function () {
       // Independent of reloadFunnel — this one round-trips to the server
       // because we need allHistory, which isn't loaded on the client.
       // Debounced the same way as reloadSourceEffectiveness so dragging
-      // the date picker or toggling xDR doesn't fire 20 RPCs.
+      // the date picker doesn't fire 20 RPCs.
       _waterfallReloadSeq: 0,
       reloadWaterfall: function () {
         var self = this;
         var seq = ++this._waterfallReloadSeq;
         if (this._waterfallReloadTimer) clearTimeout(this._waterfallReloadTimer);
-        this.waterfallLoading = true;
+        // All-Time semantics: BOTH startDate and endDate empty = "no
+        // window at all" — include every candidate, never exclude for
+        // missing date_applied. We only normalize endDate to today when
+        // startDate is set (a real window with an open upper bound).
+        var f = Object.assign({}, self.waterfallFilters);
+        if (f.startDate && !f.endDate) {
+          f.endDate = new Date().toISOString().slice(0, 10);
+        }
+        var cacheKey = JSON.stringify(f);
+
+        // Cache hit → instant render, skip RPC entirely. On miss we fall
+        // through to the debounced fetch. The cache key includes every
+        // filter dimension, so any change invalidates; see
+        // _clearSectionCaches for the sync-driven invalidation path.
+        var cached = waterfallCache.get(cacheKey);
+        if (cached) {
+          self.waterfallData = cached;
+          self.waterfallLoading = false;
+          self._persistSectionState();
+          return;
+        }
+
+        // Flip the "revalidating" flag rather than the data-blocking
+        // `loading` one: the UI keeps showing the last-known waterfallData
+        // while the new one arrives. This is the crucial fix for the
+        // "panel goes blank during filter change" pain.
+        self.waterfallRevalidating = true;
+        // Only true-loading (no data yet) gates the empty loading-state.
+        self.waterfallLoading = !self.waterfallData;
         this._waterfallReloadTimer = setTimeout(async function () {
-          // Build filter payload. Empty endDate = "through today" — we
-          // normalize here so the server sees a concrete date string.
-          var f = Object.assign({}, self.waterfallFilters);
-          if (!f.endDate) f.endDate = new Date().toISOString().slice(0, 10);
           try {
             var result = await gasCall('getWaterfallMetrics', f);
             if (seq !== self._waterfallReloadSeq) return;
+            waterfallCache.set(cacheKey, result);
             self.waterfallData = result;
             self._persistSectionState();
           } catch (e) {
             if (seq !== self._waterfallReloadSeq) return;
             Alpine.store('app').toastError('Waterfall reload failed: ' + e.message);
           } finally {
-            if (seq === self._waterfallReloadSeq) self.waterfallLoading = false;
+            if (seq === self._waterfallReloadSeq) {
+              self.waterfallLoading = false;
+              self.waterfallRevalidating = false;
+            }
           }
         }, 250);
       },
 
+      // Per-recruiter breakdown (#14). For each active recruiter, counts
+      // how many of their candidates in the cohort reached each stage.
+      // Computed client-side from allCandidates (recruiter_id lookup) +
+      // waterfallData.rows[].candidate_ids (cohort members per stage).
+      get waterfallByRecruiter() {
+        if (!this.waterfallData || !this.waterfallData.rows) return [];
+        var cands = this.allCandidates || [];
+        var candById = {};
+        for (var i = 0; i < cands.length; i++) candById[cands[i].id] = cands[i];
+        var recs = (this.settings.recruiters || []).filter(function (r) { return r.is_active; });
+
+        // Include "Unassigned" bucket so no cohort candidate is silently dropped.
+        var buckets = recs.map(function (r) { return { id: r.id, name: r.name, perStage: [] }; });
+        buckets.push({ id: null, name: '— Unassigned —', perStage: [] });
+
+        var self = this;
+        this.waterfallData.rows.forEach(function (row, si) {
+          var counts = {};  // recruiter_id (or 'null') → count
+          (row.candidate_ids || []).forEach(function (cid) {
+            var c = candById[cid];
+            var rid = (c && c.recruiter_id) ? c.recruiter_id : null;
+            var key = rid == null ? 'null' : rid;
+            counts[key] = (counts[key] || 0) + 1;
+          });
+          buckets.forEach(function (b) {
+            var key = b.id == null ? 'null' : b.id;
+            b.perStage[si] = counts[key] || 0;
+          });
+        });
+
+        // Drop empty rows — a recruiter with 0 in every stage isn't useful.
+        // Keep "Unassigned" only if it has candidates.
+        return buckets.filter(function (b) { return b.perStage.some(function (n) { return n > 0; }); });
+      },
+
       resetWaterfallFilters: function () {
         this.waterfallFilters = {
-          startDate: '2026-04-01',
+          startDate: '',
           endDate:   '',
-          jobId: '', sourceId: '', recruiterId: '', regionId: '', motion: '',
-          xdrOnly: false,
+          preset:    'all',
+          jobIds: [], sourceIds: [], recruiterIds: [], motions: [], regionIds: [],
         };
         this.reloadWaterfall();
       },
@@ -1971,10 +2400,14 @@ document.addEventListener('alpine:init', function () {
         return arrow + row.bench_pct + '%';
       },
 
-      // Pretty "Apr 1" / "Apr 23" date formatter for the cohort summary.
+      // Pretty "Apr 1" / "Apr 23" date formatter. Bulletproof against
+      // undefined / null / '' / unexpected shapes — always returns a
+      // safe string (never the literal word "undefined").
       formatDateShort: function (isoStr) {
-        if (!isoStr) return '';
-        var s = String(isoStr).slice(0, 10);
+        if (isoStr == null || isoStr === '') return '';
+        var raw = String(isoStr);
+        if (raw === 'undefined' || raw === 'null') return '';
+        var s = raw.slice(0, 10);
         var parts = s.split('-');
         if (parts.length !== 3) return s;
         var monthNames = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
@@ -1982,6 +2415,106 @@ document.addEventListener('alpine:init', function () {
         var d = parseInt(parts[2], 10);
         if (isNaN(m) || isNaN(d) || m < 0 || m > 11) return s;
         return monthNames[m] + ' ' + d;
+      },
+
+      // Count maps for dropdown badges ("xDR Bay Area (14)"). Scans the
+      // full candidate set, not the filtered cohort, so users can see
+      // which buckets have candidates BEFORE picking a filter.
+      get waterfallCounts() {
+        var byJob = {}, byRecruiter = {}, bySource = {};
+        var cands = this.allCandidates || [];
+        for (var i = 0; i < cands.length; i++) {
+          var c = cands[i];
+          if (c.job_id)       byJob[c.job_id]             = (byJob[c.job_id]          || 0) + 1;
+          if (c.recruiter_id) byRecruiter[c.recruiter_id] = (byRecruiter[c.recruiter_id] || 0) + 1;
+          if (c.source_id)    bySource[c.source_id]       = (bySource[c.source_id]       || 0) + 1;
+        }
+        return { byJob: byJob, byRecruiter: byRecruiter, bySource: bySource };
+      },
+
+      // Human cohort-window label: "Apr 1 – today" / "All time" / etc.
+      waterfallWindowLabel: function () {
+        var f = this.waterfallFilters || {};
+        var s = this.formatDateShort(f.startDate);
+        var e = this.formatDateShort(f.endDate);
+        if (!s && !e) return 'all time';
+        if (!s) return 'through ' + e;
+        return s + ' – ' + (e || 'today');
+      },
+
+      // Which specific job the cohort is currently scoped to, or null for
+      // "all jobs." Used in the cohort summary line AND for routing the
+      // Goal-chip click into Settings for per-job override editing.
+      // With multi-select, a single-job selection keeps the existing
+      // "edit this job's goals" flow; any multi-job selection falls back
+      // to "no single job" (null) so the override flow doesn't misfire.
+      waterfallActiveJob: function () {
+        var f = this.waterfallFilters || {};
+        var ids = (f.jobIds && f.jobIds.length > 0) ? f.jobIds : (f.jobId ? [f.jobId] : []);
+        if (ids.length !== 1) return null;
+        var id = ids[0];
+        if (id === '__unassigned__') return null;
+        return (this.jobs || []).find(function (j) { return j.id == id; }) || null;
+      },
+
+      // Tooltip for the Goal cell.
+      waterfallStepTitle: function (row) {
+        if (!row || row.step_pct == null) return 'Step % is not shown for the first stage.';
+        if (row.bench_pct == null) return 'Step %: ' + row.step_pct + '% moved here from the previous stage.';
+        var diff = row.step_pct - row.bench_pct;
+        if (diff === 0) {
+          return 'Step %: ' + row.step_pct + '%. On goal.';
+        }
+        if (diff > 0) {
+          return 'Step %: ' + row.step_pct + '%. ' + diff + ' pts above goal.';
+        }
+        return 'Step %: ' + row.step_pct + '%. ' + Math.abs(diff) + ' pts below goal.';
+      },
+      waterfallBenchTitle: function (row) {
+        if (!row || row.bench_pct == null) return 'Goal %: no goal set. Click to set one.';
+        if (row.step_pct == null) return 'Goal %: ' + row.bench_pct + '%. Click to edit.';
+        var diff = row.step_pct - row.bench_pct;
+        if (diff === 0) return 'Goal %: ' + row.bench_pct + '%. Actual matches goal. Click to edit.';
+        if (diff > 0) return 'Goal %: ' + row.bench_pct + '%. Actual is ' + diff + ' pts above. Click to edit.';
+        return 'Goal %: ' + row.bench_pct + '%. Actual is ' + Math.abs(diff) + ' pts below. Click to edit.';
+      },
+
+      // Click a Goal cell → open Settings → Waterfall Goals (the matrix
+      // editor). Flash the stage's row so the admin sees exactly where
+      // to type. One destination regardless of what job is active —
+      // simpler to learn than branching on selection state.
+      openBenchmarkEditor: function (row) {
+        if (!row) return;
+        this.openSettings();
+        var s = Alpine.store('app');
+        s.settingsTab = 'goals';
+        s.settingsFlashStage = row.stage_id;
+        var activeJob = this.waterfallActiveJob();
+        s.settingsGoalJobId = activeJob ? activeJob.id : null;
+      },
+
+      // Drill-down: click a waterfall row to see the candidates in that
+      // bucket. Toggles closed if already open. Resolves the IDs returned
+      // by the backend (row.candidate_ids) against allCandidates on the
+      // client — no extra RPC needed.
+      toggleWaterfallRow: function (stageId) {
+        this.waterfallExpanded = (this.waterfallExpanded === stageId) ? null : stageId;
+      },
+
+      waterfallRowCandidates: function (row) {
+        if (!row || !row.candidate_ids || !row.candidate_ids.length) return [];
+        var idSet = {};
+        for (var i = 0; i < row.candidate_ids.length; i++) idSet[row.candidate_ids[i]] = true;
+        var joined = (this.allCandidates || []).filter(function (c) { return idSet[c.id]; });
+        // Sort by last name for scannability. Preserves reference equality
+        // on subsequent renders since filter() returns a new array each time.
+        joined.sort(function (a, b) {
+          return (a.last_name || '').localeCompare(b.last_name || '') ||
+                 (a.first_name || '').localeCompare(b.first_name || '');
+        });
+        // Cap at 100 so enormous cohorts don't lag the DOM. Shows a "+N more"
+        // indicator in the UI when truncated.
+        return joined.slice(0, 100);
       },
 
       // Bottom-of-page Analytics section refetch. Routes through
@@ -1993,16 +2526,32 @@ document.addEventListener('alpine:init', function () {
         var self = this;
         var seq = ++this._analyticsReloadSeq;
         if (this._analyticsReloadTimer) clearTimeout(this._analyticsReloadTimer);
-        this.analyticsHistoricalLoading = true;
+        var f = self.mergeSectionFilters(self.analyticsFilters);
+        var cacheKey = JSON.stringify(f);
+        var cached = analyticsCache.get(cacheKey);
+        if (cached) {
+          self.analytics = {
+            funnelConversion: cached.funnelConversion,
+            timeToHireTrend:  cached.timeToHireTrend,
+            stageVelocity:    cached.stageVelocity,
+            rejectionReasons: cached.rejectionReasons || [],
+          };
+          self.scheduleChartRender();
+          self.analyticsHistoricalLoading = false;
+          self._persistSectionState();
+          return;
+        }
+        self.analyticsHistoricalLoading = true;
         this._analyticsReloadTimer = setTimeout(async function () {
-          var f = self.mergeSectionFilters(self.analyticsFilters);
           try {
             var a = await gasCall('getAnalyticsHistorical', f);
             if (seq !== self._analyticsReloadSeq) return;
+            analyticsCache.set(cacheKey, a);
             self.analytics = {
               funnelConversion: a.funnelConversion,
               timeToHireTrend:  a.timeToHireTrend,
               stageVelocity:    a.stageVelocity,
+              rejectionReasons: a.rejectionReasons || [],
             };
             self.scheduleChartRender();
             self._persistSectionState();
@@ -2015,52 +2564,12 @@ document.addEventListener('alpine:init', function () {
         }, 200);
       },
 
-      // ── Filter actions ───────────────────────────────────
-      onPresetChange: function () {
-        if (this.filters.preset === 'custom') {
-          // Pre-seed the custom inputs with the previous range (or
-          // last 30 days if there isn't one) so the user has something
-          // to tweak rather than empty fields.
-          if (!this.filters.startDate || !this.filters.endDate) {
-            var seed = presetRange('30d');
-            this.filters.startDate = this.filters.startDate || seed.start;
-            this.filters.endDate   = this.filters.endDate   || seed.end;
-          }
-          this.applyFilters();
-          return;
-        }
-        var r = presetRange(this.filters.preset);
-        this.filters.startDate = r.start;
-        this.filters.endDate = r.end;
-        this.applyFilters();
-      },
-
-      // Triggered when either of the global custom date inputs change.
-      // Same swap-if-inverted defense as the section variant.
-      onCustomDateChange: function () {
-        if (this.filters.startDate && this.filters.endDate &&
-            this.filters.startDate > this.filters.endDate) {
-          var tmp = this.filters.startDate;
-          this.filters.startDate = this.filters.endDate;
-          this.filters.endDate = tmp;
-          Alpine.store('app').toastInfo('Date range was swapped to keep From ≤ To.');
-        }
-        this.applyFilters();
-      },
-
+      // Debounced analytics-tab reload. Called by the Analytics section's
+      // own filter row on every change so the KPIs / charts refetch with
+      // the current scope. Kept in the root so peek+funnel helpers can
+      // trigger a historical refresh without caring about the internal
+      // RAF debounce machinery.
       applyFilters: function () {
-        // Funnel data is derived client-side from allCandidates so it
-        // updates reactively as `filters` mutate. Only the server-side
-        // dashboards (Recruiter Performance, Sourcing ROI, historical
-        // analytics) need a refetch when global filters change.
-        //
-        // Wrapped in requestAnimationFrame so the dropdown UI closes
-        // and paints BEFORE we touch the loading flag / queue work.
-        // Without this, every dropdown selection was synchronously
-        // toggling globalAnalyticsLoading, mutating filters reactively,
-        // and re-running the funnel cache predicate before the browser
-        // got a chance to paint the closed select — felt as noticeable
-        // input lag even though no expensive op individually was slow.
         var self = this;
         var raf = (typeof requestAnimationFrame === 'function')
           ? requestAnimationFrame : function (cb) { setTimeout(cb, 0); };
@@ -2085,18 +2594,13 @@ document.addEventListener('alpine:init', function () {
         });
       },
 
-      resetFilters: function () {
-        var r = presetRange('all');
-        this.filters = {
-          preset: 'all', startDate: r.start, endDate: r.end,
-          jobId: '', sourceId: '', motion: '', regionId: '', recruiterId: '',
-          status: '', search: '',
-        };
-        this.applyFilters();
-      },
-
       // (sortBy / sortIcon / scrollTop removed — no list view to sort or jump to.)
       toggleDrill: function (key) { this.drill = this.drill === key ? null : key; },
+      setAnalyticsView: function (view) {
+        var next = (view === 'source') ? 'source' : 'historical';
+        this.analyticsView = next;
+        this.showAnalytics = true;
+      },
 
       // Sticky-nav jump. Smooth-scrolls so the section title clears the
       // sticky topbar (~56px) + the nav rail (~44px) above it. window.scrollTo
@@ -2119,31 +2623,26 @@ document.addEventListener('alpine:init', function () {
       // load for users who don't open it). Reloaded on every open — tiny
       // payload, avoids stale "2 hours ago" labels when the section has
       // been left open.
-      // Lazy-load recent rejections on first expand. Same pattern as
-      // toggleActivityFeed — keeps initial page load light, refresh
-      // on every open to avoid stale rows.
-      toggleRecentRejections: async function () {
-        this.showRejections = !this.showRejections;
-        if (!this.showRejections) return;
-        await this.loadRecentRejections();
-      },
-      loadRecentRejections: async function () {
-        this.rejectionsLoading = true;
-        try {
-          this.recentRejections = await gasCall('getRecentRejections', 30, 100);
-        } catch (e) {
-          Alpine.store('app').toastError('Could not load rejections: ' + e.message);
-        } finally {
-          this.rejectionsLoading = false;
-        }
-      },
 
       // Restore a rejected candidate to the first active stage, with an
       // optional confirm so it can't be triggered by a stray click.
+      //
+      // Previously this fired three serial calls (updateCandidateStage →
+      // updateCandidate → reloadAll), all blocking, which felt like a
+      // 2-3 second freeze. Now we run the two writes in parallel and
+      // patch local state immediately so the candidate visibly leaves
+      // the rejected bucket without waiting for the round-trips. A
+      // background refreshCandidate fills in the denormalized fields.
       reactivateCandidate: async function (c) {
         if (!c || !c.id) return;
         var name = ((c.first_name || '') + ' ' + (c.last_name || '')).trim() || 'this candidate';
-        if (!window.confirm('Restore ' + name + ' from Rejected?\nThey will move back into the pipeline.')) return;
+        var ok = await Alpine.store('app').confirm({
+          title:        'Restore from Rejected?',
+          message:      name + ' will move back into the pipeline at the first active stage.',
+          confirmLabel: 'Restore candidate',
+          cancelLabel:  'Cancel',
+        });
+        if (!ok) return;
         var firstStage = this.settings.stages
           .filter(function (s) { return s.is_enabled && !s.is_rejected; })
           .sort(function (a, b) { return a.sequence - b.sequence; })[0];
@@ -2151,20 +2650,42 @@ document.addEventListener('alpine:init', function () {
           Alpine.store('app').toastError('No active pipeline stage configured.');
           return;
         }
+        // Optimistic local patch — funnel updates immediately.
+        this._patchCandidatesById([c.id], {
+          stage_id:               firstStage.id,
+          stage_name:             firstStage.name,
+          status:                 'Active',
+          refuse_reason_id:       null,
+          date_last_stage_update: new Date().toISOString().slice(0, 10),
+        });
+        var self = this;
         try {
-          await gasCall('updateCandidateStage', c.id, firstStage.id);
-          await gasCall('updateCandidate', c.id, { refuse_reason_id: null });
+          // Parallel writes — both target the same row but the backend
+          // serializes them via withLock, so the second one waits ~no
+          // extra time vs. the first. Net: ~half the round-trip wait.
+          await Promise.all([
+            gasCall('updateCandidateStage', c.id, firstStage.id),
+            gasCall('updateCandidate', c.id, { refuse_reason_id: null }),
+          ]);
           Alpine.store('app').toastSuccess(name + ' restored to ' + firstStage.name + '.');
-          await this.reloadAll();
-          await this.loadRecentRejections();
+          // Background hydrate — pulls fresh denormalized fields + history
+          // without blocking the toast. The local patch above already
+          // shows the candidate in the right place.
+          this.refreshCandidate(c.id).catch(function () {});
         } catch (e) {
+          // Rollback the optimistic patch if either write failed.
+          self._patchCandidatesById([c.id], {
+            stage_id:               c.stage_id,
+            stage_name:             c.stage_name,
+            status:                 c.status,
+            refuse_reason_id:       c.refuse_reason_id,
+            date_last_stage_update: c.date_last_stage_update,
+          });
           Alpine.store('app').toastError(userFacingError(e, 'Restore failed.', 'Try again.'));
         }
       },
 
-      toggleActivityFeed: async function () {
-        this.showActivity = !this.showActivity;
-        if (!this.showActivity) return;
+      loadActivityFeed: async function () {
         this.activityLoading = true;
         try {
           // stage_to_color is enriched client-side from settings.stages
@@ -2180,6 +2701,13 @@ document.addEventListener('alpine:init', function () {
           this.activityLoading = false;
         }
       },
+      openActivityPanel: async function () {
+        this.activityPanelOpen = true;
+        await this.loadActivityFeed();
+      },
+      closeActivityPanel: function () {
+        this.activityPanelOpen = false;
+      },
 
       // ── Inline candidate field update ────────────────────
       // Sends date_last_stage_update as the optimistic-lock version so a
@@ -2190,22 +2718,31 @@ document.addEventListener('alpine:init', function () {
       updateCandidateField: async function (c, field, value) {
         var prev = c[field];
         c[field] = value;   // optimistic
+        this._candidatesVersion++;
+        this._funnelCacheSig = '';
 
         var self = this;
         this.inlineSavingCount++;
         try {
           if (field === 'stage_id') {
             await gasCall('updateCandidateStage', c.id, value, c.date_last_stage_update);
-            await this.refreshCandidate(c.id);
           } else {
             var updates = {};
             updates[field] = value;
             await gasCall('updateCandidate', c.id, updates, c.date_last_stage_update);
-            await this.refreshCandidate(c.id);
           }
-          Alpine.store('app').toastSuccess('Saved.');
+          // Background refresh for denormalized fields (stage_name, recruiter_name,
+          // source_name, date_last_stage_update version token). Fire-and-forget —
+          // the user already sees their change applied locally.
+          this.refreshCandidate(c.id).catch(function () {});
+          // No success toast for inline field saves: a recruiter moving
+          // through 10 candidates in a row was getting a stack of "Saved."
+          // toasts that felt noisy. The UI already reflects the change;
+          // the .inlineSavingCount pip provides feedback while saving.
         } catch (e) {
           c[field] = prev;   // rollback
+          this._candidatesVersion++;
+          this._funnelCacheSig = '';
           if (self._isConflict(e)) {
             Alpine.store('app').toastError(
               'Conflict — someone else updated this candidate.',
@@ -2213,8 +2750,7 @@ document.addEventListener('alpine:init', function () {
                 actionLabel: 'Review activity',
                 duration: 8000,
                 onAction: function () {
-                  self.showActivity = true;
-                  self.toggleActivityFeed();
+                  self.openActivityPanel();
                   self.refreshCandidate(c.id);
                 },
               }
@@ -2256,18 +2792,31 @@ document.addEventListener('alpine:init', function () {
       },
 
       // ── Inline job field update ──────────────────────────
+      // Patches the denormalized `recruiter_name` locally from settings
+      // when the recruiter changes — saves a getJobOpenings round-trip
+      // (~300-1500ms) on every inline edit. settings.recruiters is
+      // always loaded by the time the user can interact with a job row.
       updateJobField: async function (j, field, value) {
         var prev = j[field];
+        var prevDenorm = field === 'recruiter_id' ? j.recruiter_name : null;
         j[field] = value;
+        if (field === 'recruiter_id') {
+          var rid = value == null || value === '' ? null : Number(value);
+          var r = rid != null
+            ? (this.settings.recruiters || []).find(function (x) { return x.id === rid; })
+            : null;
+          j.recruiter_name = r ? r.name : '';
+        }
         this.inlineSavingCount++;
         try {
           var updates = {}; updates[field] = value;
           await gasCall('updateJobOpening', j.id, updates);
-          Alpine.store('app').toastSuccess('Job updated.');
-          // Refresh job list for recruiter_name denorm
-          this.jobs = await gasCall('getJobOpenings');
+          // Toast suppressed — same rationale as updateCandidateField:
+          // the inlineSaving pip is enough feedback, and back-to-back
+          // edits stack annoying "Job updated." toasts.
         } catch (e) {
           j[field] = prev;
+          if (field === 'recruiter_id') j.recruiter_name = prevDenorm || '';
           Alpine.store('app').toastError(userFacingError(e, 'Save failed.', 'Refresh and try again.'));
         } finally {
           this.inlineSavingCount = Math.max(0, this.inlineSavingCount - 1);
@@ -2276,8 +2825,16 @@ document.addEventListener('alpine:init', function () {
 
       // Undoable job delete — same optimistic-UI + 5s undo pattern as candidate delete.
       // Server-side guard (can't delete jobs with existing candidates) still applies.
-      deleteJob: function (j) {
-        if (!confirm('Delete "' + j.title + '"?\n\nHit Undo on the toast within 8s to cancel. Jobs with existing candidates cannot be deleted.')) return;
+      deleteJob: async function (j) {
+        var ok = await Alpine.store('app').confirm({
+          title:        'Delete this job?',
+          message:      '"' + j.title + '" will be removed from the open jobs list.\n\n' +
+                        'You\'ll have 8 seconds to undo from the toast. Jobs with existing candidates cannot be deleted.',
+          confirmLabel: 'Delete job',
+          cancelLabel:  'Keep job',
+          danger:       true,
+        });
+        if (!ok) return;
         var self = this;
         var idx = this.jobs.findIndex(function (x) { return x.id === j.id; });
         if (idx < 0) return;
@@ -2311,6 +2868,41 @@ document.addEventListener('alpine:init', function () {
       },
       openPeek: function (id) { Alpine.store('app').openPeek(id); },
 
+      // ── Topbar search (navigator, not filter) ─────────────
+      // Typing updates `searchResults` with up to 8 matching candidates.
+      // Selecting a result opens the peek panel and clears the search —
+      // it's a "find this person and jump to them" affordance, not a
+      // scope that narrows any dashboard. Client-side only; matches
+      // first+last+email with case-insensitive substring. De-prioritizes
+      // rejected candidates so active pipeline shows first.
+      runSearch: function () {
+        var q = (this.searchQuery || '').trim().toLowerCase();
+        if (!q) { this.searchResults = []; this.searchOpen = false; return; }
+        var hits = [];
+        for (var i = 0; i < this.allCandidates.length && hits.length < 40; i++) {
+          var c = this.allCandidates[i];
+          var hay = ((c.first_name || '') + ' ' + (c.last_name || '') + ' ' + (c.email || '')).toLowerCase();
+          if (hay.indexOf(q) !== -1) hits.push(c);
+        }
+        hits.sort(function (a, b) {
+          var ra = a.status === 'Rejected' ? 1 : 0;
+          var rb = b.status === 'Rejected' ? 1 : 0;
+          if (ra !== rb) return ra - rb;
+          return (a.last_name || '').localeCompare(b.last_name || '');
+        });
+        this.searchResults = hits.slice(0, 8);
+        this.searchOpen = this.searchResults.length > 0;
+      },
+      clearSearch: function () {
+        this.searchQuery = '';
+        this.searchResults = [];
+        this.searchOpen = false;
+      },
+      selectSearchResult: function (id) {
+        this.clearSearch();
+        this.openPeek(id);
+      },
+
       // ── Expiry helpers ────────────────────────────────────
       isExpired: function (d) { return d && new Date(d).getTime() < Date.now(); },
       isExpiringSoon: function (d) {
@@ -2326,13 +2918,16 @@ document.addEventListener('alpine:init', function () {
       //  on the funnel rows themselves.)
 
       // ── Chart rendering ──────────────────────────────────
-      // Source donut renders inside the always-visible Sourcing ROI section,
-      // so it MUST run regardless of showAnalytics. The funnel/trend/stage
-      // charts only matter when the collapsible Analytics card is open.
+      // Analytics now has two views:
+      //   - historical: funnel/trend/stage tables
+      //   - source: sourcing ROI donut + table
+      // Only render charts for the active view.
       renderCharts: function () {
-        // Draw only visible sections so hidden panels don't consume paint/CPU.
-        if (this.showSources) this.renderSourceChart();
         if (!this.showAnalytics) return;
+        if (this.analyticsView === 'source') {
+          this.renderSourceChart();
+          return;
+        }
         this.renderFunnelChart();
         this.renderTrendChart();
       },
@@ -2351,13 +2946,25 @@ document.addEventListener('alpine:init', function () {
         }));
         if (funnelChart && sig === lastFunnelChartSig) return;
         lastFunnelChartSig = sig;
-        if (funnelChart) funnelChart.destroy();
+        var labels = f.map(function (x) { return x.stage_name; });
+        var data   = f.map(function (x) { return x.conversion_rate; });
+        // Update in place when the chart already exists — Chart.js morphs
+        // bars to their new heights via its animation instead of the
+        // destroy + re-create path, which produces a visible flash of an
+        // empty canvas (~30-80ms) on every filter change. First render
+        // still uses new Chart(); subsequent renders use .update().
+        if (funnelChart) {
+          funnelChart.data.labels = labels;
+          funnelChart.data.datasets[0].data = data;
+          funnelChart.update();
+          return;
+        }
         funnelChart = new Chart(el, {
           type: 'bar',
           data: {
-            labels: f.map(function (x) { return x.stage_name; }),
+            labels: labels,
             datasets: [{
-              data: f.map(function (x) { return x.conversion_rate; }),
+              data: data,
               backgroundColor: 'rgba(242,131,31,0.75)',
               borderColor: '#F2831F', borderWidth: 1, borderRadius: 4,
             }],
@@ -2377,7 +2984,7 @@ document.addEventListener('alpine:init', function () {
       },
 
       renderSourceChart: function () {
-        if (!this.showSources) return;
+        if (!this.showAnalytics || this.analyticsView !== 'source') return;
         var el = document.getElementById('sourceDonutChart');
         if (!el) return;
         // Promoted out of the collapsed analytics object — sourceEffectiveness
@@ -2389,16 +2996,28 @@ document.addEventListener('alpine:init', function () {
         }));
         if (sourceChart && sig === lastSourceChartSig) return;
         lastSourceChartSig = sig;
-        if (sourceChart) sourceChart.destroy();
         // TPG orange leads, then diverse accents for additional sources
         var colors = ['#F2831F','#239ED8','#3AA76D','#8E5DC9','#E14B4B','#1A1A2E'];
+        var labels = s.map(function (x) { return x.source_name; });
+        var data   = s.map(function (x) { return x.total_candidates; });
+        var bgs    = s.map(function (_, i) { return colors[i % colors.length]; });
+        // Update-in-place — crucial for donut where legend flicker on
+        // re-create is the jarring bit (donut labels rebuild their row
+        // of color dots). `.update()` just morphs slice angles.
+        if (sourceChart) {
+          sourceChart.data.labels = labels;
+          sourceChart.data.datasets[0].data = data;
+          sourceChart.data.datasets[0].backgroundColor = bgs;
+          sourceChart.update();
+          return;
+        }
         sourceChart = new Chart(el, {
           type: 'doughnut',
           data: {
-            labels: s.map(function (x) { return x.source_name; }),
+            labels: labels,
             datasets: [{
-              data: s.map(function (x) { return x.total_candidates; }),
-              backgroundColor: s.map(function (_, i) { return colors[i % colors.length]; }),
+              data: data,
+              backgroundColor: bgs,
               borderColor: '#fff', borderWidth: 2,
             }],
           },
@@ -2415,13 +3034,20 @@ document.addEventListener('alpine:init', function () {
         }));
         if (trendChart && sig === lastTrendChartSig) return;
         lastTrendChartSig = sig;
-        if (trendChart) trendChart.destroy();
+        var labels = t.map(function (x) { return x.month_label; });
+        var data   = t.map(function (x) { return x.avg_days_to_hire; });
+        if (trendChart) {
+          trendChart.data.labels = labels;
+          trendChart.data.datasets[0].data = data;
+          trendChart.update();
+          return;
+        }
         trendChart = new Chart(el, {
           type: 'line',
           data: {
-            labels: t.map(function (x) { return x.month_label; }),
+            labels: labels,
             datasets: [{
-              data: t.map(function (x) { return x.avg_days_to_hire; }),
+              data: data,
               borderColor: '#F2831F', backgroundColor: 'rgba(242,131,31,0.1)',
               fill: true, tension: 0.35, pointRadius: 4,
             }],
@@ -2526,6 +3152,14 @@ document.addEventListener('alpine:init', function () {
             // earned because we're actually reloading data. Wrapped in
             // the same try/finally as before so a mid-reload throw
             // doesn't leave the icon spinning forever.
+            //
+            // Also invalidate the per-section response caches. Without
+            // this, a teammate's change would show up on the funnel
+            // (which reads live allCandidates) but NOT on the cached
+            // waterfall/source/analytics sections \u2014 creating a silent
+            // inconsistency between what different parts of the page
+            // show for the same data.
+            self._clearSectionCaches();
             try {
               self.syncing = true;
               // Snapshot scroll BEFORE the silent reload so we can restore
@@ -2683,17 +3317,41 @@ document.addEventListener('alpine:init', function () {
         syncFromCandidate(this.$store.app.peek.candidate);
 
         // Kick off presence tracking — ping every 15s, immediately on open.
-        // When peek unmounts (candidateId goes null), the interval is cleared.
+        // When peek unmounts (candidateId goes null) OR the tab goes hidden,
+        // the interval is cleared so we don't keep pinging the server from
+        // backgrounded tabs (the previous setInterval ran 4×/min on every
+        // hidden peek panel — useless touchPresence + getPresence calls
+        // burning the script's daily quota).
         var self = this;
+        function stopPresence() {
+          if (presenceTimer) { clearInterval(presenceTimer); presenceTimer = null; }
+        }
         function startPresence() {
-          if (presenceTimer) clearInterval(presenceTimer);
+          stopPresence();
+          if (document.hidden) return;   // wait for visibilitychange to start
           self._presenceTick();
-          presenceTimer = setInterval(function () { self._presenceTick(); }, 15000);
+          presenceTimer = setInterval(function () {
+            // Belt-and-suspenders: the visibilitychange handler stops the
+            // interval, but if the user backgrounds AND foregrounds in the
+            // same animation frame we want each tick to no-op safely too.
+            if (document.hidden) return;
+            self._presenceTick();
+          }, 15000);
         }
         this.$watch('$store.app.peek.candidateId', function (id) {
           if (id) startPresence();
-          else if (presenceTimer) { clearInterval(presenceTimer); presenceTimer = null; self.otherViewers = []; }
+          else { stopPresence(); self.otherViewers = []; }
         });
+        // NOTE: an earlier revision installed a document-level
+        // 'visibilitychange' listener here to pause/resume the interval
+        // when the tab was hidden. That leaked one listener per peek
+        // open: peekComponent re-mounts each time x-if flips, but
+        // `document` outlives the component and the cleanup never ran.
+        // The savings were minor anyway — the interval body already
+        // short-circuits when document.hidden is true (see startPresence
+        // above), so no RPC fires on a hidden tab. Listener removed
+        // entirely. Worst-case staleness on tab resume: one 15s tick
+        // before viewer list refreshes.
         if (this.$store.app.peek.candidateId) startPresence();
       },
 
@@ -2708,16 +3366,26 @@ document.addEventListener('alpine:init', function () {
         var expected = this.$store.app.peek.candidate
           ? this.$store.app.peek.candidate.date_last_stage_update
           : null;
+        // Optimistic local stage update — matches saveField's pattern so
+        // the peek panel's stage chip flips immediately without waiting
+        // for the ~400ms round-trip. Background refresh pulls in the
+        // updated history and denormalized fields.
+        if (this.$store.app.peek.candidate) {
+          this.$store.app.peek.candidate.stage_id = newStage;
+        }
         this.anySaving = true;
         try {
           await gasCall('updateCandidateStage', id, newStage, expected);
-          var r = await gasCall('getCandidateDetail', id);
-          this.$store.app.peek.candidate = r.candidate;
-          this.$store.app.peek.history = r.history;
-          var root = Alpine.$data(document.querySelector('#app'));
-          if (root && root.refreshCandidate) await root.refreshCandidate(id);
           this._markSaved();
-          this.$store.app.toastSuccess('Stage updated.');
+          // Single background re-hydrate — refreshCandidate keeps the peek
+          // panel in sync (see refreshCandidate at app.js.html ~line 2411,
+          // which mirrors candidate + history into the peek store when open).
+          // Previously this fired both getCandidateDetail directly AND
+          // refreshCandidate, doubling the round trip per save for no gain.
+          var root = Alpine.$data(document.querySelector('#app'));
+          if (root && root.refreshCandidate) {
+            root.refreshCandidate(id).catch(function () {});
+          }
         } catch (e) {
           this._handleSaveError(e, 'Stage update failed: ', id);
         } finally {
@@ -2766,16 +3434,27 @@ document.addEventListener('alpine:init', function () {
         var expected = this.$store.app.peek.candidate
           ? this.$store.app.peek.candidate.date_last_stage_update
           : null;
+        // Optimistic local update so the peek panel reflects the change
+        // immediately. Previously this function made THREE sequential
+        // server round-trips (updateCandidate + getCandidateDetail +
+        // refreshCandidate) before the UI settled — the source of the
+        // ~1.5s lag Daniel reported when picking a recruiter/source/motion.
+        if (this.$store.app.peek.candidate) {
+          this.$store.app.peek.candidate[field] = value;
+        }
         this.anySaving = true;
         try {
           var updates = {}; updates[field] = value;
           await gasCall('updateCandidate', id, updates, expected);
-          var r = await gasCall('getCandidateDetail', id);
-          this.$store.app.peek.candidate = r.candidate;
-          var root = Alpine.$data(document.querySelector('#app'));
-          if (root && root.refreshCandidate) await root.refreshCandidate(id);
           this._markSaved();
-          this.$store.app.toastSuccess('Saved.');
+          // Single background re-hydrate via the root component. Previously
+          // this fired BOTH getCandidateDetail directly AND refreshCandidate
+          // (which itself calls getCandidateDetail), doubling the round trip
+          // per save. refreshCandidate already keeps peek in sync when open.
+          var root = Alpine.$data(document.querySelector('#app'));
+          if (root && root.refreshCandidate) {
+            root.refreshCandidate(id).catch(function () {});
+          }
         } catch (e) {
           this._handleSaveError(e, 'Save failed: ', id);
         } finally {
@@ -2835,7 +3514,7 @@ document.addEventListener('alpine:init', function () {
        * Downside: closing the tab before 5s elapses with a Pending delete
        * preserves the candidate (safe fallback).
        */
-      confirmDelete: function () {
+      confirmDelete: async function () {
         var name = this.peekName();
         var id = this.$store.app.peek.candidateId;
         var root = Alpine.$data(document.querySelector('#app'));
@@ -2846,15 +3525,19 @@ document.addEventListener('alpine:init', function () {
         // now have icons + clarifying labels, but Delete also gets a final
         // confirm so muscle-memory-clicking can't nuke a record. The 5s
         // undo toast that follows is a second safety net.
-        var ok = window.confirm(
-          'Permanently delete ' + name + '?\n\n' +
-          'This removes the candidate from every view in the app. Their stage ' +
-          'history stays on the history sheet for audit, but they will not appear ' +
-          'in the funnel, exports, or recruiter performance again.\n\n' +
-          'If you just want to mark them as not-a-fit, use REJECT instead — that ' +
-          'keeps the record visible for reporting.\n\n' +
-          'Click OK to continue with the permanent delete (you will have 5 seconds to undo).'
-        );
+        var ok = await this.$store.app.confirm({
+          title:        'Permanently delete ' + name + '?',
+          message:
+            'This removes the candidate from every view in the app. Their stage history ' +
+            'stays on the history sheet for audit, but they will not appear in the funnel, ' +
+            'exports, or recruiter performance again.\n\n' +
+            'If you just want to mark them as not-a-fit, use Reject instead — that keeps ' +
+            'the record visible for reporting.\n\n' +
+            'You will have 5 seconds to undo from the toast.',
+          confirmLabel: 'Delete permanently',
+          cancelLabel:  'Keep candidate',
+          danger:       true,
+        });
         if (!ok) return;
 
         // Capture the candidate object + its position in the list so Undo can restore
@@ -2899,31 +3582,191 @@ document.addEventListener('alpine:init', function () {
       tab: 'recruiters',
       saving: false,
       stages: [], sources: [], regions: [], recruiters: [], refuseReasons: [],
+      // Working copy of waterfall benchmarks keyed as (stageId + ':' + jobId) → pct.
+      // jobId === 0 is the default row that applies to every job. jobId > 0
+      // is an override for that specific job. Flat lookup makes the matrix
+      // editor's getter/setter trivially O(1).
+      benchMap: {},
+      // Waterfall Goals tab scope: which job's override column is shown.
+      // Empty = no job selected yet (default column still editable).
+      selectedGoalJobId: '',
+      // Goal-cell deep-link flash target — set by a waterfall Goal click,
+      // consumed by the matrix tab to highlight the corresponding stage row.
+      flashStage: null,
 
       init: function () {
         this.reload('stages'); this.reload('sources'); this.reload('regions');
         this.reload('recruiters'); this.reload('refuseReasons');
+        this.reload('benchmarks');
         this.$store.app.settingsDirty = false;
+        // Deep-link: respect a pre-selected tab from the waterfall Goal-click.
+        if (this.$store.app.settingsTab) {
+          this.tab = this.$store.app.settingsTab;
+          this.$store.app.settingsTab = null;
+        }
+        if (this.$store.app.settingsGoalJobId != null) {
+          this.selectedGoalJobId = String(this.$store.app.settingsGoalJobId);
+          this.$store.app.settingsGoalJobId = null;
+        }
+        if (this.$store.app.settingsFlashStage) {
+          var targetStage = this.$store.app.settingsFlashStage;
+          this.$store.app.settingsFlashStage = null;
+          this.flashStage = targetStage;
+          var self = this;
+          setTimeout(function () {
+            var el = document.querySelector(
+              '.goals-matrix tr[data-stage-id="' + targetStage + '"], ' +
+              '.settings-stages-row[data-stage-id="' + targetStage + '"]'
+            );
+            if (el) el.scrollIntoView({ behavior: 'smooth', block: 'center' });
+            setTimeout(function () { self.flashStage = null; }, 1400);
+          }, 250);
+        }
         var self = this;
-        ['stages', 'sources', 'regions', 'recruiters', 'refuseReasons'].forEach(function (k) {
+        ['stages', 'sources', 'regions', 'recruiters', 'refuseReasons', 'benchMap'].forEach(function (k) {
           self.$watch(k, function () { self.$store.app.settingsDirty = true; }, { deep: true });
         });
+        this.ensureGoalJobSelection();
       },
 
       reload: function (kind) {
-        var map = {
+        if (kind === 'benchmarks') {
+          var list = (this.$store.app.settings.waterfallBenchmarks || []);
+          var map = {};
+          for (var i = 0; i < list.length; i++) {
+            var row = list[i];
+            // Accept either legacy role_tier entries (ignore them here,
+            // they're treated as job_id=0 via a fallback on the server)
+            // or the new job_id shape. Skip malformed rows.
+            var jid = (row.job_id != null) ? Number(row.job_id) : 0;
+            if (!isFinite(jid) || jid < 0) continue;
+            map[row.stage_id + ':' + jid] = row.benchmark_pct;
+          }
+          this.benchMap = map;
+          this.ensureGoalJobSelection();
+          this.$store.app.settingsDirty = false;
+          return;
+        }
+        var nameMap = {
           stages: 'stages', sources: 'sources', regions: 'regions',
           recruiters: 'recruiters', refuseReasons: 'refuseReasons',
         };
-        this[map[kind]] = clone(this.$store.app.settings[map[kind]] || []);
+        this[nameMap[kind]] = clone(this.$store.app.settings[nameMap[kind]] || []);
+        if (kind === 'stages') this.ensureGoalJobSelection();
         this.$store.app.settingsDirty = false;
+      },
+      ensureGoalJobSelection: function () {
+        var jobs = this.allJobsForGoals();
+        if (!jobs.length) {
+          this.selectedGoalJobId = '';
+          return;
+        }
+        if (this.selectedGoalJobId) {
+          var current = Number(this.selectedGoalJobId);
+          var found = jobs.some(function (j) { return Number(j.id) === current; });
+          if (found) return;
+        }
+        var firstOpen = jobs.find(function (j) { return j.status === 'Open'; });
+        this.selectedGoalJobId = String((firstOpen || jobs[0]).id);
+      },
+
+      // --- Legacy per-stage benchmark input on the Stages tab ---
+      // Bound to the DEFAULT row (job_id = 0). Separate editor in the
+      // Waterfall Goals tab handles per-job overrides.
+      benchForStage: function (stageId) {
+        var v = this.benchMap[stageId + ':0'];
+        return (v == null) ? '' : v;
+      },
+      setBenchForStage: function (stageId, raw) {
+        this.setGoal(stageId, 0, raw);
+      },
+
+      // --- Waterfall Goals matrix helpers ---
+      // Stages to show as rows (skip the first — no prior stage to convert
+      // from — and any rejected stages).
+      goalStages: function () {
+        var enabled = (this.stages || [])
+          .filter(function (s) { return s.is_enabled && !s.is_rejected; })
+          .slice()
+          .sort(function (a, b) { return (a.sequence || 0) - (b.sequence || 0); });
+        return enabled.slice(1);
+      },
+      // All jobs for the Goals tab dropdown (open first, then closed).
+      allJobsForGoals: function () {
+        var root = Alpine.$data(document.querySelector('#app'));
+        var all = (root && root.jobs) ? root.jobs : [];
+        return all.slice().sort(function (a, b) {
+          var aOpen = (a.status === 'Open') ? 0 : 1;
+          var bOpen = (b.status === 'Open') ? 0 : 1;
+          if (aOpen !== bOpen) return aOpen - bOpen;
+          return String(a.title || '').localeCompare(String(b.title || ''));
+        });
+      },
+      goalJobTitle: function () {
+        var id = Number(this.selectedGoalJobId || 0);
+        if (!id) return 'Select job';
+        var jobs = this.allJobsForGoals();
+        for (var i = 0; i < jobs.length; i++) {
+          if (Number(jobs[i].id) === id) return jobs[i].title || ('Job #' + id);
+        }
+        return 'Select job';
+      },
+      goalSelectOptions: function (current) {
+        var opts = [0,10,20,30,40,50,60,70,80,90,100];
+        var n = Number(current);
+        if (current !== '' && isFinite(n) && opts.indexOf(n) === -1) opts.push(n);
+        opts.sort(function (a, b) { return a - b; });
+        return opts.map(function (v) {
+          return { value: String(v), label: v + '%' };
+        });
+      },
+      // Cell getter — blank when unset.
+      goalFor: function (stageId, jobId) {
+        var v = this.benchMap[stageId + ':' + (jobId || 0)];
+        return (v == null) ? '' : v;
+      },
+      // Cell setter — empty string removes the entry (fall back to default).
+      setGoal: function (stageId, jobId, raw) {
+        var key = stageId + ':' + (jobId || 0);
+        var copy = Object.assign({}, this.benchMap);
+        if (raw === '' || raw == null || raw === '__default__' || raw === '__none__') {
+          delete copy[key];
+        } else {
+          var n = Number(raw);
+          if (!isFinite(n)) return;
+          if (n < 0) n = 0;
+          if (n > 100) n = 100;
+          copy[key] = n;
+        }
+        this.benchMap = copy;
+      },
+      defaultGoalValue: function (stageId) {
+        var v = this.goalFor(stageId, 0);
+        return (v === '') ? '__none__' : String(v);
+      },
+      setDefaultGoal: function (stageId, raw) {
+        this.setGoal(stageId, 0, raw);
+      },
+      selectedGoalFor: function (stageId) {
+        var jid = Number(this.selectedGoalJobId || 0);
+        if (!jid) return '';
+        return this.goalFor(stageId, jid);
+      },
+      selectedGoalValue: function (stageId) {
+        var v = this.selectedGoalFor(stageId);
+        return (v === '') ? '__default__' : String(v);
+      },
+      setSelectedGoal: function (stageId, raw) {
+        var jid = Number(this.selectedGoalJobId || 0);
+        if (!jid) return;
+        this.setGoal(stageId, jid, raw);
       },
 
       removeRow: function (kind, idx) { this[kind].splice(idx, 1); },
 
       addStage: function () {
         var maxSeq = this.stages.reduce(function (m, s) { return Math.max(m, s.sequence || 0); }, 0);
-        this.stages.push({ id: 0, name: '', sequence: maxSeq + 100, color: '#607d8b', is_hired: false, is_rejected: false, is_offer: false, target_hours: null, is_enabled: true });
+        this.stages.push({ id: 0, name: '', sequence: maxSeq + 100, color: '#607d8b', is_hired: false, is_rejected: false, is_offer: false, target_hours: null, is_enabled: true, benchmark_pct: null });
       },
       addRecruiter: function () { this.recruiters.push({ id: 0, name: '', email: '', is_active: true }); },
       addSource: function () { this.sources.push({ id: 0, name: '', medium: '', default_motion: 'Inbound', is_enabled: true }); },
@@ -2932,6 +3775,41 @@ document.addEventListener('alpine:init', function () {
 
       save: async function (kind) {
         var self = this;
+        // Dedicated save branch for the Waterfall Goals matrix tab.
+        // Flattens benchMap → WaterfallBenchmarkRow[] and writes. Doesn't
+        // touch stages; benchmarks are now decoupled from stage saves.
+        if (kind === 'goals') {
+          this.saving = true;
+          try {
+            var bRows = [];
+            var bMap = this.benchMap || {};
+            for (var k in bMap) {
+              if (!Object.prototype.hasOwnProperty.call(bMap, k)) continue;
+              var parts = k.split(':');
+              if (parts.length !== 2) continue;
+              var sid = parseInt(parts[0], 10);
+              var jid = parseInt(parts[1], 10);
+              var pct = Number(bMap[k]);
+              if (!sid || !isFinite(jid) || jid < 0 || !isFinite(pct)) continue;
+              bRows.push({ id: 0, stage_id: sid, job_id: jid, benchmark_pct: pct });
+            }
+            await gasCall('saveWaterfallBenchmarks', bRows);
+            var fresh = await gasCall('getSettings');
+            this.$store.app.settings.waterfallBenchmarks = fresh.waterfallBenchmarks || [];
+            this.reload('benchmarks');
+            var root = Alpine.$data(document.querySelector('#app'));
+            if (root) {
+              root.settings.waterfallBenchmarks = fresh.waterfallBenchmarks || [];
+              if (root.reloadWaterfall) root.reloadWaterfall();
+            }
+            this.$store.app.settingsDirty = false;
+            this.$store.app.toastSuccess('Goals saved.');
+          } catch (e) {
+            this.$store.app.toastError(userFacingError(e, 'Save failed.', 'Try again.'));
+          } finally { this.saving = false; }
+          return;
+        }
+
         var map = {
           stages: { local: 'stages', gas: 'saveStages' },
           sources: { local: 'sources', gas: 'saveSources' },
@@ -2962,6 +3840,25 @@ document.addEventListener('alpine:init', function () {
         this.saving = true;
         try {
           await gasCall(conf.gas, rows);
+          // Stages save also persists the benchmark matrix alongside —
+          // keyed by (stage_id, job_id). jobId=0 is the default row.
+          // Preserves per-job overrides the user set on the Goals tab
+          // since those are also in benchMap.
+          if (kind === 'stages') {
+            var bRows = [];
+            var bMap = this.benchMap || {};
+            for (var k in bMap) {
+              if (!Object.prototype.hasOwnProperty.call(bMap, k)) continue;
+              var parts = k.split(':');
+              if (parts.length !== 2) continue;
+              var sid = parseInt(parts[0], 10);
+              var jid = parseInt(parts[1], 10);
+              var pct = Number(bMap[k]);
+              if (!sid || !isFinite(jid) || jid < 0 || !isFinite(pct)) continue;
+              bRows.push({ id: 0, stage_id: sid, job_id: jid, benchmark_pct: pct });
+            }
+            await gasCall('saveWaterfallBenchmarks', bRows);
+          }
           // Reload from server so local copy has real IDs (fixes C5)
           var fresh = await gasCall('getSettings');
           // IMPORTANT: MUTATE the store's settings object in place instead of
@@ -2970,23 +3867,29 @@ document.addEventListener('alpine:init', function () {
           // modal's recruiter dropdown, the topbar Recruiter filter, the
           // Kanban stage columns) and they keep rendering the old values.
           var s = this.$store.app.settings;
-          s.stages        = fresh.stages;
-          s.sources       = fresh.sources;
-          s.regions       = fresh.regions;
-          s.recruiters    = fresh.recruiters;
-          s.refuseReasons = fresh.refuseReasons;
+          s.stages              = fresh.stages;
+          s.sources             = fresh.sources;
+          s.regions             = fresh.regions;
+          s.recruiters          = fresh.recruiters;
+          s.refuseReasons       = fresh.refuseReasons;
+          s.waterfallBenchmarks = fresh.waterfallBenchmarks || [];
           this.reload(kind);
+          if (kind === 'stages') this.reload('benchmarks');
           // Notify main app — also mutate its local `settings` in place
           // so its own bindings (topbar filter, Kanban stage columns)
           // refresh without re-initialization.
           var root = Alpine.$data(document.querySelector('#app'));
           if (root) {
-            root.settings.stages        = fresh.stages;
-            root.settings.sources       = fresh.sources;
-            root.settings.regions       = fresh.regions;
-            root.settings.recruiters    = fresh.recruiters;
-            root.settings.refuseReasons = fresh.refuseReasons;
+            root.settings.stages              = fresh.stages;
+            root.settings.sources             = fresh.sources;
+            root.settings.regions             = fresh.regions;
+            root.settings.recruiters          = fresh.recruiters;
+            root.settings.refuseReasons       = fresh.refuseReasons;
+            root.settings.waterfallBenchmarks = fresh.waterfallBenchmarks || [];
             root.loadCandidates();
+            // Waterfall reads benchmarks server-side via getWaterfallMetrics
+            // so the next reload will pick up the fresh targets immediately.
+            if (root.reloadWaterfall) root.reloadWaterfall();
           }
           this.$store.app.settingsDirty = false;
           this.$store.app.toastSuccess('Saved.');
